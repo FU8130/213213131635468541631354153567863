@@ -43,6 +43,7 @@ const labels: Record<string, string> = {
   modelProviderName: 'Provider name',
   modelProviderId: 'Provider ID',
   modelProviderApiKey: 'Provider API key',
+  modelProviderApiKeyPlaceholder: 'Enter provider API key',
   modelProviderBaseUrl: 'Provider base URL',
   modelProviderEndpointFormat: 'Endpoint format',
   modelProviderFetchEmpty: 'No models found',
@@ -495,6 +496,8 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
     expect(html).toContain('Endpoint format')
     expect(html).toContain('<option value="messages" selected="">/v1/messages</option>')
     expect(html).toContain('<option value="custom_endpoint">Custom full endpoint</option>')
+    expect(html).toContain('Enter provider API key')
+    expect(html).not.toContain('Inherit API key')
     expect(html).toContain('Add provider')
     expect(html).toContain('Test connection')
     expect(html).toContain('Fetch from API')

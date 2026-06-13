@@ -1,7 +1,6 @@
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   type ClawImProvider,
-  type ClawModel,
   type ClawRunMode,
   type ScheduleKind,
   type ScheduleModel,
@@ -46,16 +45,18 @@ export function normalizeImProvider(value: unknown): ClawImProvider {
   return value === 'weixin' ? 'weixin' : 'feishu'
 }
 
-export function normalizeClawModel(value: unknown): ClawModel {
-  return value === 'deepseek-v4-pro' || value === 'deepseek-v4-flash' ? value : 'auto'
+export function normalizeClawModel(value: unknown): string {
+  if (typeof value !== 'string') return 'auto'
+  const trimmed = value.trim()
+  return trimmed || 'auto'
 }
 
 export function normalizeScheduleModel(value: unknown): ScheduleModel {
-  return normalizeClawModel(value)
+  return value === 'deepseek-v4-pro' ? 'deepseek-v4-pro' : 'deepseek-v4-flash'
 }
 
 export function normalizeScheduleReasoningEffort(value: unknown): ScheduleReasoningEffort {
-  if (value === 'off' || value === 'low' || value === 'medium' || value === 'high' || value === 'max') return value
+  if (value === 'auto' || value === 'off' || value === 'low' || value === 'medium' || value === 'high' || value === 'max') return value
   return 'medium'
 }
 

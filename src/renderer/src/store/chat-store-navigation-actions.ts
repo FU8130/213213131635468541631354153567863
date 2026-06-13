@@ -25,7 +25,6 @@ import { buildClawRuntimePrompt, getActiveAgentApiKey } from '@shared/app-settin
 import type { ChatState, ChatStoreGet, ChatStoreSet } from './chat-store-types'
 import {
   activeClawChannel,
-  compactCodeWorkspaceRoots,
   forgetCodeWorkspaceRoot,
   hydrateBlockModelLabels,
   isClawThread,
@@ -33,14 +32,15 @@ import {
   readCodeWorkspaceRoots,
   readStoredComposerModel,
   rememberCodeWorkspaceRoots,
-  rememberTurnModel
+  rememberTurnModel,
+  reconcileCodeWorkspaceRoots,
+  saveCodeWorkspaceRoots
 } from './chat-store-helpers'
 import {
   clearedThreadSelection,
   collectAssistantTextForTurn,
   findLatestUserBlockId,
   findReusableEmptyThreadId,
-  hasPendingRuntimeWork,
   reconcileOptimisticUserBlock,
   threadSnapshotLooksRunning,
   threadBelongsToWorkspace
@@ -100,6 +100,7 @@ type StoreActionContext = {
 
 let bootPromise: Promise<void> | null = null
 let clawChannelActivityUnsubscribe: (() => void) | null = null
+let runtimeStatusUnsubscribe: (() => void) | null = null
 
 export function createNavigationActions(
   { set, get, sseAbortRef }: StoreActionContext
@@ -281,16 +282,19 @@ export function createNavigationActions(
     await get().selectThread(targetId)
   },
 
-  probeRuntime: async (mode = 'user') => {
+  probeRuntime: async (mode = 'user', options) => {
     const prev = get().runtimeConnection
     if (mode === 'user') set({ runtimeConnection: 'checking' })
     try {
-      if (typeof window.dsGui === 'undefined') {
+      if (typeof window.kunGui === 'undefined') {
         throw new Error(
-          'Preload bridge missing (window.dsGui). Restart the app or check BrowserWindow preload path.'
+          'Preload bridge missing (window.kunGui). Restart the app or check BrowserWindow preload path.'
         )
       }
       const settings = await rendererRuntimeClient.getSettings({ forceRefresh: true })
+      if (options?.restart) {
+        await rendererRuntimeClient.restartRuntime()
+      }
       const p = getProvider()
       await p.connect()
       set({ runtimeConnection: 'ready', error: null, runtimeErrorDetail: null })
@@ -334,13 +338,13 @@ export function createNavigationActions(
     if (bootPromise) return bootPromise
     bootPromise = (async () => {
       try {
-        if (typeof window.dsGui === 'undefined') {
+        if (typeof window.kunGui === 'undefined') {
           set({
             error: formatRuntimeError(
-              'Preload bridge missing (window.dsGui). Restart the app or check BrowserWindow preload path.'
+              'Preload bridge missing (window.kunGui). Restart the app or check BrowserWindow preload path.'
             ),
             runtimeConnection: 'offline',
-            runtimeErrorDetail: 'Preload bridge missing (window.dsGui). Restart the app or check BrowserWindow preload path.',
+            runtimeErrorDetail: 'Preload bridge missing (window.kunGui). Restart the app or check BrowserWindow preload path.',
             initialSetupOpen: false,
             initialSetupMode: 'required'
           })
@@ -348,16 +352,46 @@ export function createNavigationActions(
         }
         const settings = await rendererRuntimeClient.getSettings({ forceRefresh: true })
         const workspaceRoot = normalizeWorkspaceRoot(settings.workspaceRoot)
-        const codeWorkspaceRoots = rememberCodeWorkspaceRoots(readCodeWorkspaceRoots(), [workspaceRoot])
+        const writeWorkspaceRoots = [
+          settings.write.defaultWorkspaceRoot,
+          settings.write.activeWorkspaceRoot,
+          ...settings.write.workspaces
+        ]
+        const codeWorkspaceRoots = reconcileCodeWorkspaceRoots({
+          currentRoots: readCodeWorkspaceRoots(),
+          codeThreadWorkspaceRoots: [workspaceRoot],
+          writeWorkspaceRoots,
+          preservedWorkspaceRoots: [workspaceRoot]
+        })
+        saveCodeWorkspaceRoots(codeWorkspaceRoots)
         const needsInitialSetup = !getActiveAgentApiKey(settings).trim()
         applyTheme(settings.theme)
         applyUiFontScale(settings.uiFontScale)
         await get().applyI18nFromSettings(settings.locale)
-        if (!clawChannelActivityUnsubscribe && typeof window.dsGui.onClawChannelActivity === 'function') {
-          clawChannelActivityUnsubscribe = window.dsGui.onClawChannelActivity(({ channelId, threadId }) => {
+        if (!runtimeStatusUnsubscribe && typeof window.kunGui.onRuntimeStatus === 'function') {
+          runtimeStatusUnsubscribe = window.kunGui.onRuntimeStatus((status) => {
+            set({ runtimeStatus: status })
+            if (status.state === 'failed' || status.state === 'stopped') {
+              // Terminal states reuse the main error banner, which carries
+              // the full diagnostics UI (details, log path, settings).
+              set({ error: status.message ?? i18n.t('common:runtimeStatusFailed') })
+              void get().probeRuntime('background')
+              return
+            }
+            if (status.state === 'running') {
+              void get().probeRuntime('background')
+              if (status.rolledBack) {
+                // On-disk settings were restored by the rollback; refresh the cache.
+                void rendererRuntimeClient.getSettings({ forceRefresh: true }).catch(() => null)
+              }
+            }
+          })
+        }
+        if (!clawChannelActivityUnsubscribe && typeof window.kunGui.onClawChannelActivity === 'function') {
+          clawChannelActivityUnsubscribe = window.kunGui.onClawChannelActivity(({ channelId, threadId }) => {
             void (async () => {
               const state = get()
-              if (typeof window.dsGui === 'undefined') return
+              if (typeof window.kunGui === 'undefined') return
               const settings = await rendererRuntimeClient.getSettings({ forceRefresh: true })
               const channels = settings.claw.channels
               const activeChannelId = channels.some(
@@ -418,10 +452,10 @@ export function createNavigationActions(
   chooseWorkspace: async ({ createThreadAfter = false, selectThreadAfter = true } = {}) => {
     try {
       const wasWriteRoute = get().route === 'write'
-      if (typeof window.dsGui === 'undefined' || typeof window.dsGui.pickWorkspaceDirectory !== 'function') {
+      if (typeof window.kunGui === 'undefined' || typeof window.kunGui.pickWorkspaceDirectory !== 'function') {
         throw new Error(i18n.t('common:workspacePickerUnavailable'))
       }
-      const picked = await window.dsGui.pickWorkspaceDirectory(get().workspaceRoot || undefined)
+      const picked = await window.kunGui.pickWorkspaceDirectory(get().workspaceRoot || undefined)
       if (picked.canceled || !picked.path) {
         if (createThreadAfter) {
           set({ error: i18n.t('common:workspaceRequiredToCreateThread') })
@@ -431,34 +465,6 @@ export function createNavigationActions(
       const next = await rendererRuntimeClient.setSettings({ workspaceRoot: picked.path })
       const workspaceRoot = normalizeWorkspaceRoot(next.workspaceRoot)
       const codeWorkspaceRoots = rememberCodeWorkspaceRoots(get().codeWorkspaceRoots, [workspaceRoot])
-
-      // Update the active thread's workspace so the current session
-      // moves to the newly picked directory instead of creating a
-      // new thread or switching away. Only treat the thread as moved
-      // when the PATCH actually succeeds — otherwise we must fall
-      // through to the fallback selection below, or the global
-      // workspaceRoot and the active thread would diverge.
-      const activeThreadId = get().activeThreadId
-      let movedActiveThread = false
-      if (activeThreadId && workspaceRoot) {
-        const p = getProvider()
-        if (typeof p.updateThreadWorkspace === 'function') {
-          try {
-            await p.updateThreadWorkspace(activeThreadId, workspaceRoot)
-            // Update the local threads list so the sidebar shows the
-            // thread under the new workspace immediately.
-            set((s) => ({
-              threads: s.threads.map((thread) =>
-                thread.id === activeThreadId ? { ...thread, workspace: workspaceRoot } : thread
-              )
-            }))
-            movedActiveThread = true
-          } catch {
-            // PATCH failed — leave movedActiveThread false so we fall
-            // through to the existing fallback selection below.
-          }
-        }
-      }
 
       set({
         workspaceRoot,
@@ -473,8 +479,6 @@ export function createNavigationActions(
           await get().openWrite()
           return workspaceRoot
         }
-        // If we successfully moved the active thread, stay on it.
-        if (movedActiveThread) return workspaceRoot
         const workspaceThreads = get().threads
           .filter((thread) => isCodeThread(thread, get().clawChannels))
           .filter((thread) => threadBelongsToWorkspace(thread, workspaceRoot))
@@ -500,7 +504,7 @@ export function createNavigationActions(
 
   clearWorkspace: async () => {
     try {
-      if (typeof window.dsGui === 'undefined' || typeof window.dsGui.setSettings !== 'function') {
+      if (typeof window.kunGui === 'undefined' || typeof window.kunGui.setSettings !== 'function') {
         return
       }
       const next = await rendererRuntimeClient.setSettings({ workspaceRoot: '' })
@@ -562,7 +566,7 @@ export function createNavigationActions(
       // If the deleted workspace is the current workspaceRoot, clear it.
       if (normalizeWorkspaceRoot(get().workspaceRoot) === normalizedPath) {
         try {
-          if (typeof window.dsGui?.setSettings === 'function') {
+          if (typeof window.kunGui?.setSettings === 'function') {
             const next = await rendererRuntimeClient.setSettings({ workspaceRoot: '' })
             set({
               workspaceRoot: normalizeWorkspaceRoot(next.workspaceRoot),
@@ -601,12 +605,6 @@ export function createNavigationActions(
         workspace: normalizeWorkspaceRoot(thread.workspace)
       }))
       const sddThreadRegistry = readSddThreadRegistry()
-      const codeWorkspaceRoots = rememberCodeWorkspaceRoots(
-        get().codeWorkspaceRoots,
-        threads
-          .filter((thread) => isCodeThread(thread, get().clawChannels))
-          .map((thread) => thread.workspace)
-      )
       const sidebarThreads = (await filterThreadsForSidebar(threads, p))
         .filter((thread) => !isSddAssistantThread(thread, sddThreadRegistry))
       const forkRegistry = hydrateThreadForkRegistry(sidebarThreads, readThreadForkRegistry())
@@ -663,6 +661,19 @@ export function createNavigationActions(
         const writeWorkspace = writeWorkspaceForThreadId(thread.id, writeRegistry)
         return writeWorkspace ? { ...thread, workspace: writeWorkspace } : thread
       })
+      const codeThreadWorkspaceRoots = [
+        ...threads,
+        ...displayThreads
+      ]
+        .filter((thread) => isCodeThread(thread, get().clawChannels, writeRegistry))
+        .map((thread) => thread.workspace)
+      const codeWorkspaceRoots = reconcileCodeWorkspaceRoots({
+        currentRoots: get().codeWorkspaceRoots,
+        codeThreadWorkspaceRoots,
+        writeWorkspaceRoots,
+        preservedWorkspaceRoots: [get().workspaceRoot]
+      })
+      saveCodeWorkspaceRoots(codeWorkspaceRoots)
       const activeThreadId = get().activeThreadId
       const activeThread = activeThreadId
         ? displayThreads.find((thread) => thread.id === activeThreadId) ?? null
@@ -694,12 +705,7 @@ export function createNavigationActions(
         }
         return {
           threads: displayThreads,
-          codeWorkspaceRoots: compactCodeWorkspaceRoots([
-            ...displayThreads
-              .filter((thread) => isCodeThread(thread, s.clawChannels))
-              .map((thread) => thread.workspace),
-            ...codeWorkspaceRoots
-          ]),
+          codeWorkspaceRoots,
           watchTurnCompletion: w,
           unreadThreadIds: u,
           ...(shouldClearSelection ? clearedThreadSelection() : {})

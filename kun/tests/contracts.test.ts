@@ -121,6 +121,25 @@ describe('contracts', () => {
     expect(parsed.reasoningEffort).toBe('max')
   })
 
+  it('accepts per-turn execution policy on start turn payloads', () => {
+    const parsed = StartTurnRequest.parse({
+      prompt: 'Inspect without changing files',
+      approvalPolicy: 'on-request',
+      sandboxMode: 'read-only'
+    })
+    expect(parsed.approvalPolicy).toBe('on-request')
+    expect(parsed.sandboxMode).toBe('read-only')
+  })
+
+  it('accepts the IM/headless disableUserInput flag on start turn payloads', () => {
+    const parsed = StartTurnRequest.parse({
+      prompt: 'Reply to the WeChat user',
+      disableUserInput: true
+    })
+    expect(parsed.disableUserInput).toBe(true)
+    expect(StartTurnRequest.parse({ prompt: 'GUI turn' }).disableUserInput).toBeUndefined()
+  })
+
   it('accepts turn failure lifecycle messages', () => {
     const event = RuntimeEvent.parse({
       kind: 'turn_failed',
@@ -476,6 +495,9 @@ describe('cli', () => {
     expect(config.attachments.textFallbackMaxImageDimension).toBe(1280)
     expect(config.attachments.textFallbackPreferredMimeType).toBe('image/webp')
     expect(config.memory.scopes).toEqual(['user', 'workspace', 'project'])
+    expect(config.imageGen.enabled).toBe(false)
+    expect(config.imageGen.timeoutMs).toBe(180_000)
+    expect(config.imageGen.maxReferenceImages).toBe(4)
   })
 
   it('ignores legacy subagent step-limit config fields', () => {
@@ -541,13 +563,16 @@ describe('cli', () => {
     expect(legacy?.hardThreshold).toBe(56_000)
   })
 
-  it('uses 980k as the built-in DeepSeek v4 soft compaction threshold', () => {
+  it('uses 75%/85% of the window as the built-in DeepSeek v4 compaction thresholds', () => {
+    // Compaction must trigger with headroom to spare. Triggering at
+    // 98%/99% left no room for a large turn to land before the window was
+    // exceeded, so the built-in ratios are 0.75 / 0.85 of the 1M window.
     const profile = modelContextProfilesFromConfig()
       .find((candidate) => candidate.canonicalModel === 'deepseek-v4-pro')
 
     expect(profile?.contextWindowTokens).toBe(1_000_000)
-    expect(profile?.softThreshold).toBe(980_000)
-    expect(profile?.hardThreshold).toBe(990_000)
+    expect(profile?.softThreshold).toBe(750_000)
+    expect(profile?.hardThreshold).toBe(850_000)
   })
 
   it('keeps built-in DeepSeek v4 models text-only', () => {
@@ -571,6 +596,8 @@ describe('cli', () => {
     expect(manifest.attachments.textFallbackMaxBase64Bytes).toBe(512 * 1024)
     expect(manifest.attachments.textFallbackMaxImageDimension).toBe(1280)
     expect(manifest.attachments.textFallbackPreferredMimeType).toBe('image/webp')
+    expect(manifest.imageGen.available).toBe(false)
+    expect(manifest.imageGen.reason).toMatch(/disabled/)
 
     const enabledButMissingProvider = buildRuntimeCapabilityManifest({
       model: modelCapabilitiesForModel('deepseek-chat'),

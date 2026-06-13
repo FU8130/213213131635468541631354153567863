@@ -230,7 +230,11 @@ describe('DeepseekCompatModelClient', () => {
     expect(sentBodies[0]).toMatchObject({
       model: 'deepseek-chat',
       max_tokens: 4096,
-      system: 'You are a helpful assistant.',
+      system: [{
+        type: 'text',
+        text: 'You are a helpful assistant.',
+        cache_control: { type: 'ephemeral' }
+      }],
       messages: [],
       tools: [{
         name: 'echo',
@@ -243,6 +247,198 @@ describe('DeepseekCompatModelClient', () => {
       expect.objectContaining({ kind: 'usage', usage: expect.objectContaining({ promptTokens: 4, completionTokens: 2 }) }),
       { kind: 'completed', stopReason: 'stop' }
     ])
+  })
+
+  it('keeps volatile context out of the Anthropic system block and marks cache breakpoints', async () => {
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(JSON.stringify({
+        id: 'msg_2',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      apiKey: 'k',
+      model: 'MiniMax-M2.5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.contextInstructions = ['Tokens used: 4321 — continue the goal.']
+    request.history = [
+      makeUserItem({ id: 'user_1', turnId: 'turn_1', threadId: 'thr_1', text: 'hello' }),
+      makeAssistantTextItem({ id: 'asst_1', turnId: 'turn_1', threadId: 'thr_1', text: 'hi there' }),
+      makeUserItem({ id: 'user_2', turnId: 'turn_2', threadId: 'thr_1', text: 'continue' })
+    ]
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const body = sentBodies[0]
+    // The volatile per-turn instruction must not invalidate the cached
+    // system prefix: it trails the history inside the final user turn.
+    expect(body.system).toEqual([{
+      type: 'text',
+      text: 'You are a helpful assistant.',
+      cache_control: { type: 'ephemeral' }
+    }])
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    const lastMessage = messages[messages.length - 1]
+    expect(lastMessage.role).toBe('user')
+    const lastBlocks = lastMessage.content
+    expect(lastBlocks.some((block) => String(block.text ?? '').includes('Tokens used: 4321'))).toBe(true)
+    // Explicit-cache providers (MiniMax) only cache content before
+    // cache_control breakpoints: the last two messages carry one.
+    expect(lastBlocks[lastBlocks.length - 1].cache_control).toEqual({ type: 'ephemeral' })
+    const previousMessage = messages[messages.length - 2]
+    const previousBlocks = previousMessage.content
+    expect(previousBlocks[previousBlocks.length - 1].cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('enables MiniMax M3 adaptive thinking from a model reasoning profile', async () => {
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(JSON.stringify({
+        id: 'msg_m3',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn'
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true,
+      modelCapabilities: (model) => ({
+        id: model,
+        inputModalities: ['text', 'image'],
+        outputModalities: ['text'],
+        supportsToolCalling: true,
+        contextWindowTokens: 1_000_000,
+        messageParts: ['text', 'image_url'],
+        reasoning: {
+          supportedEfforts: ['auto', 'off'],
+          defaultEffort: 'auto',
+          requestProtocol: 'anthropic-thinking'
+        }
+      })
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    request.reasoningEffort = 'max'
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    expect(sentBodies[0]?.thinking).toEqual({ type: 'adaptive' })
+  })
+
+  it('does not send thinking controls for MiniMax M2.x built-in reasoning profiles', async () => {
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(JSON.stringify({
+        id: 'msg_m25',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn'
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      apiKey: 'k',
+      model: 'MiniMax-M2.5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true,
+      modelCapabilities: (model) => ({
+        id: model,
+        inputModalities: ['text'],
+        outputModalities: ['text'],
+        supportsToolCalling: true,
+        contextWindowTokens: 204_800,
+        messageParts: ['text'],
+        reasoning: {
+          supportedEfforts: ['auto'],
+          defaultEffort: 'auto',
+          requestProtocol: 'none'
+        }
+      })
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M2.5'
+    request.reasoningEffort = 'off'
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    expect(sentBodies[0]).not.toHaveProperty('thinking')
+  })
+
+  it('maps Anthropic usage where input_tokens excludes cache reads and writes', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(JSON.stringify({
+        id: 'msg_3',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 50,
+          output_tokens: 10,
+          cache_read_input_tokens: 1000,
+          cache_creation_input_tokens: 200
+        }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      apiKey: 'k',
+      model: 'MiniMax-M2.5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const chunks: ModelStreamChunk[] = []
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M2.5'
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+    const usageChunk = chunks.find((chunk) => chunk.kind === 'usage')
+    const usage = usageChunk && usageChunk.kind === 'usage' ? usageChunk.usage : null
+    expect(usage).not.toBeNull()
+    expect(usage!.promptTokens).toBe(1250)
+    expect(usage!.cacheHitTokens).toBe(1000)
+    expect(usage!.cacheMissTokens).toBe(250)
+    expect(usage!.totalTokens).toBe(1260)
+    expect(usage!.cacheHitRate).toBeCloseTo(0.8)
+    expect(usage!.costCny).toBeCloseTo(0.000924)
+    expect(usage!.costUsd).toBeUndefined()
   })
 
   it('streams Responses API text and function calls', async () => {
@@ -473,6 +669,7 @@ describe('DeepseekCompatModelClient', () => {
 
   it('requests usage in streaming responses', async () => {
     const sentBodies: Array<Record<string, unknown>> = []
+    const sentHeaders: Array<Record<string, string>> = []
     const encoder = new TextEncoder()
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -483,6 +680,7 @@ describe('DeepseekCompatModelClient', () => {
     })
     const fetchImpl: typeof fetch = async (_url, init) => {
       sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      sentHeaders.push(init?.headers as Record<string, string>)
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
     }
     const client = new DeepseekCompatModelClient({
@@ -500,6 +698,7 @@ describe('DeepseekCompatModelClient', () => {
       stream: true,
       stream_options: { include_usage: true }
     })
+    expect(sentHeaders[0]?.Accept).toBeUndefined()
   })
 
   it('keeps requiredToolName as loop metadata instead of sending provider tool_choice', async () => {
@@ -602,6 +801,57 @@ describe('DeepseekCompatModelClient', () => {
     expect(sentBodies[0]).not.toHaveProperty('thinking')
   })
 
+  it('maps Xiaomi max reasoning to the highest supported Xiaomi effort from model profiles', async () => {
+    const response = {
+      id: 'xiaomi',
+      model: 'mimo-v2.5-pro',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      apiKey: 'k',
+      model: 'mimo-v2.5-pro',
+      fetchImpl,
+      nonStreaming: true,
+      modelCapabilities: (model) => ({
+        id: model,
+        inputModalities: ['text'],
+        outputModalities: ['text'],
+        supportsToolCalling: true,
+        contextWindowTokens: 1_000_000,
+        messageParts: ['text'],
+        reasoning: {
+          supportedEfforts: ['off', 'low', 'medium', 'high'],
+          defaultEffort: 'high',
+          requestProtocol: 'mimo-chat-completions'
+        }
+      })
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'mimo-v2.5-pro'
+    request.reasoningEffort = 'max'
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    expect(sentBodies[0]?.reasoning_effort).toBe('high')
+    expect(sentBodies[0]?.thinking).toEqual({ type: 'enabled' })
+  })
+
   it('parses a non-streaming JSON response into chunks', async () => {
     const response = {
       id: 'r1',
@@ -665,9 +915,10 @@ describe('DeepseekCompatModelClient', () => {
       callChunk && callChunk.kind === 'tool_call_complete' ? callChunk.arguments : {}
     ).toEqual({ text: 'hi' })
     expect(usageChunk && usageChunk.kind === 'usage' ? usageChunk.usage.cacheHitTokens : 0).toBe(30)
+    expect(usageChunk && usageChunk.kind === 'usage' ? usageChunk.usage.cacheMissTokens : 0).toBe(20)
     expect(usageChunk && usageChunk.kind === 'usage' ? usageChunk.usage.costUsd : 0).toBeGreaterThan(0)
     expect(usageChunk && usageChunk.kind === 'usage' ? usageChunk.usage.costCny : 0).toBeGreaterThan(0)
-    expect(usageChunk && usageChunk.kind === 'usage' ? usageChunk.usage.cacheSavingsUsd : 0).toBeGreaterThan(0)
+    expect(usageChunk && usageChunk.kind === 'usage' ? usageChunk.usage.cacheSavingsUsd : undefined).toBeUndefined()
     expect(
       completionChunk && completionChunk.kind === 'completed' ? completionChunk.stopReason : ''
     ).toBe('tool_calls')
@@ -1370,6 +1621,53 @@ describe('DeepseekCompatModelClient', () => {
     expect(messages[2]).toMatchObject({ role: 'user', content: 'continue' })
   })
 
+  it('sends volatile context instructions after the history for cache prefix stability', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'r1',
+      model: 'deepseek-chat',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://example.com/beta',
+      apiKey: 'k',
+      model: 'deepseek-chat',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.contextInstructions = ['Tokens used: 4321 — continue the goal.']
+    request.history = [
+      makeUserItem({ id: 'user_1', turnId: 'turn_1', threadId: 'thr_1', text: 'hello' })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    const instructionIndex = messages.findIndex(
+      (message) => typeof message.content === 'string' && message.content.includes('Tokens used: 4321')
+    )
+    const userIndex = messages.findIndex((message) => message.role === 'user')
+    expect(instructionIndex).toBeGreaterThan(userIndex)
+    expect(messages[instructionIndex]).toMatchObject({ role: 'system' })
+  })
+
   it('preserves the latest compaction summary when applying history limits', async () => {
     const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
     const response = {
@@ -1425,8 +1723,10 @@ describe('DeepseekCompatModelClient', () => {
   })
 
   it('reports an error when the HTTP response is not OK', async () => {
+    const providerMessage = `Not supported model ${'mimo-v2.5-pro-ultraspeed'.repeat(40)}`
+    const body = JSON.stringify({ error: { code: '400', message: providerMessage } })
     const fetchImpl: typeof fetch = async () =>
-      new Response('upstream failure', { status: 500 })
+      new Response(body, { status: 400 })
     const client = new DeepseekCompatModelClient({
       baseUrl: 'https://example.com/beta',
       apiKey: 'k',
@@ -1438,6 +1738,78 @@ describe('DeepseekCompatModelClient', () => {
       chunks.push(chunk)
     }
     expect(chunks[0].kind).toBe('error')
+    expect(chunks[0]).toMatchObject({
+      kind: 'error',
+      message: `model request failed with status 400: ${body}`,
+      code: 'http_400'
+    })
+    expect(JSON.stringify(chunks[0])).toContain(providerMessage)
+  })
+
+  it('reports provider JSON error payloads returned with HTTP 200', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(JSON.stringify({
+        error: {
+          message: 'model mimo-v2.5-pro-ultraspeed is not available for this account',
+          code: 'model_not_available'
+        }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      apiKey: 'k',
+      model: 'mimo-v2.5-pro-ultraspeed',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const chunks: ModelStreamChunk[] = []
+    for await (const chunk of client.stream(buildRequest(new AbortController().signal))) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks).toEqual([
+      {
+        kind: 'error',
+        message: 'model mimo-v2.5-pro-ultraspeed is not available for this account',
+        code: 'model_not_available'
+      }
+    ])
+  })
+
+  it('reports streamed provider error payloads returned with HTTP 200', async () => {
+    const body = sseStream([
+      {
+        error: {
+          message: 'no permission to access model mimo-v2.5-pro-ultraspeed',
+          type: 'permission_denied'
+        }
+      },
+      '[DONE]'
+    ])
+    const fetchImpl: typeof fetch = async () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      apiKey: 'k',
+      model: 'mimo-v2.5-pro-ultraspeed',
+      fetchImpl
+    })
+    const chunks: ModelStreamChunk[] = []
+    for await (const chunk of client.stream(buildRequest(new AbortController().signal))) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks.find((chunk) => chunk.kind === 'error')).toMatchObject({
+      kind: 'error',
+      message: 'no permission to access model mimo-v2.5-pro-ultraspeed',
+      code: 'permission_denied'
+    })
+    expect(chunks.find((chunk) => chunk.kind === 'completed')).toMatchObject({
+      kind: 'completed',
+      stopReason: 'error'
+    })
   })
 
   it('parses streamed SSE events with tool call deltas', async () => {

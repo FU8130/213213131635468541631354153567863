@@ -21,11 +21,7 @@ function bucket(date: string, totalTokens: number, turns = 1) {
     totalTokens,
     costUsd: totalTokens / 1_000_000,
     costCny: (totalTokens / 1_000_000) * 7.2,
-    cacheSavingsUsd: 0,
-    cacheSavingsCny: 0,
     tokenEconomySavingsTokens: 0,
-    tokenEconomySavingsUsd: 0,
-    tokenEconomySavingsCny: 0,
     turns,
     threadCount: turns > 0 ? 1 : 0,
     cacheHitRate: totalTokens > 0 ? 0.25 : null
@@ -50,11 +46,7 @@ function usage(buckets = [bucket('2026-05-01', 1200), bucket('2026-05-02', 10000
       totalTokens,
       costUsd: totalTokens / 1_000_000,
       costCny: (totalTokens / 1_000_000) * 7.2,
-      cacheSavingsUsd: 0,
-      cacheSavingsCny: 0,
       tokenEconomySavingsTokens: 0,
-      tokenEconomySavingsUsd: 0,
-      tokenEconomySavingsCny: 0,
       turns,
       threadCount: buckets.filter((item) => item.turns > 0).length,
       cacheHitRate: totalTokens > 0 ? 0.25 : null,
@@ -142,6 +134,20 @@ describe('InitialSessionUsageHeatmap', () => {
     expect(html).not.toContain('Explain this project&#x27;s structure')
   })
 
+  it('renders the usage panel without the animated hero in focus mode', () => {
+    const html = render(state({ usage: usage(), loaded: true }), { hideHero: true })
+
+    expect(html).toContain('Daily Kun usage calendar')
+    expect(html).toContain('aria-label="2026-05-02')
+    expect(html).toContain('Overview')
+    expect(html).toContain('Models')
+    expect(html).toContain('Sessions')
+    expect(html).toContain('Messages')
+    expect(html).toContain('Collapse calendar')
+    expect(html).toContain('You&#x27;ve used 11.2k tokens across 2 active days.')
+    expect(html).not.toContain('ds-runtime-wake-stage')
+  })
+
   it('renders stacked model usage bars with a hover breakdown tooltip', () => {
     const detailedDay = {
       date: '2026-06-04',
@@ -153,11 +159,7 @@ describe('InitialSessionUsageHeatmap', () => {
       totalTokens: 2410045,
       costUsd: 2.41,
       costCny: 17.35,
-      cacheSavingsUsd: 0.91,
-      cacheSavingsCny: 6.55,
       tokenEconomySavingsTokens: 0,
-      tokenEconomySavingsUsd: 0,
-      tokenEconomySavingsCny: 0,
       turns: 3,
       threadCount: 1,
       cacheHitRate: 1906304 / (1906304 + 459039)
@@ -240,12 +242,12 @@ describe('InitialSessionUsageHeatmap', () => {
     expect(errorHtml).not.toContain('Explain this project&#x27;s structure')
   })
 
-  it('renders the whale hero with a collapsed calendar card', () => {
+  it('renders the Kun hero with a collapsed calendar card', () => {
     const html = render(state({ usage: usage(), loaded: true }), { initialCollapsed: true })
 
     expect(html).toContain('Expand calendar')
     expect(html).toContain('ds-runtime-wake-stage')
-    expect(html).toContain('ds-work-logo')
+    expect(html).toContain('ds-kun-state-sleep')
     expect(html).not.toContain('Keep the canvas clear')
     expect(html).not.toContain('Daily Kun usage calendar')
   })

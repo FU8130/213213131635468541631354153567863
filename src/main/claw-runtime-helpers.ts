@@ -8,6 +8,7 @@ import type {
   ClawImProvider,
   ClawImRemoteSessionV1,
   ClawRunMode,
+  ScheduleReasoningEffort,
   ScheduleTaskFromTextResult
 } from '../shared/app-settings'
 import { CLAW_FEISHU_INBOUND_MESSAGE_HEADING } from '../shared/app-settings'
@@ -31,9 +32,18 @@ export type ClawRuntimeDeps = {
     to: string
     text: string
   }) => Promise<{ ok: true; messageId: string } | { ok: false; message: string }>
+  /** WeChat owner (`ilink_user_id`) for a bridge account; '' when unknown. */
+  resolveWeixinAccountUserId?: (accountId: string) => Promise<string>
   createScheduledTaskFromText?: (
     text: string,
-    options?: { workspaceRoot?: string | null; modelHint?: string | null; mode?: ClawRunMode | null }
+    options?: {
+      workspaceRoot?: string | null
+      clawChannelId?: string | null
+      providerId?: string | null
+      modelHint?: string | null
+      reasoningEffort?: ScheduleReasoningEffort | null
+      mode?: ClawRunMode | null
+    }
   ) => Promise<ScheduleTaskFromTextResult>
 }
 
@@ -52,6 +62,7 @@ export type TurnRecordJson = {
 export type TurnItemJson = {
   kind: string
   turnId?: string
+  toolName?: string
   toolKind?: string
   output?: unknown
   isError?: boolean | null
@@ -78,6 +89,7 @@ export type RunPromptOptions = {
   waitForResult: boolean
   responseTimeoutMs: number
   source: 'task' | 'im'
+  providerId?: string
   threadId?: string
   channel?: ClawImChannelV1
   onTurnStarted?: (payload: { threadId: string; turnId: string }) => Promise<void> | void
@@ -125,7 +137,7 @@ export function formatFeishuMirrorText(text: string, direction: 'user' | 'assist
   const trimmed = text.trim()
   if (direction === 'user') {
     return {
-      markdown: `**From DeepSeek GUI**\n\n> ${trimmed.replace(/\n/g, '\n> ')}`
+      markdown: `**From Kun**\n\n> ${trimmed.replace(/\n/g, '\n> ')}`
     }
   }
   return { markdown: trimmed || '(empty reply)' }
@@ -188,22 +200,46 @@ function outputRecord(output: unknown): Record<string, unknown> | null {
     : null
 }
 
-function generatedFileFromToolResult(
-  item: TurnItemJson,
+function generatedFileFromRecord(
+  record: Record<string, unknown>,
   workspaceRoot: string
 ): ClawGeneratedFileV1 | null {
-  if (item.kind !== 'tool_result' || item.toolKind !== 'file_change' || item.isError === true) return null
-  const output = outputRecord(item.output)
-  if (!output) return null
-  const path = asString(output.path) || asString(output.absolute_path)
-  const relativePath = asString(output.relative_path)
+  const path = asString(record.path) || asString(record.absolutePath) || asString(record.absolute_path)
+  const relativePath = asString(record.relativePath) || asString(record.relative_path)
   const resolvedPath = path || (workspaceRoot && relativePath ? join(workspaceRoot, relativePath) : '')
   if (!resolvedPath) return null
   return {
     path: resolvedPath,
     ...(relativePath ? { relativePath } : {}),
-    fileName: basename(relativePath || resolvedPath)
+    fileName: asString(record.fileName) || asString(record.name) || basename(relativePath || resolvedPath)
   }
+}
+
+function generatedFilesFromToolResult(
+  item: TurnItemJson,
+  workspaceRoot: string
+): ClawGeneratedFileV1[] {
+  if (item.kind !== 'tool_result' || item.isError === true) return []
+  const output = outputRecord(item.output)
+  if (!output) return []
+  if (item.toolKind === 'file_change') {
+    const file = generatedFileFromRecord(output, workspaceRoot)
+    return file ? [file] : []
+  }
+  if (
+    (item.toolName === 'generate_image' ||
+      item.toolName === 'generate_speech' ||
+      item.toolName === 'generate_music' ||
+      item.toolName === 'generate_video') &&
+    Array.isArray(output.files)
+  ) {
+    return output.files
+      .map((entry) => outputRecord(entry))
+      .filter((entry): entry is Record<string, unknown> => entry != null)
+      .map((entry) => generatedFileFromRecord(entry, workspaceRoot))
+      .filter((file): file is ClawGeneratedFileV1 => file != null)
+  }
+  return []
 }
 
 function threadItems(detail: ThreadDetailJson): TurnItemJson[] {
@@ -237,10 +273,11 @@ function extractGeneratedFiles(
 ): ClawGeneratedFileV1[] {
   const files: ClawGeneratedFileV1[] = []
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    const file = generatedFileFromToolResult(items[index], workspaceRoot)
-    if (!file) continue
-    if (files.some((existing) => isPathLikeDuplicate(existing, file))) continue
-    files.push(file)
+    for (const file of generatedFilesFromToolResult(items[index], workspaceRoot).reverse()) {
+      if (files.some((existing) => isPathLikeDuplicate(existing, file))) continue
+      files.push(file)
+      if (files.length >= maxFiles) break
+    }
     if (files.length >= maxFiles) break
   }
   return files.reverse()
@@ -255,12 +292,11 @@ export function latestGeneratedFiles(
   const items = threadItems(detail)
   const turnId = options.turnId?.trim()
   if (turnId) {
-    const currentTurnFiles = extractGeneratedFiles(
+    return extractGeneratedFiles(
       items.filter((item) => item.turnId === turnId),
       workspaceRoot,
       maxFiles
     )
-    if (currentTurnFiles.length > 0) return currentTurnFiles
   }
   return extractGeneratedFiles(items, workspaceRoot, maxFiles)
 }
@@ -270,7 +306,10 @@ export function shouldSendGeneratedFilesForPrompt(prompt: string): boolean {
   if (!text) return false
   return /发给我|发送给我|发一下|发来|发过来|传给我|传过来|上传|附件|以附件|发文件|文件发|文档发/i.test(text) ||
     /\b(send|attach|attachment|upload)\b/i.test(text) ||
-    /给我(?:一个|一份)?.{0,24}(文档|文件|\.(?:md|txt|pdf|docx|xlsx|csv|pptx))/i.test(text)
+    /给我(?:一个|一份)?.{0,24}(文档|文件|\.(?:md|txt|pdf|docx|xlsx|csv|pptx))/i.test(text) ||
+    /(生成|画|绘制|做|制作|创建|出).{0,24}(图|图片|图像|照片|海报|插画|表情包|logo)/i.test(text) ||
+    /(生成|做|制作|创建|配|出).{0,24}(语音|音频|朗读|旁白|配音|音乐|歌曲|视频|短片|影片)/i.test(text) ||
+    /\b(generate|create|draw|make)\b.{0,40}\b(image|picture|photo|poster|illustration|meme|logo|speech|voice|audio|music|song|video)\b/i.test(text)
 }
 
 export function shouldDirectSendExistingGeneratedFilesForPrompt(prompt: string): boolean {

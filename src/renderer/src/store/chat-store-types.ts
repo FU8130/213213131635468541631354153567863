@@ -10,6 +10,7 @@ import type {
   ThreadTodoStatus,
   UserInputAnswer
 } from '../agent/types'
+import type { KunRuntimeStatusPayload } from '@shared/kun-gui-api'
 import type {
   ClawImAgentProfileV1,
   ClawImChannelV1,
@@ -18,7 +19,7 @@ import type {
   ClawImSettingsV1,
   ClawModel
 } from '@shared/app-settings'
-import type { ModelProviderModelGroup } from '@shared/ds-gui-api'
+import type { ModelProviderModelGroup } from '@shared/kun-gui-api'
 
 export type QueuedUserMessage = {
   id: string
@@ -26,6 +27,7 @@ export type QueuedUserMessage = {
   displayText?: string
   mode?: string
   model?: string
+  providerId?: string
   modelLabel?: string
   reasoningEffort?: string
   attachmentIds?: string[]
@@ -63,6 +65,7 @@ export type GuiPlanMessageContext = {
 export type SendMessageOverrides = {
   queued?: QueuedUserMessage
   model?: string
+  providerId?: string
   modelLabel?: string
   reasoningEffort?: string
   displayText?: string
@@ -72,7 +75,21 @@ export type SendMessageOverrides = {
 }
 
 export type InitialSetupMode = 'required' | 'preview'
-export type SettingsRouteSection = 'general' | 'write' | 'agents' | 'skill' | 'mcp' | 'shortcuts' | 'claw'
+export type SettingsRouteSection =
+  | 'general'
+  | 'providers'
+  | 'write'
+  | 'imageGeneration'
+  | 'mediaGeneration'
+  | 'speechToText'
+  | 'agents'
+  | 'permissions'
+  | 'skill'
+  | 'mcp'
+  | 'shortcuts'
+  | 'easterEgg'
+  | 'claw'
+  | 'updates'
 export type AppRoute = 'chat' | 'write' | 'settings' | 'plugins' | 'claw' | 'schedule'
 export type PluginHostRoute = 'chat' | 'claw'
 
@@ -120,6 +137,7 @@ export type ChatState = {
   workspaceRoot: string
   workspaceLabel: string
   runtimeConnection: RuntimeConnectionStatus
+  runtimeStatus: KunRuntimeStatusPayload | null
   codeWorkspaceRoots: string[]
   threads: NormalizedThread[]
   threadSearch: string
@@ -143,6 +161,7 @@ export type ChatState = {
   turnReasoningLastAtByUserId: Record<string, number>
   inspectorSelectedId: string | null
   composerModel: string
+  composerProviderId: string
   composerPickList: string[]
   composerModelGroups: ModelProviderModelGroup[]
   queuedMessages: QueuedUserMessage[]
@@ -158,7 +177,7 @@ export type ChatState = {
   activeClawChannelId: string
   appendLocalClawTurn: (userText: string, replyText: string) => void
   setError: (message: string | null) => void
-  setComposerModel: (modelId: string) => void
+  setComposerModel: (modelId: string, providerId?: string) => void
   loadComposerModels: () => Promise<void>
   setRoute: (r: AppRoute) => void
   openWrite: () => Promise<void>
@@ -192,7 +211,7 @@ export type ChatState = {
   openInitialSetup: (mode?: InitialSetupMode) => void
   closeInitialSetup: () => void
   boot: () => Promise<void>
-  probeRuntime: (mode?: 'user' | 'background') => Promise<void>
+  probeRuntime: (mode?: 'user' | 'background', options?: { restart?: boolean }) => Promise<void>
   chooseWorkspace: (options?: { createThreadAfter?: boolean; selectThreadAfter?: boolean }) => Promise<string | null>
   clearWorkspace: () => Promise<void>
   deleteWorkspace: (workspacePath: string) => Promise<void>

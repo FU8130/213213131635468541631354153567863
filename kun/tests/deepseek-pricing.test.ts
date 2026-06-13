@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  estimateDeepseekCacheSavings,
-  estimateDeepseekCost,
-  estimateDeepseekInputTokenCost
-} from '../src/adapters/model/deepseek-pricing.js'
+import { estimateDeepseekCost } from '../src/adapters/model/deepseek-pricing.js'
 
 describe('DeepSeek pricing — provider-aware gate (issue #26)', () => {
   it('returns null for non-DeepSeek host when providerHost is provided', () => {
@@ -58,37 +54,6 @@ describe('DeepSeek pricing — provider-aware gate (issue #26)', () => {
     })
     expect(cost).not.toBeNull()
     expect(cost!.costUsd).toBeGreaterThan(0)
-  })
-
-  it('estimateDeepseekInputTokenCost honors providerHost', () => {
-    expect(estimateDeepseekInputTokenCost({
-      model: 'deepseek-v4-pro',
-      inputTokens: 1000,
-      providerHost: 'https://openrouter.ai/api/v1'
-    })).toBeNull()
-
-    const cost = estimateDeepseekInputTokenCost({
-      model: 'deepseek-v4-pro',
-      inputTokens: 1000,
-      providerHost: 'https://api.deepseek.com'
-    })
-    expect(cost).not.toBeNull()
-  })
-
-  it('estimateDeepseekCacheSavings honors providerHost', () => {
-    expect(estimateDeepseekCacheSavings({
-      model: 'deepseek-v4-pro',
-      cacheHitTokens: 500,
-      providerHost: 'https://openrouter.ai/api/v1'
-    })).toBeNull()
-
-    const savings = estimateDeepseekCacheSavings({
-      model: 'deepseek-v4-pro',
-      cacheHitTokens: 500,
-      providerHost: 'https://api.deepseek.com'
-    })
-    expect(savings).not.toBeNull()
-    expect(savings!.costUsd).toBeGreaterThan(0)
   })
 
   it('still returns null for unknown model names even on DeepSeek host', () => {

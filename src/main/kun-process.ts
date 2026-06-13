@@ -1,14 +1,16 @@
 import { app } from 'electron'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { promisify } from 'node:util'
 import {
   defaultKunTokenEconomySettings,
   isKunRuntimeInsecure,
   resolveKunRuntimeSettings,
+  type ModelProviderModelProfileV1,
   type KunRuntimeSettingsV1,
   type AppSettingsV1
 } from '../shared/app-settings'
@@ -25,11 +27,15 @@ import {
 } from '../../kun/src/config/kun-config.js'
 import {
   AttachmentsCapabilityConfig,
+  ImageGenCapabilityConfig,
   McpCapabilityConfig,
   McpServerConfig,
   MemoryCapabilityConfig,
+  MusicGenCapabilityConfig,
   SkillsCapabilityConfig,
+  SpeechGenCapabilityConfig,
   SubagentsCapabilityConfig,
+  VideoGenCapabilityConfig,
   WebCapabilityConfig
 } from '../../kun/src/contracts/capabilities.js'
 import {
@@ -40,17 +46,50 @@ import {
   type ClawScheduleMcpLaunchConfig
 } from './claw-schedule-mcp-config'
 import { defaultKunDataDir } from './runtime/kun-adapter'
+import { isKunHealthResponseBody } from './kun-health'
 import { appendManagedLogLine } from './logger'
 import { guiSkillRootsForRuntime, normalizeSkillRootPath } from './services/skill-service'
 
 let child: ChildProcess | null = null
 let childLogCapture: KunChildLogCapture | null = null
 let lastResolvedBinary: string | null = null
+let kunStartPromise: Promise<void> | null = null
+let childStderrTail = ''
+/** Children killed on purpose (stop/quit/settings restart) — their exit is not a crash. */
+const intentionalStops = new WeakSet<ChildProcess>()
+/** Children that completed the ready handshake — only their exits count as runtime crashes. */
+const readyChildren = new WeakSet<ChildProcess>()
+
+export type KunUnexpectedExitInfo = {
+  code: number | null
+  signal: NodeJS.Signals | null
+  stderrTail: string
+}
+
+let onUnexpectedKunExit: ((info: KunUnexpectedExitInfo) => void) | null = null
+
+/**
+ * Called when a READY kun child exits without the GUI asking for it.
+ * Startup failures are excluded: those are already reported to the
+ * caller of startKunChild via the thrown error.
+ */
+export function setKunUnexpectedExitHandler(
+  handler: ((info: KunUnexpectedExitInfo) => void) | null
+): void {
+  onUnexpectedKunExit = handler
+}
+
+const execFileAsync = promisify(execFile)
 const KUN_READY_PREFIX = 'KUN_READY '
-const KUN_STARTUP_TIMEOUT_MS = 15_000
+// Cold starts on slow disks (Windows + antivirus scans, sqlite rebuilds,
+// MCP server connects) routinely exceed 15s; killing kun that early left
+// fresh installs permanently "unable to connect" (#188).
+const KUN_STARTUP_TIMEOUT_MS = 45_000
+const KUN_STARTUP_HEALTH_POLL_MS = 500
+const KUN_STARTUP_HEALTH_REQUEST_TIMEOUT_MS = 1_000
 const KUN_STOP_GRACE_MS = 5_000
 const KUN_STOP_FORCE_MS = 1_000
-const STDERR_TAIL_MAX_CHARS = 4_000
+const STDERR_TAIL_MAX_CHARS = 32_768
 const GUI_SCHEDULE_MCP_TIMEOUT_MS = 5_000
 const DEFAULT_KUN_MODEL_PROFILES: Record<string, Record<string, unknown>> = {
   'deepseek-v4-pro': {
@@ -194,10 +233,23 @@ export function isKunChildRunning(): boolean {
   return child !== null && child.exitCode === null && child.signalCode === null
 }
 
-export async function startKunChild(settings: AppSettingsV1): Promise<void> {
+export function startKunChild(settings: AppSettingsV1): Promise<void> {
+  if (kunStartPromise) return kunStartPromise
   const runtime = resolveKunRuntimeSettings(settings)
-  if (isKunChildRunning()) return
-  if (!runtime.autoStart) return
+  if (isKunChildRunning()) return Promise.resolve()
+  if (!runtime.autoStart) return Promise.resolve()
+  let promise: Promise<void>
+  promise = startKunChildOnce(settings, runtime).finally(() => {
+    if (kunStartPromise === promise) kunStartPromise = null
+  })
+  kunStartPromise = promise
+  return promise
+}
+
+async function startKunChildOnce(
+  settings: AppSettingsV1,
+  runtime: KunRuntimeSettingsV1
+): Promise<void> {
   if (childLogCapture) {
     await childLogCapture.close()
     childLogCapture = null
@@ -249,9 +301,13 @@ export async function startKunChild(settings: AppSettingsV1): Promise<void> {
   const startedChild = child
   const startedLogCapture = createKunChildLogCapture(startedChild.pid)
   childLogCapture = startedLogCapture
+  childStderrTail = ''
   startedLogCapture.logLifecycle(`spawned on port ${runtime.port} using data dir ${dataDir}`)
   startedChild.stdout?.on('data', startedLogCapture.captureStdout)
-  startedChild.stderr?.on('data', startedLogCapture.captureStderr)
+  startedChild.stderr?.on('data', (chunk: Buffer | string) => {
+    childStderrTail = appendTail(childStderrTail, normalizeCapturedChunk(chunk))
+    startedLogCapture.captureStderr(chunk)
+  })
   child.on('exit', (code, signal) => {
     startedLogCapture.logLifecycle(
       signal
@@ -260,6 +316,13 @@ export async function startKunChild(settings: AppSettingsV1): Promise<void> {
     )
     void startedLogCapture.close()
     if (child === startedChild) child = null
+    if (readyChildren.has(startedChild) && !intentionalStops.has(startedChild)) {
+      onUnexpectedKunExit?.({
+        code: code ?? null,
+        signal: signal ?? null,
+        stderrTail: childStderrTail
+      })
+    }
   })
   child.on('error', (error) => {
     startedLogCapture.logLifecycle(
@@ -267,7 +330,7 @@ export async function startKunChild(settings: AppSettingsV1): Promise<void> {
     )
   })
   try {
-    await waitForKunStartup(startedChild)
+    await waitForKunStartup(startedChild, runtime.port)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     startedLogCapture.logLifecycle(`startup failed before ready: ${message}`)
@@ -276,6 +339,7 @@ export async function startKunChild(settings: AppSettingsV1): Promise<void> {
     }
     throw error
   }
+  readyChildren.add(startedChild)
   startedLogCapture.logLifecycle(`ready marker received on port ${runtime.port}`)
 }
 
@@ -283,7 +347,16 @@ export async function syncGuiManagedKunConfig(
   dataDir: string,
   runtime: Pick<
     KunRuntimeSettingsV1,
-    'mcpSearch' | 'tokenEconomy' | 'storage' | 'contextCompaction' | 'runtimeTuning'
+    | 'mcpSearch'
+    | 'tokenEconomy'
+    | 'storage'
+    | 'contextCompaction'
+    | 'runtimeTuning'
+    | 'imageGeneration'
+    | 'textToSpeech'
+    | 'musicGeneration'
+    | 'videoGeneration'
+    | 'modelProfiles'
   >,
   options?: {
     scheduleMcp?: {
@@ -313,6 +386,10 @@ export async function syncGuiManagedKunConfig(
   const attachments = objectValue(capabilities.attachments)
   const web = objectValue(capabilities.web)
   const skills = objectValue(capabilities.skills)
+  const imageGen = objectValue(capabilities.imageGen)
+  const speechGen = objectValue(capabilities.speechGen)
+  const musicGen = objectValue(capabilities.musicGen)
+  const videoGen = objectValue(capabilities.videoGen)
   const storage = storageConfigForRuntime(runtime.storage)
   const mcpSearch = runtime.mcpSearch
   const skillCapability = await skillCapabilityConfigForRuntime(skills, options?.scheduleMcp?.settings)
@@ -322,7 +399,7 @@ export async function syncGuiManagedKunConfig(
       storage,
       tokenEconomy: tokenEconomyConfigForRuntime(runtime.tokenEconomy, existingTokenEconomy)
     },
-    models: modelConfigForRuntime(existingModels),
+    models: modelConfigForRuntime(existingModels, runtime.modelProfiles),
     contextCompaction: contextCompactionConfigForRuntime(runtime.contextCompaction, existingContextCompaction),
     runtime: runtimeTuningConfigForRuntime(runtime.runtimeTuning, existingRuntimeTuning),
     capabilities: {
@@ -337,6 +414,10 @@ export async function syncGuiManagedKunConfig(
         fetchEnabled: web.fetchEnabled === false ? false : true
       },
       skills: skillCapability,
+      imageGen: imageGenConfigForRuntime(runtime.imageGeneration, imageGen),
+      speechGen: speechGenConfigForRuntime(runtime.textToSpeech, speechGen),
+      musicGen: musicGenConfigForRuntime(runtime.musicGeneration, musicGen),
+      videoGen: videoGenConfigForRuntime(runtime.videoGeneration, videoGen),
       mcp: {
         ...mcp,
         ...(options?.scheduleMcp || mcpSearch.enabled || hasImportedEnabledMcpServer
@@ -524,18 +605,32 @@ function positiveIntegerValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
 }
 
-function modelConfigForRuntime(existing: Record<string, unknown>): Record<string, unknown> {
+function modelConfigForRuntime(
+  existing: Record<string, unknown>,
+  guiModelProfiles: Record<string, ModelProviderModelProfileV1> = {}
+): Record<string, unknown> {
   const existingProfiles = objectValue(existing.profiles)
-  const profiles: Record<string, unknown> = { ...DEFAULT_KUN_MODEL_PROFILES }
-  for (const [modelId, profile] of Object.entries(existingProfiles)) {
-    const defaultProfile = objectValue(DEFAULT_KUN_MODEL_PROFILES[modelId])
-    const existingProfile = objectValue(profile)
+  const guiProfiles = modelConfigProfilesFromProviderProfiles(guiModelProfiles)
+  const profileDefaults = {
+    ...DEFAULT_KUN_MODEL_PROFILES,
+    ...guiProfiles
+  }
+  const profiles: Record<string, unknown> = {}
+  for (const modelId of new Set([
+    ...Object.keys(profileDefaults),
+    ...Object.keys(existingProfiles)
+  ])) {
+    const defaultProfile = objectValue(profileDefaults[modelId])
+    const existingProfile = objectValue(existingProfiles[modelId])
+    const guiProfile = objectValue(guiProfiles[modelId])
     profiles[modelId] = {
       ...defaultProfile,
       ...existingProfile,
+      ...guiProfile,
       contextCompaction: {
         ...objectValue(defaultProfile.contextCompaction),
-        ...objectValue(existingProfile.contextCompaction)
+        ...objectValue(existingProfile.contextCompaction),
+        ...objectValue(guiProfile.contextCompaction)
       }
     }
   }
@@ -543,6 +638,26 @@ function modelConfigForRuntime(existing: Record<string, unknown>): Record<string
     ...existing,
     profiles
   }
+}
+
+function modelConfigProfilesFromProviderProfiles(
+  profiles: Record<string, ModelProviderModelProfileV1>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [modelId, profile] of Object.entries(profiles)) {
+    const trimmed = modelId.trim()
+    if (!trimmed) continue
+    out[trimmed] = {
+      ...(profile.aliases?.length ? { aliases: profile.aliases } : {}),
+      ...(profile.contextWindowTokens ? { contextWindowTokens: profile.contextWindowTokens } : {}),
+      inputModalities: profile.inputModalities,
+      outputModalities: profile.outputModalities,
+      supportsToolCalling: profile.supportsToolCalling,
+      messageParts: profile.messageParts,
+      ...(profile.reasoning ? { reasoning: profile.reasoning } : {})
+    }
+  }
+  return out
 }
 
 function tokenEconomyConfigForRuntime(
@@ -600,6 +715,108 @@ function contextCompactionConfigForRuntime(
     summaryMaxTokens: contextCompaction.summaryMaxTokens,
     summaryInputMaxBytes: contextCompaction.summaryInputMaxBytes
   }
+}
+
+function imageGenConfigForRuntime(
+  imageGeneration: Pick<KunRuntimeSettingsV1, 'imageGeneration'>['imageGeneration'],
+  existing: Record<string, unknown>
+): Record<string, unknown> {
+  // GUI settings own these fields: cleared values must be removed from the
+  // config (the zod schema rejects empty strings), while unknown hand-edited
+  // keys like maxReferenceImages are preserved via the spread.
+  const next: Record<string, unknown> = {
+    ...existing,
+    enabled: imageGeneration.enabled,
+    timeoutMs: imageGeneration.timeoutMs
+  }
+  const fields = {
+    protocol: imageGeneration.protocol,
+    baseUrl: imageGeneration.baseUrl,
+    apiKey: imageGeneration.apiKey,
+    model: imageGeneration.model,
+    defaultSize: imageGeneration.defaultSize
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    const trimmed = value.trim()
+    if (trimmed) next[key] = trimmed
+    else delete next[key]
+  }
+  return next
+}
+
+function speechGenConfigForRuntime(
+  textToSpeech: Pick<KunRuntimeSettingsV1, 'textToSpeech'>['textToSpeech'],
+  existing: Record<string, unknown>
+): Record<string, unknown> {
+  const next: Record<string, unknown> = {
+    ...existing,
+    enabled: textToSpeech.enabled,
+    timeoutMs: textToSpeech.timeoutMs,
+    format: textToSpeech.format
+  }
+  const fields = {
+    protocol: textToSpeech.protocol,
+    baseUrl: textToSpeech.baseUrl,
+    apiKey: textToSpeech.apiKey,
+    model: textToSpeech.model,
+    voice: textToSpeech.voice
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    const trimmed = value.trim()
+    if (trimmed) next[key] = trimmed
+    else delete next[key]
+  }
+  return next
+}
+
+function musicGenConfigForRuntime(
+  musicGeneration: Pick<KunRuntimeSettingsV1, 'musicGeneration'>['musicGeneration'],
+  existing: Record<string, unknown>
+): Record<string, unknown> {
+  const next: Record<string, unknown> = {
+    ...existing,
+    enabled: musicGeneration.enabled,
+    timeoutMs: musicGeneration.timeoutMs,
+    format: musicGeneration.format
+  }
+  const fields = {
+    protocol: musicGeneration.protocol,
+    baseUrl: musicGeneration.baseUrl,
+    apiKey: musicGeneration.apiKey,
+    model: musicGeneration.model
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    const trimmed = value.trim()
+    if (trimmed) next[key] = trimmed
+    else delete next[key]
+  }
+  return next
+}
+
+function videoGenConfigForRuntime(
+  videoGeneration: Pick<KunRuntimeSettingsV1, 'videoGeneration'>['videoGeneration'],
+  existing: Record<string, unknown>
+): Record<string, unknown> {
+  const next: Record<string, unknown> = {
+    ...existing,
+    enabled: videoGeneration.enabled,
+    defaultDuration: videoGeneration.defaultDuration,
+    timeoutMs: videoGeneration.timeoutMs,
+    pollIntervalMs: videoGeneration.pollIntervalMs
+  }
+  const fields = {
+    protocol: videoGeneration.protocol,
+    baseUrl: videoGeneration.baseUrl,
+    apiKey: videoGeneration.apiKey,
+    model: videoGeneration.model,
+    defaultResolution: videoGeneration.defaultResolution
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    const trimmed = value.trim()
+    if (trimmed) next[key] = trimmed
+    else delete next[key]
+  }
+  return next
 }
 
 function runtimeTuningConfigForRuntime(
@@ -662,6 +879,10 @@ function sanitizeKunCapabilitiesConfig(value: unknown): Record<string, unknown> 
     next.attachments = parseKunConfigSection(AttachmentsCapabilityConfig, raw.attachments)
   }
   if ('memory' in raw) next.memory = parseKunConfigSection(MemoryCapabilityConfig, raw.memory)
+  if ('imageGen' in raw) next.imageGen = parseKunConfigSection(ImageGenCapabilityConfig, raw.imageGen)
+  if ('speechGen' in raw) next.speechGen = parseKunConfigSection(SpeechGenCapabilityConfig, raw.speechGen)
+  if ('musicGen' in raw) next.musicGen = parseKunConfigSection(MusicGenCapabilityConfig, raw.musicGen)
+  if ('videoGen' in raw) next.videoGen = parseKunConfigSection(VideoGenCapabilityConfig, raw.videoGen)
   return next
 }
 
@@ -697,6 +918,7 @@ export async function stopKunChildAndWait(): Promise<void> {
     return
   }
   const stoppingChild = child
+  intentionalStops.add(stoppingChild)
   const pid = child.pid
   const capture = childLogCapture
   if (stoppingChild.exitCode === null && stoppingChild.signalCode === null) {
@@ -746,10 +968,175 @@ export async function reclaimKunPort(
   port: number
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   if (port <= 0) return { ok: true }
-  const available = await canBindTcpPort(port, '127.0.0.1')
-  return available
-    ? { ok: true }
-    : { ok: false, message: `port ${port} is in use` }
+  if (await canBindTcpPort(port, '127.0.0.1')) return { ok: true }
+  if (await killStaleKunOnPort(port) && await canBindTcpPort(port, '127.0.0.1')) {
+    return { ok: true }
+  }
+  return { ok: false, message: `port ${port} is in use` }
+}
+
+export async function resolveAvailableKunPort(
+  preferredPort: number
+): Promise<{ port: number; changed: boolean; message?: string }> {
+  if (preferredPort > 0) {
+    if (await canBindTcpPort(preferredPort, '127.0.0.1')) {
+      return { port: preferredPort, changed: false }
+    }
+    // Prefer reclaiming the configured port from a stale kun left by a
+    // crashed previous app run over silently moving to a new port.
+    if (
+      await killStaleKunOnPort(preferredPort) &&
+      await canBindTcpPort(preferredPort, '127.0.0.1')
+    ) {
+      return { port: preferredPort, changed: false }
+    }
+  }
+  const port = await allocateTcpPort('127.0.0.1')
+  return {
+    port,
+    changed: true,
+    ...(preferredPort > 0 ? { message: `port ${preferredPort} is in use` } : {})
+  }
+}
+
+/**
+ * Kill a stale kun serve process from a previous app run that is still
+ * holding the configured port. Only processes whose command line looks
+ * like our serve entry are touched; anything else keeps the port and we
+ * fall back to allocating a different one.
+ *
+ * Safe by construction on every platform: any failure to positively
+ * identify the holder as our own serve-entry leaves it untouched and the
+ * caller allocates a different port instead.
+ */
+async function killStaleKunOnPort(port: number): Promise<boolean> {
+  const pids = await listListeningPidsOnPort(port)
+  let reclaimed = false
+  for (const pid of pids) {
+    let command = ''
+    try {
+      command = await processCommandLine(pid)
+    } catch {
+      continue
+    }
+    if (!command.includes('serve-entry')) continue
+    void appendManagedLogLine(
+      'kun',
+      formatKunLogLine('lifecycle', pid, `killing stale kun process holding port ${port}`)
+    )
+    if (await terminateStalePid(pid)) reclaimed = true
+  }
+  return reclaimed
+}
+
+/**
+ * PIDs listening on `port`, excluding our own process. Uses `lsof` on
+ * macOS/Linux and `netstat -ano` on Windows.
+ */
+async function listListeningPidsOnPort(port: number): Promise<number[]> {
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execFileAsync('netstat', ['-ano'], {
+        windowsHide: true,
+        timeout: 5_000,
+        maxBuffer: 8 * 1024 * 1024
+      })
+      return parseListeningPidsFromNetstat(stdout, port)
+    } catch {
+      return []
+    }
+  }
+  try {
+    const { stdout } = await execFileAsync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'])
+    return stdout
+      .split('\n')
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Parse `netstat -ano` output into the PIDs holding a LISTENING TCP socket
+ * on `port`. Columns are `Proto  Local  Foreign  State  PID`; UDP rows
+ * (no State column) and non-matching ports are ignored. Matches both IPv4
+ * (`127.0.0.1:<port>`) and IPv6 (`[::1]:<port>`) local addresses.
+ */
+export function parseListeningPidsFromNetstat(stdout: string, port: number): number[] {
+  const pids = new Set<number>()
+  for (const raw of stdout.split(/\r?\n/)) {
+    const cols = raw.trim().split(/\s+/)
+    if (cols.length < 5 || cols[0].toUpperCase() !== 'TCP') continue
+    if (cols[3].toUpperCase() !== 'LISTENING') continue
+    if (!cols[1].endsWith(`:${port}`)) continue
+    const pid = Number(cols[cols.length - 1])
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) pids.add(pid)
+  }
+  return [...pids]
+}
+
+/** Read a process's full command line (best effort, platform-specific). */
+async function processCommandLine(pid: number): Promise<string> {
+  if (process.platform === 'win32') {
+    const { stdout } = await execFileAsync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`
+      ],
+      { windowsHide: true, timeout: 5_000 }
+    )
+    return stdout.trim()
+  }
+  const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'command='])
+  return stdout.trim()
+}
+
+/** Terminate a positively-identified stale kun process. */
+async function terminateStalePid(pid: number): Promise<boolean> {
+  if (process.platform === 'win32') {
+    try {
+      await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        timeout: 5_000
+      })
+      return true
+    } catch {
+      // taskkill exits non-zero when the PID is already gone — treat the
+      // port as reclaimed only if the process really is no longer alive.
+      return await waitForPidExit(pid, 0)
+    }
+  }
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch {
+    return false
+  }
+  if (!(await waitForPidExit(pid, 2_000))) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      /* already gone */
+    }
+    await waitForPidExit(pid, 1_000)
+  }
+  return true
+}
+
+async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return true
+    }
+    if (Date.now() >= deadline) return false
+    await sleep(100)
+  }
 }
 
 function canBindTcpPort(port: number, host: string): Promise<boolean> {
@@ -770,7 +1157,32 @@ function canBindTcpPort(port: number, host: string): Promise<boolean> {
   })
 }
 
-async function waitForKunStartup(startedChild: ChildProcess): Promise<void> {
+function allocateTcpPort(host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    const cleanup = (): void => {
+      server.removeAllListeners('error')
+      server.removeAllListeners('listening')
+    }
+    server.unref()
+    server.once('error', (error) => {
+      cleanup()
+      reject(error)
+    })
+    server.listen({ port: 0, host, exclusive: true }, () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : 0
+      server.close((error) => {
+        cleanup()
+        if (error) reject(error)
+        else if (port > 0) resolve(port)
+        else reject(new Error('failed to allocate an available Kun port'))
+      })
+    })
+  })
+}
+
+async function waitForKunStartup(startedChild: ChildProcess, port?: number): Promise<void> {
   if (startedChild.exitCode !== null) {
     throw new Error(describeKunExit(startedChild.exitCode, null))
   }
@@ -778,14 +1190,32 @@ async function waitForKunStartup(startedChild: ChildProcess): Promise<void> {
     let settled = false
     let stdoutBuffer = ''
     let stderrTail = ''
+    let healthProbeInFlight = false
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
       cleanup()
       reject(new Error(describeKunStartupTimeout(stderrTail)))
     }, KUN_STARTUP_TIMEOUT_MS)
+    // The stdout ready marker can lag behind the actual server (pipe
+    // buffering) or get lost in unusual spawn environments; the HTTP
+    // health endpoint is the ground truth, so poll it in parallel.
+    const healthTimer = port
+      ? setInterval(() => {
+          if (settled || healthProbeInFlight) return
+          healthProbeInFlight = true
+          void probeKunHealth(port)
+            .then((healthy) => {
+              if (healthy) settleReady()
+            })
+            .finally(() => {
+              healthProbeInFlight = false
+            })
+        }, KUN_STARTUP_HEALTH_POLL_MS)
+      : null
     const cleanup = (): void => {
       clearTimeout(timer)
+      if (healthTimer) clearInterval(healthTimer)
       startedChild.removeListener('exit', onExit)
       startedChild.removeListener('error', onError)
       startedChild.stdout?.removeListener('data', onStdout)
@@ -852,4 +1282,16 @@ function describeKunExit(
 function describeKunStartupTimeout(stderrTail: string): string {
   const suffix = stderrTail.trim() ? `\n${stderrTail.trim()}` : ''
   return `Kun did not report ready within ${KUN_STARTUP_TIMEOUT_MS}ms${suffix}`
+}
+
+async function probeKunHealth(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(KUN_STARTUP_HEALTH_REQUEST_TIMEOUT_MS)
+    })
+    if (!response.ok) return false
+    return isKunHealthResponseBody(await response.text())
+  } catch {
+    return false
+  }
 }

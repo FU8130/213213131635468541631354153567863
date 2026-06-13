@@ -10,7 +10,7 @@ import {
 } from './sdd-thread-registry'
 import type { SddDraft } from './sdd-draft-store'
 
-const SDD_THREAD_REGISTRY_KEY = 'deepseekgui.sdd.threadRegistry.v1'
+const SDD_THREAD_REGISTRY_KEY = 'kun.sdd.threadRegistry.v1'
 
 function createMemoryStorage(): BrowserStorageLike {
   const items = new Map<string, string>()
@@ -98,6 +98,10 @@ describe('sdd-thread-registry', () => {
     expect(isSddAssistantThread({
       id: 'thread-legacy-workspace',
       workspace: '/tmp/app/.kunsdd/draft/draft-1'
+    }, registry)).toBe(true)
+    expect(isSddAssistantThread({
+      id: 'thread-unit-layout',
+      title: '下一步: .kunsdd/requirements/123e4567-e89b-12d3-a456-426614174000/requirement.md'
     }, registry)).toBe(true)
     expect(isSddAssistantThread({
       id: 'thread-normal',

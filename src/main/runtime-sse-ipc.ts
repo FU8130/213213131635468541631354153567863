@@ -133,14 +133,15 @@ async function fetchSseWithStartTimeout(
 export function registerRuntimeSseIpc(options: {
   ipcMain: IpcMain
   store: JsonSettingsStore
-  ensureRuntime: (settings: AppSettingsV1) => Promise<void>
+  ensureRuntime: (settings: AppSettingsV1) => Promise<AppSettingsV1 | void>
   logError: (category: string, message: string, detail?: unknown) => void
 }): void {
   const { ipcMain, store, ensureRuntime, logError } = options
   ipcMain.handle('runtime:sse:start', async (event, args: unknown) => {
     const request = sseStartPayloadSchema.parse(args)
-    const s = await store.load()
-    await ensureRuntime(s)
+    const loadedSettings = await store.load()
+    const ensuredSettings = await ensureRuntime(loadedSettings)
+    const s = ensuredSettings ?? loadedSettings
     const requestedId = request.streamId?.trim() ?? ''
     const id = requestedId || randomUUID()
     const existing = sseControllers.get(id)
@@ -195,6 +196,10 @@ export function registerRuntimeSseIpc(options: {
               const { done, value } = await reader.read()
               if (done) break
               buffer += dec.decode(value, { stream: true })
+              // Batch every event parsed from this network chunk into one IPC
+              // message — streaming turns otherwise pay a structured-clone
+              // send per token delta.
+              const batch: Record<string, unknown>[] = []
               let next: { block: string; rest: string } | null
               while ((next = takeSseBlock(buffer)) !== null) {
                 const block = next.block
@@ -205,8 +210,11 @@ export function registerRuntimeSseIpc(options: {
                   if (typeof payload.seq === 'number') {
                     nextSinceSeq = Math.max(nextSinceSeq, payload.seq)
                   }
-                  wc.send('runtime:sse-event', { streamId: id, data: payload })
+                  batch.push(payload)
                 }
+              }
+              if (batch.length > 0) {
+                wc.send('runtime:sse-event', { streamId: id, events: batch })
               }
             }
             buffer += dec.decode()
@@ -218,7 +226,7 @@ export function registerRuntimeSseIpc(options: {
                 if (typeof payload.seq === 'number') {
                   nextSinceSeq = Math.max(nextSinceSeq, payload.seq)
                 }
-                wc.send('runtime:sse-event', { streamId: id, data: payload })
+                wc.send('runtime:sse-event', { streamId: id, events: [payload] })
               }
             }
           } catch (e) {

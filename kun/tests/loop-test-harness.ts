@@ -23,6 +23,7 @@ import type { MemoryStore } from '../src/memory/memory-store.js'
 import type { TokenEconomyConfig } from '../src/loop/token-economy.js'
 import type { ToolStormBreakerOptions } from '../src/loop/tool-storm-breaker.js'
 import type { ContextCompactionConfig } from '../src/loop/model-context-profile.js'
+import type { ResolvedHook } from '../src/hooks/hook-engine.js'
 
 export type Harness = {
   threadId: string
@@ -84,6 +85,7 @@ export function makeHarness(
     toolArgumentRepair?: {
       maxStringBytes?: number
     }
+    hooks?: readonly ResolvedHook[]
   } = {}
 ): Harness {
   const bus = new InMemoryEventBus()
@@ -94,7 +96,10 @@ export function makeHarness(
   const inflight = new InflightTracker()
   const steering = new SteeringQueue()
   const compactor = options.compactor ?? new ContextCompactor({ softThreshold: 64, hardThreshold: 128 })
-  const toolHost = new LocalToolHost({ tools: options.tools ?? defaultLocalTools })
+  const toolHost = new LocalToolHost({
+    tools: options.tools ?? defaultLocalTools,
+    ...(options.hooks ? { hooks: options.hooks } : {})
+  })
   const usage = new UsageService()
   const nowIso = () => new Date().toISOString()
   const nowMs = options.nowMs ?? (() => Date.now())
@@ -137,7 +142,8 @@ export function makeHarness(
     ...(options.tokenEconomy ? { tokenEconomy: options.tokenEconomy } : {}),
     ...(options.contextCompaction ? { contextCompaction: options.contextCompaction } : {}),
     ...(options.toolStorm ? { toolStorm: options.toolStorm } : {}),
-    ...(options.toolArgumentRepair ? { toolArgumentRepair: options.toolArgumentRepair } : {})
+    ...(options.toolArgumentRepair ? { toolArgumentRepair: options.toolArgumentRepair } : {}),
+    ...(options.hooks ? { hooks: options.hooks } : {})
   })
 
   return {

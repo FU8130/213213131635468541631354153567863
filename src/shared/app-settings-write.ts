@@ -8,14 +8,126 @@ import {
   DEFAULT_WRITE_INLINE_LONG_COMPLETION_MAX_TOKENS,
   DEFAULT_WRITE_INLINE_LONG_COMPLETION_MIN_ACCEPT_SCORE,
   DEFAULT_WRITE_WORKSPACE_ROOT,
+  DEFAULT_MODEL_ENDPOINT_FORMAT,
+  DEFAULT_MODEL_PROVIDER_ID,
   type AppSettingsV1,
+  type ModelEndpointFormat,
+  type ModelProviderProfileV1,
   type WriteInlineCompletionSettingsV1,
+  type WriteQuickActionMode,
+  type WriteQuickActionV1,
+  type WriteSelectionAssistSettingsV1,
   type WriteSettingsPatchV1,
   type WriteSettingsV1
 } from './app-settings-types'
 import { getActiveAgentApiKey, getKunRuntimeSettings } from './app-settings-kun'
-import { resolveModelProviderBaseUrl } from './app-settings-provider'
+import { getModelProviderProfile, resolveModelProviderBaseUrl } from './app-settings-provider'
 import { compactStrings } from './app-settings-normalizers'
+
+export const WRITE_QUICK_ACTION_BUILTIN_IDS = ['polish', 'explain', 'reformat'] as const
+
+// Retired built-ins: pristine stored rows (label and prompt empty, i.e. "use
+// the built-in defaults") are dropped on normalization since the defaults no
+// longer exist. Customized rows survive as ordinary custom actions.
+const WRITE_QUICK_ACTION_RETIRED_IDS = new Set(['proofread'])
+
+export const WRITE_QUICK_ACTION_MAX_COUNT = 12
+export const WRITE_QUICK_ACTION_LABEL_MAX_CHARS = 64
+export const WRITE_QUICK_ACTION_PROMPT_MAX_CHARS = 4_000
+
+// Built-in default modes: polish/explain answer through the sidebar assistant
+// (the inline rewrite pipeline proved too lossy for prose), reformat rewrites
+// the selection in place.
+const WRITE_QUICK_ACTION_BUILTIN_MODES: Record<string, WriteQuickActionMode> = {
+  polish: 'chat',
+  explain: 'chat',
+  reformat: 'edit'
+}
+
+export function builtinWriteQuickActionMode(id: string): WriteQuickActionMode {
+  return WRITE_QUICK_ACTION_BUILTIN_MODES[id] ?? 'chat'
+}
+
+export function defaultWriteQuickActions(): WriteQuickActionV1[] {
+  // Empty label/prompt = "use the localized built-in"; the renderer resolves
+  // them through i18n so defaults follow the UI language.
+  return WRITE_QUICK_ACTION_BUILTIN_IDS.map((id) => ({
+    id,
+    label: '',
+    prompt: '',
+    mode: builtinWriteQuickActionMode(id)
+  }))
+}
+
+export function defaultWriteSelectionAssistSettings(): WriteSelectionAssistSettingsV1 {
+  return {
+    infographicPrompt: '',
+    designDraftPrompt: '',
+    prototypePrompt: '',
+    quickActions: defaultWriteQuickActions()
+  }
+}
+
+export function isBuiltinWriteQuickActionId(id: string): boolean {
+  return (WRITE_QUICK_ACTION_BUILTIN_IDS as readonly string[]).includes(id)
+}
+
+/**
+ * Structural normalization only (ids, dedupe, caps). Labels and prompts are
+ * intentionally not trimmed and empty custom actions are kept: this runs on
+ * every settings-form keystroke, and trimming or dropping here would eat
+ * trailing spaces and freshly added rows while the user is still typing.
+ * Point-of-use resolution filters out un-dispatchable actions instead.
+ */
+export function normalizeWriteSelectionAssistSettings(
+  input: WriteSettingsPatchV1['selectionAssist'] | undefined
+): WriteSelectionAssistSettingsV1 {
+  const defaults = defaultWriteSelectionAssistSettings()
+  const infographicPrompt =
+    typeof input?.infographicPrompt === 'string'
+      ? input.infographicPrompt.slice(0, WRITE_QUICK_ACTION_PROMPT_MAX_CHARS)
+      : defaults.infographicPrompt
+  const designDraftPrompt =
+    typeof input?.designDraftPrompt === 'string'
+      ? input.designDraftPrompt.slice(0, WRITE_QUICK_ACTION_PROMPT_MAX_CHARS)
+      : defaults.designDraftPrompt
+  const prototypePrompt =
+    typeof input?.prototypePrompt === 'string'
+      ? input.prototypePrompt.slice(0, WRITE_QUICK_ACTION_PROMPT_MAX_CHARS)
+      : defaults.prototypePrompt
+  if (!Array.isArray(input?.quickActions)) {
+    return { infographicPrompt, designDraftPrompt, prototypePrompt, quickActions: defaults.quickActions }
+  }
+
+  const seen = new Set<string>()
+  const quickActions: WriteQuickActionV1[] = []
+  for (const raw of input.quickActions) {
+    const id = typeof raw?.id === 'string' ? raw.id.trim().slice(0, 64) : ''
+    if (!id || seen.has(id)) continue
+    const label = typeof raw?.label === 'string'
+      ? raw.label.slice(0, WRITE_QUICK_ACTION_LABEL_MAX_CHARS)
+      : ''
+    const prompt = typeof raw?.prompt === 'string'
+      ? raw.prompt.slice(0, WRITE_QUICK_ACTION_PROMPT_MAX_CHARS)
+      : ''
+    const pristineBuiltin = !label.trim() && !prompt.trim()
+    if (pristineBuiltin && WRITE_QUICK_ACTION_RETIRED_IDS.has(id)) continue
+    const storedMode: WriteQuickActionMode | null =
+      raw?.mode === 'edit' || raw?.mode === 'chat' ? raw.mode : null
+    // One-shot migration: pristine 'polish' rows persisted the old in-place
+    // default; they follow the new sidebar default. Customized rows keep the
+    // user's explicit mode choice.
+    const mode: WriteQuickActionMode = storedMode === null
+      ? builtinWriteQuickActionMode(id)
+      : pristineBuiltin && id === 'polish' && storedMode === 'edit'
+        ? 'chat'
+        : storedMode
+    seen.add(id)
+    quickActions.push({ id, label, prompt, mode })
+    if (quickActions.length >= WRITE_QUICK_ACTION_MAX_COUNT) break
+  }
+  return { infographicPrompt, designDraftPrompt, prototypePrompt, quickActions }
+}
 
 export function defaultWriteSettings(): WriteSettingsV1 {
   return {
@@ -26,6 +138,8 @@ export function defaultWriteSettings(): WriteSettingsV1 {
       enabled: true,
       retrievalEnabled: true,
       longCompletionEnabled: true,
+      inheritProvider: true,
+      providerId: '',
       apiKey: '',
       baseUrl: '',
       inheritModel: true,
@@ -36,7 +150,8 @@ export function defaultWriteSettings(): WriteSettingsV1 {
       longMinAcceptScore: DEFAULT_WRITE_INLINE_LONG_COMPLETION_MIN_ACCEPT_SCORE,
       maxTokens: DEFAULT_WRITE_INLINE_COMPLETION_MAX_TOKENS,
       longMaxTokens: DEFAULT_WRITE_INLINE_LONG_COMPLETION_MAX_TOKENS
-    }
+    },
+    selectionAssist: defaultWriteSelectionAssistSettings()
   }
 }
 
@@ -55,6 +170,8 @@ function normalizeWriteInlineCompletionSettings(
     enabled: input?.enabled !== false,
     retrievalEnabled: input?.retrievalEnabled !== false,
     longCompletionEnabled: input?.longCompletionEnabled !== false,
+    inheritProvider: shouldInheritWriteInlineCompletionProvider(input),
+    providerId: typeof input?.providerId === 'string' ? input.providerId.trim() : defaults.providerId,
     apiKey: typeof input?.apiKey === 'string' ? input.apiKey.trim() : defaults.apiKey,
     baseUrl: typeof input?.baseUrl === 'string' ? input.baseUrl.trim() : defaults.baseUrl,
     inheritModel: shouldInheritWriteInlineCompletionModel(input),
@@ -86,6 +203,14 @@ function normalizeWriteInlineCompletionSettings(
   }
 }
 
+export function shouldInheritWriteInlineCompletionProvider(
+  input: Partial<Pick<WriteInlineCompletionSettingsV1, 'inheritProvider' | 'providerId'>> | undefined
+): boolean {
+  if (typeof input?.inheritProvider === 'boolean') return input.inheritProvider
+  const providerId = typeof input?.providerId === 'string' ? input.providerId.trim() : ''
+  return !providerId
+}
+
 export function normalizeWriteInlineCompletionModel(value: unknown): string {
   const trimmed = typeof value === 'string' ? value.trim() : ''
   if (!trimmed || trimmed === 'auto') return DEFAULT_WRITE_INLINE_COMPLETION_MODEL
@@ -111,12 +236,31 @@ export function resolveWriteInlineCompletionBaseUrl(settings: AppSettingsV1): st
   if (configured && configured !== DEFAULT_WRITE_INLINE_COMPLETION_BASE_URL) {
     return configured
   }
-  return resolveModelProviderBaseUrl(settings)
+  return resolveWriteInlineCompletionProviderProfile(settings).baseUrl.trim() || resolveModelProviderBaseUrl(settings)
 }
 
 export function resolveWriteInlineCompletionApiKey(settings: AppSettingsV1): string {
-  const configured = getNormalizedWriteInlineCompletionSettings(settings).apiKey.trim()
-  return configured || getActiveAgentApiKey(settings)
+  const inlineCompletion = getNormalizedWriteInlineCompletionSettings(settings)
+  const configured = inlineCompletion.apiKey.trim()
+  if (configured) return configured
+  const provider = resolveWriteInlineCompletionProviderProfile(settings)
+  return provider.apiKey.trim() || (inlineCompletion.inheritProvider ? getActiveAgentApiKey(settings) : '')
+}
+
+export function resolveWriteInlineCompletionEndpointFormat(settings: AppSettingsV1): ModelEndpointFormat {
+  return resolveWriteInlineCompletionProviderProfile(settings).endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT
+}
+
+export function resolveWriteInlineCompletionProviderId(settings: AppSettingsV1): string {
+  const inlineCompletion = getNormalizedWriteInlineCompletionSettings(settings)
+  if (!inlineCompletion.inheritProvider && inlineCompletion.providerId.trim()) {
+    return inlineCompletion.providerId.trim()
+  }
+  return getKunRuntimeSettings(settings).providerId?.trim() || DEFAULT_MODEL_PROVIDER_ID
+}
+
+export function resolveWriteInlineCompletionProviderProfile(settings: AppSettingsV1): ModelProviderProfileV1 {
+  return getModelProviderProfile(settings, resolveWriteInlineCompletionProviderId(settings))
 }
 
 export function resolveWriteInlineCompletionModel(
@@ -129,6 +273,10 @@ export function resolveWriteInlineCompletionModel(
   const configured = configuredSettings.model.trim()
   if (!configuredSettings.inheritModel) {
     return normalizeWriteInlineCompletionModel(configured)
+  }
+  if (!configuredSettings.inheritProvider && configuredSettings.providerId.trim()) {
+    const providerModel = resolveWriteInlineCompletionProviderProfile(settings).models[0]?.trim()
+    if (providerModel) return providerModel
   }
   const runtimeModel = getKunRuntimeSettings(settings).model?.trim() ?? ''
   if (runtimeModel) return runtimeModel
@@ -155,7 +303,8 @@ export function normalizeWriteSettings(input: WriteSettingsPatchV1 | undefined):
     defaultWorkspaceRoot,
     activeWorkspaceRoot,
     workspaces: workspaces.length > 0 ? workspaces : [defaultWorkspaceRoot],
-    inlineCompletion: normalizeWriteInlineCompletionSettings(source.inlineCompletion)
+    inlineCompletion: normalizeWriteInlineCompletionSettings(source.inlineCompletion),
+    selectionAssist: normalizeWriteSelectionAssistSettings(source.selectionAssist)
   }
 }
 
@@ -172,10 +321,20 @@ export function mergeWriteSettings(
   if ('model' in inlinePatch && !('inheritModel' in inlinePatch)) {
     delete (nextInlineCompletion as { inheritModel?: boolean }).inheritModel
   }
+  if ('providerId' in inlinePatch && !('inheritProvider' in inlinePatch)) {
+    delete (nextInlineCompletion as { inheritProvider?: boolean }).inheritProvider
+  }
+
+  const selectionAssistPatch = patch?.selectionAssist ?? {}
+  const nextSelectionAssist: WriteSettingsPatchV1['selectionAssist'] = {
+    ...current.selectionAssist,
+    ...selectionAssistPatch
+  }
 
   return normalizeWriteSettings({
     ...current,
     ...(patch ?? {}),
-    inlineCompletion: nextInlineCompletion
+    inlineCompletion: nextInlineCompletion,
+    selectionAssist: nextSelectionAssist
   })
 }

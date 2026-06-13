@@ -4,6 +4,8 @@ import { URL } from 'node:url'
 import { mkdir } from 'node:fs/promises'
 import type {
   AppSettingsV1,
+  ClawImChannelV1,
+  ModelProviderProfileV1,
   ScheduleReasoningEffort,
   ScheduleRunMode,
   ScheduleRunResult,
@@ -13,7 +15,12 @@ import type {
 } from '../shared/app-settings'
 import {
   DEFAULT_SCHEDULE_MODEL,
+  DEFAULT_SCHEDULE_REASONING_EFFORT,
+  buildClawRuntimePrompt,
   buildScheduleRuntimePrompt,
+  getKunRuntimeSettings,
+  getModelProviderSettings,
+  modelProviderModelProfile,
   normalizeScheduleReasoningEffort
 } from '../shared/app-settings'
 import {
@@ -52,6 +59,56 @@ export function scheduledThreadTitle(title: string): string {
   return suffix ? `${prefix} ${suffix}` : prefix
 }
 
+const SCHEDULE_REASONING_EFFORT_SET = new Set<ScheduleReasoningEffort>([
+  'auto',
+  'off',
+  'low',
+  'medium',
+  'high',
+  'max'
+])
+
+type ScheduleModelConfig = {
+  providerId: string
+  model: string
+  reasoningEffort: ScheduleReasoningEffort
+}
+
+function modelIdsMatch(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase()
+}
+
+function isScheduleReasoningEffort(value: string): value is ScheduleReasoningEffort {
+  return SCHEDULE_REASONING_EFFORT_SET.has(value as ScheduleReasoningEffort)
+}
+
+function providerHasModel(provider: Pick<ModelProviderProfileV1, 'models'>, model: string): boolean {
+  return provider.models.some((candidate) => modelIdsMatch(candidate, model))
+}
+
+function firstConcreteProviderModel(provider: Pick<ModelProviderProfileV1, 'models'> | null): string {
+  return provider?.models.find((model) => normalizeTaskModel(model))?.trim() ?? DEFAULT_SCHEDULE_MODEL
+}
+
+function resolveReasoningForModel(
+  provider: Pick<ModelProviderProfileV1, 'modelProfiles'> | null,
+  model: string,
+  reasoningEffort: ScheduleReasoningEffort | string | null | undefined
+): ScheduleReasoningEffort {
+  const requested = normalizeScheduleReasoningEffort(reasoningEffort)
+  const profile = provider ? modelProviderModelProfile(provider, model) : undefined
+  const supported = profile?.reasoning?.supportedEfforts.filter(isScheduleReasoningEffort) ?? []
+  if (supported.length === 0) return requested
+  if (supported.includes(requested)) return requested
+  const profileDefault = profile?.reasoning?.defaultEffort
+  if (profileDefault && isScheduleReasoningEffort(profileDefault) && supported.includes(profileDefault)) {
+    return profileDefault
+  }
+  return supported.includes(DEFAULT_SCHEDULE_REASONING_EFFORT)
+    ? DEFAULT_SCHEDULE_REASONING_EFFORT
+    : supported[0] ?? DEFAULT_SCHEDULE_REASONING_EFFORT
+}
+
 export class ScheduleRuntime {
   private readonly deps: ScheduleRuntimeDeps
   private scheduler: ReturnType<typeof setInterval> | null = null
@@ -62,6 +119,37 @@ export class ScheduleRuntime {
 
   constructor(deps: ScheduleRuntimeDeps) {
     this.deps = deps
+  }
+
+  private resolveScheduleModelConfig(
+    settings: AppSettingsV1,
+    input: {
+      providerId?: string | null
+      model?: string | null
+      reasoningEffort?: ScheduleReasoningEffort | string | null
+    }
+  ): ScheduleModelConfig {
+    const providers = getModelProviderSettings(settings).providers
+    const requestedProviderId = input.providerId?.trim() || ''
+    const requestedModel = normalizeTaskModel(input.model ?? '')
+    const runtimeProviderId = getKunRuntimeSettings(settings).providerId.trim()
+    const scheduleProviderId = settings.schedule.providerId?.trim() || ''
+    const provider =
+      providers.find((item) => item.id === requestedProviderId) ??
+      (requestedModel ? providers.find((item) => providerHasModel(item, requestedModel)) : undefined) ??
+      providers.find((item) => item.id === runtimeProviderId) ??
+      providers.find((item) => item.id === scheduleProviderId) ??
+      providers[0] ??
+      null
+    const model =
+      requestedModel && (!provider || providerHasModel(provider, requestedModel))
+        ? requestedModel
+        : firstConcreteProviderModel(provider)
+    return {
+      providerId: provider?.id ?? requestedProviderId,
+      model,
+      reasoningEffort: resolveReasoningForModel(provider, model, input.reasoningEffort)
+    }
   }
 
   sync(settings: AppSettingsV1): void {
@@ -99,23 +187,41 @@ export class ScheduleRuntime {
 
   async createScheduledTaskFromText(
     text: string,
-    options: { workspaceRoot?: string | null; modelHint?: string | null; mode?: ScheduleRunMode | null } = {}
+    options: {
+      workspaceRoot?: string | null
+      clawChannelId?: string | null
+      providerId?: string | null
+      modelHint?: string | null
+      reasoningEffort?: ScheduleReasoningEffort | null
+      mode?: ScheduleRunMode | null
+    } = {}
   ): Promise<ScheduleTaskFromTextResult> {
     const settings = await this.deps.store.load()
     try {
+      const clawChannel = this.resolveClawChannel(settings, options.clawChannelId)
+      const modelConfig = this.resolveScheduleModelConfig(settings, {
+        providerId: options.providerId ?? settings.schedule.providerId,
+        model: options.modelHint?.trim() || clawChannel?.model.trim() || settings.schedule.model || DEFAULT_SCHEDULE_MODEL,
+        reasoningEffort: options.reasoningEffort ?? DEFAULT_SCHEDULE_REASONING_EFFORT
+      })
       const request = await detectClawScheduledTaskRequest(
         settings,
         text,
-        options.modelHint?.trim() || settings.schedule.model || DEFAULT_SCHEDULE_MODEL
+        modelConfig.model
       )
       if (!request) return { kind: 'noop' }
       const task = buildScheduledTaskFromDetectedRequest({
         request,
-        workspaceRoot: options.workspaceRoot?.trim() || this.resolveDefaultWorkspaceRoot(settings),
-        model: options.modelHint?.trim() || settings.schedule.model || DEFAULT_SCHEDULE_MODEL,
+        workspaceRoot:
+          options.workspaceRoot?.trim() ||
+          (clawChannel ? this.resolveClawChannelWorkspaceRoot(settings, clawChannel) : this.resolveDefaultWorkspaceRoot(settings)),
+        providerId: modelConfig.providerId,
+        model: modelConfig.model,
+        reasoningEffort: modelConfig.reasoningEffort,
         mode: options.mode ?? settings.schedule.mode,
         id: randomUUID()
       })
+      task.clawChannelId = clawChannel?.id ?? ''
       const saved = await this.deps.store.patch({
         schedule: {
           enabled: true,
@@ -158,22 +264,34 @@ export class ScheduleRuntime {
     title: string
     prompt: string
     workspaceRoot?: string
+    providerId?: string
     model?: string
     reasoningEffort?: ScheduleReasoningEffort
     mode?: ScheduleRunMode
+    clawChannelId?: string
     enabled?: boolean
     schedule: Partial<ScheduledTaskV1['schedule']> & { kind: ScheduledTaskV1['schedule']['kind'] }
   }): Promise<ScheduledTaskV1> {
     const settings = await this.deps.store.load()
+    const clawChannel = this.resolveClawChannel(settings, input.clawChannelId)
+    const modelConfig = this.resolveScheduleModelConfig(settings, {
+      providerId: input.providerId ?? settings.schedule.providerId,
+      model: input.model?.trim() || clawChannel?.model.trim() || settings.schedule.model || DEFAULT_SCHEDULE_MODEL,
+      reasoningEffort: input.reasoningEffort ?? DEFAULT_SCHEDULE_REASONING_EFFORT
+    })
     const now = new Date().toISOString()
     const task: ScheduledTaskV1 = {
       id: randomUUID(),
       title: input.title.trim() || 'New scheduled task',
       enabled: input.enabled !== false,
       prompt: input.prompt,
-      workspaceRoot: input.workspaceRoot?.trim() || this.resolveDefaultWorkspaceRoot(settings),
-      model: input.model?.trim() || settings.schedule.model || DEFAULT_SCHEDULE_MODEL,
-      reasoningEffort: normalizeScheduleReasoningEffort(input.reasoningEffort),
+      workspaceRoot:
+        input.workspaceRoot?.trim() ||
+        (clawChannel ? this.resolveClawChannelWorkspaceRoot(settings, clawChannel) : this.resolveDefaultWorkspaceRoot(settings)),
+      clawChannelId: clawChannel?.id ?? '',
+      providerId: modelConfig.providerId,
+      model: modelConfig.model,
+      reasoningEffort: modelConfig.reasoningEffort,
       mode: input.mode ?? settings.schedule.mode,
       schedule: {
         kind: input.schedule.kind,
@@ -329,13 +447,20 @@ export class ScheduleRuntime {
 
     try {
       const settings = await this.deps.store.load()
+      const clawChannel = this.resolveTaskClawChannel(settings, task)
+      const modelConfig = this.resolveScheduleModelConfig(settings, {
+        providerId: task.providerId,
+        model: task.model,
+        reasoningEffort: task.reasoningEffort
+      })
       const result = await this.runPrompt(settings, {
         prompt: task.prompt,
         title: scheduledThreadTitle(task.title),
-        workspaceRoot: task.workspaceRoot || this.resolveDefaultWorkspaceRoot(settings),
-        model: task.model,
-        reasoningEffort: task.reasoningEffort,
+        workspaceRoot: this.resolveTaskWorkspaceRoot(settings, task, clawChannel),
+        model: modelConfig.model,
+        reasoningEffort: modelConfig.reasoningEffort,
         mode: task.mode,
+        clawChannel,
         waitForResult: false,
         responseTimeoutMs: TASK_RESPONSE_TIMEOUT_MS
       })
@@ -440,8 +565,13 @@ export class ScheduleRuntime {
     const thread = JSON.parse(create.body) as ThreadRecordJson
 
     const turnBody: Record<string, unknown> = {
-      prompt: buildScheduleRuntimePrompt(settings, options.prompt),
-      mode: options.mode
+      prompt: options.clawChannel
+        ? buildClawRuntimePrompt(settings, options.prompt, { channel: options.clawChannel })
+        : buildScheduleRuntimePrompt(settings, options.prompt),
+      mode: options.mode,
+      // Scheduled turns are headless — nobody can answer a user_input
+      // prompt, and a turn that asks one hangs until the response timeout.
+      disableUserInput: true
     }
     if (model) turnBody.model = model
     if (options.reasoningEffort) {
@@ -508,6 +638,29 @@ export class ScheduleRuntime {
     return settings.schedule.defaultWorkspaceRoot.trim() || settings.workspaceRoot
   }
 
+  private resolveClawChannel(settings: AppSettingsV1, channelId: string | null | undefined): ClawImChannelV1 | null {
+    const id = channelId?.trim()
+    if (!id) return null
+    return settings.claw.channels.find((channel) => channel.id === id) ?? null
+  }
+
+  private resolveTaskClawChannel(settings: AppSettingsV1, task: ScheduledTaskV1): ClawImChannelV1 | null {
+    return this.resolveClawChannel(settings, task.clawChannelId)
+  }
+
+  private resolveClawChannelWorkspaceRoot(settings: AppSettingsV1, channel: ClawImChannelV1): string {
+    return channel.workspaceRoot.trim() || settings.claw.im.workspaceRoot.trim() || this.resolveDefaultWorkspaceRoot(settings)
+  }
+
+  private resolveTaskWorkspaceRoot(
+    settings: AppSettingsV1,
+    task: ScheduledTaskV1,
+    channel: ClawImChannelV1 | null
+  ): string {
+    return task.workspaceRoot.trim() ||
+      (channel ? this.resolveClawChannelWorkspaceRoot(settings, channel) : this.resolveDefaultWorkspaceRoot(settings))
+  }
+
   private syncInternalServer(settings: AppSettingsV1): void {
     const internal = settings.schedule.internal
     const key = `${internal.port}`
@@ -553,9 +706,10 @@ export class ScheduleRuntime {
       const secret = settings.schedule.internal.secret.trim()
       if (secret) {
         const auth = req.headers.authorization ?? ''
-        const headerSecret = Array.isArray(req.headers['x-deepseek-gui-secret'])
-          ? req.headers['x-deepseek-gui-secret'][0]
-          : req.headers['x-deepseek-gui-secret']
+        // 新名字 x-kun-secret 优先;旧名字 x-deepseek-gui-secret 已配置
+        // 在外部系统里,属于对外契约,必须长期兼容。
+        const rawHeaderSecret = req.headers['x-kun-secret'] ?? req.headers['x-deepseek-gui-secret']
+        const headerSecret = Array.isArray(rawHeaderSecret) ? rawHeaderSecret[0] : rawHeaderSecret
         if (auth !== `Bearer ${secret}` && headerSecret !== secret) {
           writeJson(res, 401, { ok: false, message: 'Unauthorized.' })
           return
@@ -593,6 +747,8 @@ export class ScheduleRuntime {
           title,
           prompt,
           workspaceRoot: asString(input.workspaceRoot) || undefined,
+          clawChannelId: asString(input.clawChannelId) || undefined,
+          providerId: asString(input.providerId) || undefined,
           model: asString(input.model) || undefined,
           reasoningEffort: (asString(input.reasoningEffort) as ScheduleReasoningEffort) || undefined,
           mode: (asString(input.mode) as ScheduleRunMode) || undefined,

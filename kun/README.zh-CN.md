@@ -1,12 +1,12 @@
 # Kun
 
-Kun 是 DeepSeek-GUI 的本地 HTTP/SSE 代理运行时。它为 GUI 提供稳定、类型化且 GUI 友好的代理循环合约：
+Kun 是同名桌面应用的本地 HTTP/SSE 代理运行时。它为 GUI 提供稳定、类型化且 GUI 友好的代理循环合约：
 
 - `kun serve` 会启动一个本地 HTTP 服务器，并暴露 `/v1/*` 路由。
 - 线程、回合（turn）、事件、审批和用量都会以追加写入的 JSONL 日志持久化，并配合原子化索引更新。
 - Agent 循环采用 cache-first 设计：不可变的 prompt 前缀、边界受限的 TTL/LRU 缓存、inflight 跟踪，以及显式上下文压缩。
 
-Kun 取意于《庄子·逍遥游》中的“北冥有鱼，其名为鲲”。在 DeepSeek-GUI
+Kun 取意于《庄子·逍遥游》中的“北冥有鱼，其名为鲲”。在本项目
 里，它代表一个更深的本地运行时：不是把模型回复包一层 UI，而是让模型可以
 长期携带项目上下文、稳定调用工具、恢复会话，并在桌面、写作、手机连接和
 定时任务之间复用同一套 agent loop。
@@ -247,6 +247,61 @@ Kun 默认使用混合存储：`threads/{threadId}/messages.jsonl` 与 `events.j
 
 在渲染端使用 `GET /v1/runtime/info` 获取运行时能力清单，使用
 `GET /v1/runtime/tools` 查看 provider 诊断。GUI 设置页会读取这两条接口。
+
+## Hooks（钩子）
+
+Hooks 允许外部命令观察并干预 agent 生命周期，无需重新编译 Kun。在
+`config.json` 顶层 `hooks` 键下配置（GUI 默认的
+`~/.deepseekgui/kun/config.json` 直接生效），主循环、子代理和 CLI
+共用同一套 hook。
+
+```json
+{
+  "hooks": [
+    {
+      "phase": "PreToolUse",
+      "matcher": "bash|write_file|mcp__*",
+      "command": "node ~/.kun-hooks/guard.js",
+      "timeoutMs": 10000
+    },
+    { "phase": "UserPromptSubmit", "command": "~/.kun-hooks/prompt-context.sh" },
+    { "phase": "TurnEnd", "command": "~/.kun-hooks/notify.sh" }
+  ]
+}
+```
+
+阶段：
+
+- `PreToolUse` — 每次工具调用前。可改写 `arguments`、拒绝调用，或
+  自动放行（跳过审批弹窗）。
+- `PostToolUse` — 每次工具调用后。可替换 `output` 或把结果标记为错误。
+- `UserPromptSubmit` — 回合首次模型调用前。可拒绝整个回合，或注入
+  `additionalContext`（持久化为一条 `<hook-context>` 用户消息）。
+- `TurnStart`、`TurnEnd`、`PreCompact` — 只读通知。失败只产生
+  `hook_warning` 运行时事件，绝不影响回合。
+
+匹配：`matcher` 是针对工具名的 glob（`*` 通配，`|` 多选）；`toolNames`
+是精确名单。两者任一命中即运行；都省略则匹配所有工具。生命周期阶段
+忽略匹配器。
+
+命令协议：invocation 以 JSON 写入 stdin（`phase` 加各阶段字段，如
+`call`、`result`、`prompt`、`status`、`reason`）。退出码 `0` 时 stdout
+按 JSON 结果解析（`{"decision":"deny"}`、`{"arguments":{...}}`、
+`{"output":...}`、`{"additionalContext":"..."}`）；纯文本 stdout 在
+`UserPromptSubmit` 中作为 `additionalContext`，其余阶段作为 message。
+退出码 `2` 阻断动作，stderr 为原因。其他非零退出码只产生非阻断的
+`hook_warning`。默认超时 60 秒（`timeoutMs` 可覆盖）；工具阶段超时按
+失败关闭处理，只读阶段超时不会阻断。
+
+Hooks 按声明顺序链式执行：每个 hook 看到的是前面 hook 改写后的调用或
+结果。以库方式嵌入运行时的调用方还可以通过 `LocalToolHost` 与
+`AgentLoop` 的 `hooks` 选项传入进程内函数 hook（从 `kun/hooks` 导出）。
+
+命令 hook 以运行时权限执行任意 shell 命令——请把 `config.json` 当作
+可信输入对待。
+
+完整参考见 `../docs/kun-hooks.md`：各阶段 stdin 载荷、结果字段、
+失败语义与示例 hook 脚本。
 
 ## 数据目录布局
 

@@ -1,6 +1,11 @@
 import { EditorSelection, EditorState } from '@codemirror/state'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { loadWriteMarkdownImage } from './markdown-image'
 import { markdownLivePreviewTestInternals } from './markdown-live-preview'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 describe('markdown live preview', () => {
   it('keeps markdown concealment stable while text is selected', () => {
@@ -118,5 +123,72 @@ describe('markdown live preview', () => {
         code: '输入: [我] [爱] [深] [度] [学] [习]\n掩码: 1 0 0 0 0 0'
       }
     ])
+  })
+
+  it('resolves root-level document images through the workspace image bridge', () => {
+    vi.stubGlobal('window', {
+      kunGui: {
+        readWorkspaceImage: vi.fn()
+      }
+    })
+
+    const parsed = markdownLivePreviewTestInternals.markdownImageFromSource(
+      '![信息图](img/infographic-20260611012250-00f1.png)',
+      '/tmp/write_workspace/doc.md'
+    )
+
+    expect(parsed).toEqual({
+      alt: '信息图',
+      src: '',
+      localPath: '/tmp/write_workspace/img/infographic-20260611012250-00f1.png'
+    })
+  })
+
+  it('parses bracketed image paths that contain spaces', () => {
+    vi.stubGlobal('window', {
+      kunGui: {
+        readWorkspaceImage: vi.fn()
+      }
+    })
+
+    const parsed = markdownLivePreviewTestInternals.markdownImageFromSource(
+      '![Hero](<../assets/hero image.png>)',
+      '/tmp/write_workspace/docs/draft.md'
+    )
+
+    expect(parsed).toEqual({
+      alt: 'Hero',
+      src: '',
+      localPath: '/tmp/write_workspace/assets/hero image.png'
+    })
+  })
+
+  it('loads local markdown images as data URLs', async () => {
+    const readWorkspaceImage = vi.fn(async () => ({
+      ok: true as const,
+      path: '/tmp/write_workspace/img/hero.png',
+      dataUrl: 'data:image/png;base64,aGVybw==',
+      mimeType: 'image/png',
+      size: 4
+    }))
+    vi.stubGlobal('window', {
+      kunGui: {
+        readWorkspaceImage
+      }
+    })
+
+    const result = await loadWriteMarkdownImage(
+      'img/hero.png',
+      '/tmp/write_workspace/doc.md'
+    )
+
+    expect(readWorkspaceImage).toHaveBeenCalledWith({
+      path: '/tmp/write_workspace/img/hero.png'
+    })
+    expect(result).toEqual({
+      ok: true,
+      src: 'data:image/png;base64,aGVybw==',
+      localPath: '/tmp/write_workspace/img/hero.png'
+    })
   })
 })

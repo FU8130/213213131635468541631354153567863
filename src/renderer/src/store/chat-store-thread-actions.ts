@@ -21,7 +21,13 @@ import {
 } from '../lib/thread-fork-registry'
 import { workspaceLabelFromPath } from '../lib/workspace-label'
 import { isInternalTemporaryWorkspace, normalizeWorkspaceRoot } from '../lib/workspace-path'
-import { buildClawRuntimePrompt, buildCodeRuntimePrompt, getActiveAgentApiKey } from '@shared/app-settings'
+import {
+  DEFAULT_MODEL_PROVIDER_ID,
+  buildClawRuntimePrompt,
+  buildCodeRuntimePrompt,
+  getActiveAgentApiKey,
+  getKunRuntimeSettings
+} from '@shared/app-settings'
 import type { ChatState, ChatStoreGet, ChatStoreSet } from './chat-store-types'
 import {
   activeClawChannel,
@@ -40,8 +46,8 @@ import {
   collectAssistantTextForTurn,
   findLatestUserBlockId,
   findReusableEmptyThreadId,
-  hasPendingRuntimeWork,
   reconcileOptimisticUserBlock,
+  threadHasPendingRuntimeWork,
   threadSnapshotLooksRunning,
   threadBelongsToWorkspace
 } from './chat-store-runtime-helpers'
@@ -95,6 +101,37 @@ type StoreActionContext = {
 }
 
 let drainingQueuedMessages = false
+
+function fallbackComposerProviderIdForSend(state: ChatState): string {
+  return state.route === 'claw' ? '' : state.composerProviderId.trim()
+}
+
+async function ensureRuntimeProviderForSend(input: {
+  providerId?: string
+  model?: string
+  set: ChatStoreSet
+  get: ChatStoreGet
+}): Promise<void> {
+  const providerId = input.providerId?.trim()
+  const model = input.model?.trim()
+  if (!providerId || !model || model.toLowerCase() === 'auto') return
+  const settings = await rendererRuntimeClient.getSettings({ forceRefresh: true })
+  const runtime = getKunRuntimeSettings(settings)
+  const activeProviderId = runtime.providerId?.trim() || DEFAULT_MODEL_PROVIDER_ID
+  if (activeProviderId === providerId) return
+  input.set({ runtimeConnection: 'checking', error: null, runtimeErrorDetail: null })
+  try {
+    await window.kunGui.saveSettingsSilent({ agents: { kun: { providerId, model } } })
+    rendererRuntimeClient.invalidateSettings()
+    await rendererRuntimeClient.restartRuntime()
+    await getProvider().connect()
+    input.set({ runtimeConnection: 'ready', error: null, runtimeErrorDetail: null })
+    void input.get().loadComposerModels()
+  } catch (error) {
+    input.set({ runtimeConnection: 'offline' })
+    throw error
+  }
+}
 
 function subscribeThreadEventsWithRecovery(
   provider: AgentProvider,
@@ -227,7 +264,7 @@ export function createThreadActions(
 
       const ac = new AbortController()
       sseAbortRef.current = ac
-      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal })
+      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal, sinceSeq: latestSeq })
       void p.subscribeThreadEvents(activeThreadId, latestSeq, sink, ac.signal)
       if (busy) {
         armBusyWatchdog(set, get)
@@ -313,7 +350,7 @@ export function createThreadActions(
       syncTurnCompletionPoll(set, get)
       const ac = new AbortController()
       sseAbortRef.current = ac
-      const sink = buildThreadEventSink(set, get, { threadId: id, signal: ac.signal })
+      const sink = buildThreadEventSink(set, get, { threadId: id, signal: ac.signal, sinceSeq: latestSeq })
       subscribeThreadEventsWithRecovery(p, id, latestSeq, sink, ac.signal, get)
       if (busy) armBusyWatchdog(set, get)
     } catch (e) {
@@ -363,7 +400,7 @@ export function createThreadActions(
       const writeThreadId = await get().ensureWriteThreadForWorkspace()
       if (!writeThreadId) return false
     }
-    const hasPendingActiveTurn = get().blocks.some(hasPendingRuntimeWork)
+    const hasPendingActiveTurn = threadHasPendingRuntimeWork(get().blocks)
     if (get().busy || hasPendingActiveTurn) {
       if (overrides?.guiPlan) {
         set({ error: i18n.t('common:composerQueuePlaceholder') })
@@ -378,6 +415,8 @@ export function createThreadActions(
       const overrideModel = overrides?.model?.trim()
       const composerModel =
         overrideModel ?? (get().route === 'claw' && clawModel ? clawModel : get().composerModel.trim())
+      const composerProviderId =
+        overrides?.providerId?.trim() || fallbackComposerProviderIdForSend(get())
       const userModelChip =
         overrides?.modelLabel ?? optimisticUserModelLabel(composerModel, threadSnap?.model)
       const displayText = overrides?.displayText?.trim()
@@ -393,6 +432,7 @@ export function createThreadActions(
             ...(displayText ? { displayText } : {}),
             ...(mode ? { mode } : {}),
             ...(composerModel ? { model: composerModel } : {}),
+            ...(composerProviderId ? { providerId: composerProviderId } : {}),
             ...(userModelChip ? { modelLabel: userModelChip } : {}),
             ...(reasoningEffort ? { reasoningEffort } : {}),
             ...(overrides?.guiPlan ? { guiPlan: overrides.guiPlan } : {}),
@@ -438,6 +478,8 @@ export function createThreadActions(
     const overrideModel = overrides?.model?.trim()
     const composerModel =
       queued?.model ?? overrideModel ?? (get().route === 'claw' && clawModel ? clawModel : get().composerModel.trim())
+    const composerProviderId =
+      queued?.providerId ?? overrides?.providerId?.trim() ?? fallbackComposerProviderIdForSend(get())
     const reasoningEffort = queued?.reasoningEffort ?? overrides?.reasoningEffort?.trim()
     const userModelChip =
       queued?.modelLabel ?? overrides?.modelLabel ?? optimisticUserModelLabel(composerModel, threadSnap?.model)
@@ -538,7 +580,7 @@ export function createThreadActions(
         }))
         void get().refreshThreads()
       } catch (e) {
-        void window.dsGui.logError('create-thread', 'Failed to create thread', {
+        void window.kunGui.logError('create-thread', 'Failed to create thread', {
           message: e instanceof Error ? e.message : String(e)
         }).catch(() => undefined)
         set({
@@ -567,6 +609,12 @@ export function createThreadActions(
     try {
       const seqAtSend = get().lastSeq
       const channel = get().route === 'claw' ? activeClawChannel(get()) : null
+      await ensureRuntimeProviderForSend({
+        providerId: channel ? undefined : composerProviderId,
+        model: composerModel,
+        set,
+        get
+      })
       const settings = await rendererRuntimeClient.getSettings()
       let runtimeText: string
       if (channel) {
@@ -631,8 +679,8 @@ export function createThreadActions(
           })()
         }))
       }
-      if (channel && typeof window.dsGui?.mirrorClawChannelMessage === 'function') {
-        const userMirror = await window.dsGui.mirrorClawChannelMessage(
+      if (channel && typeof window.kunGui?.mirrorClawChannelMessage === 'function') {
+        const userMirror = await window.kunGui.mirrorClawChannelMessage(
           activeThreadId,
           trimmedText,
           'user'
@@ -661,14 +709,14 @@ export function createThreadActions(
       set({ currentTurnId: turnId })
       const ac = new AbortController()
       sseAbortRef.current = ac
-      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal })
+      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal, sinceSeq: seqAtSend })
       subscribeThreadEventsWithRecovery(p, activeThreadId, seqAtSend, sink, ac.signal, get)
       armBusyWatchdog(set, get)
       await get().refreshThreads()
       return true
     } catch (e) {
       clearBusyWatchdog()
-      void window.dsGui.logError('send-message', 'Failed to send message', {
+      void window.kunGui.logError('send-message', 'Failed to send message', {
         message: e instanceof Error ? e.message : String(e),
         threadId: activeThreadId
       }).catch(() => undefined)
@@ -713,7 +761,7 @@ export function createThreadActions(
       set({ error: i18n.t('common:reviewUnavailable') })
       return false
     }
-    if (get().busy || get().blocks.some(hasPendingRuntimeWork)) {
+    if (get().busy || threadHasPendingRuntimeWork(get().blocks)) {
       set({ error: i18n.t('common:composerQueuePlaceholder') })
       return false
     }
@@ -757,6 +805,7 @@ export function createThreadActions(
       }
       const threadSnap = get().threads.find((thread) => thread.id === activeThreadId)
       const composerModel = get().composerModel.trim()
+      const composerProviderId = get().composerProviderId.trim()
       const userModelChip = optimisticUserModelLabel(composerModel, threadSnap?.model)
       const seqAtSend = get().lastSeq
       resetBusyRecoveryAttempts()
@@ -771,6 +820,12 @@ export function createThreadActions(
         currentTurnId: null,
         currentTurnUserId: null
       })
+      await ensureRuntimeProviderForSend({
+        providerId: composerProviderId,
+        model: composerModel,
+        set,
+        get
+      })
       const { turnId, userMessageItemId } = await p.reviewThread(activeThreadId, target, {
         ...(composerModel ? { model: composerModel } : {})
       })
@@ -780,7 +835,7 @@ export function createThreadActions(
       set({ currentTurnId: turnId })
       const ac = new AbortController()
       sseAbortRef.current = ac
-      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal })
+      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal, sinceSeq: seqAtSend })
       subscribeThreadEventsWithRecovery(p, activeThreadId, seqAtSend, sink, ac.signal, get)
       armBusyWatchdog(set, get)
       await get().refreshThreads()

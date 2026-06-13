@@ -12,13 +12,22 @@ const HEARTBEAT_INTERVAL_MS = 15_000
  * `since_seq`, then subscribes to the event bus to deliver live
  * updates. The stream closes when the request's `AbortSignal`
  * fires (the client disconnects) or the server stops publishing.
+ *
+ * Delivery is deduplicated per connection: an event whose seq is at or
+ * below the connection's high-water mark is dropped, so an event that
+ * lands in both the persisted backlog and the live subscription (the
+ * recorder persists before publishing) is delivered exactly once.
+ * Heartbeats reuse the high-water mark instead of allocating fresh
+ * seqs — after a runtime restart the in-memory seq counter starts
+ * over, and stamping heartbeats with those low seqs used to rewind
+ * client cursors, which made the next subscription replay the entire
+ * thread history into the live transcript.
  */
 export function buildEventStreamResponse(input: {
   request: Request
   threadId: string
   eventBus: EventBus
   sessionStore: SessionStore
-  allocateSeq: (threadId: string) => number
 }): Response {
   const url = new URL(input.request.url)
   const sinceSeqFromQuery = Number(url.searchParams.get('since_seq') ?? '0') || 0
@@ -46,14 +55,25 @@ export function buildEventStreamResponse(input: {
       }
       input.request.signal.addEventListener('abort', close)
       try {
-        const backlog = await input.sessionStore.loadEventsSince(input.threadId, sinceSeq)
-        for (const event of backlog) {
+        let lastDeliveredSeq = sinceSeq
+        const deliver = (event: RuntimeEvent): void => {
+          if (typeof event.seq === 'number') {
+            if (event.seq <= lastDeliveredSeq) return
+            lastDeliveredSeq = event.seq
+          }
           controller.enqueue(encoder.encode(encodeSseEvent(event)))
+        }
+        const highestSeq = await input.sessionStore.highestSeq(input.threadId).catch(() => 0)
+        const backlog = sinceSeq >= highestSeq
+          ? []
+          : await input.sessionStore.loadEventsSince(input.threadId, sinceSeq)
+        for (const event of backlog) {
+          deliver(event)
         }
         unsubscribe = input.eventBus.subscribe(input.threadId, (event: RuntimeEvent) => {
           if (closed) return
           try {
-            controller.enqueue(encoder.encode(encodeSseEvent(event)))
+            deliver(event)
           } catch {
             close()
           }
@@ -65,7 +85,7 @@ export function buildEventStreamResponse(input: {
               encoder.encode(
                 encodeSseEvent({
                   kind: 'heartbeat',
-                  seq: input.allocateSeq(input.threadId),
+                  seq: lastDeliveredSeq,
                   timestamp: new Date().toISOString(),
                   threadId: input.threadId
                 })

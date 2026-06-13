@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from 'react'
 import { useChatStore } from './store/chat-store'
 import { supportsDesktopTitleBar, WindowsTitleBar } from './components/WindowsTitleBar'
+import { RuntimeStatusBanner } from './components/RuntimeStatusBanner'
 
 const Workbench = lazy(() =>
   import('./components/Workbench').then((module) => ({ default: module.Workbench }))
@@ -22,7 +23,7 @@ export default function AppShell(): React.ReactElement {
   const route = useChatStore((s) => s.route)
   const boot = useChatStore((s) => s.boot)
   const initialSetupOpen = useChatStore((s) => s.initialSetupOpen)
-  const platform = typeof window !== 'undefined' ? window.dsGui?.platform ?? 'unknown' : 'unknown'
+  const platform = typeof window !== 'undefined' ? window.kunGui?.platform ?? 'unknown' : 'unknown'
   const hasDesktopTitleBar = supportsDesktopTitleBar(platform)
 
   useEffect(() => {
@@ -42,6 +43,7 @@ export default function AppShell(): React.ReactElement {
     <div className={hasDesktopTitleBar ? 'ds-windows-app-frame flex h-full min-h-0 flex-col bg-ds-main' : 'flex h-full min-h-0 flex-col bg-transparent'}>
       {hasDesktopTitleBar ? <WindowsTitleBar platform={platform} /> : null}
       <div className="flex min-h-0 flex-1 flex-col">
+        <RuntimeStatusBanner />
         <Suspense fallback={<RouteFallback />}>
           {route === 'settings' ? <SettingsView /> : <Workbench />}
         </Suspense>

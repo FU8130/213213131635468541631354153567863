@@ -1,5 +1,6 @@
 import type { FormEvent, ReactElement } from 'react'
 import { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   ChevronDown,
   ChevronRight,
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { WorkspaceEntry } from '@shared/workspace-file'
+import { confirmDialog } from '../../lib/confirm-dialog'
 import { formatWorkspacePickerError } from '../../lib/format-workspace-picker-error'
 import { useChatStore, type SettingsRouteSection } from '../../store/chat-store'
 import {
@@ -70,6 +72,8 @@ export function WriteSidebar({
   const runtimeConnection = useChatStore((s) => s.runtimeConnection)
   const [entryDialog, setEntryDialog] = useState<EntryDialog | null>(null)
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({})
+  // Field-level subscription: the sidebar must not re-render on fileContent or
+  // selection updates, which fire on every keystroke in the editor.
   const {
     defaultWorkspaceRoot,
     workspaceRoots,
@@ -93,7 +97,32 @@ export function WriteSidebar({
     deleteEntry,
     refreshWorkspace,
     setFileError
-  } = useWriteWorkspaceStore()
+  } = useWriteWorkspaceStore(
+    useShallow((s) => ({
+      defaultWorkspaceRoot: s.defaultWorkspaceRoot,
+      workspaceRoots: s.workspaceRoots,
+      settingsError: s.settingsError,
+      workspaceRoot: s.workspaceRoot,
+      rootDirectory: s.rootDirectory,
+      entriesByDir: s.entriesByDir,
+      expandedDirs: s.expandedDirs,
+      loadingDirs: s.loadingDirs,
+      treeError: s.treeError,
+      activeFilePath: s.activeFilePath,
+      loadWriteSettings: s.loadWriteSettings,
+      selectWriteWorkspace: s.selectWriteWorkspace,
+      addWriteWorkspace: s.addWriteWorkspace,
+      removeWriteWorkspace: s.removeWriteWorkspace,
+      toggleDirectory: s.toggleDirectory,
+      openFile: s.openFile,
+      createFile: s.createFile,
+      createDirectory: s.createDirectory,
+      renameEntry: s.renameEntry,
+      deleteEntry: s.deleteEntry,
+      refreshWorkspace: s.refreshWorkspace,
+      setFileError: s.setFileError
+    }))
+  )
 
   useEffect(() => {
     void loadWriteSettings()
@@ -190,10 +219,10 @@ export function WriteSidebar({
   const pickWriteWorkspace = async (): Promise<void> => {
     try {
       setFileError(null)
-      if (typeof window.dsGui?.pickWorkspaceDirectory !== 'function') {
+      if (typeof window.kunGui?.pickWorkspaceDirectory !== 'function') {
         throw new Error('workspace:pick-directory unavailable')
       }
-      const picked = await window.dsGui.pickWorkspaceDirectory(workspaceRoot || defaultWorkspaceRoot || undefined)
+      const picked = await window.kunGui.pickWorkspaceDirectory(workspaceRoot || defaultWorkspaceRoot || undefined)
       if (!picked.canceled && picked.path) {
         await addWriteWorkspace(picked.path)
         if (runtimeConnection === 'ready') void ensureWriteThreadForWorkspace(picked.path)
@@ -222,7 +251,7 @@ export function WriteSidebar({
 
   const removeWorkspaceFromList = async (workspacePath: string): Promise<void> => {
     if (workspaceRoots.length <= 1) return
-    if (!window.confirm(t('writeRemoveWorkspaceConfirm', { name: writeBasenameFromPath(workspacePath) }))) return
+    if (!(await confirmDialog(t('writeRemoveWorkspaceConfirm', { name: writeBasenameFromPath(workspacePath) })))) return
     await removeWriteWorkspace(workspacePath)
   }
 
@@ -487,7 +516,7 @@ function WriteEntryDialog({
       <form
         onSubmit={onSubmit}
         onMouseDown={(event) => event.stopPropagation()}
-        className="w-full max-w-sm rounded-[24px] border border-ds-border bg-ds-card p-5 shadow-[0_24px_72px_rgba(15,23,42,0.22)]"
+        className="w-full max-w-sm rounded-[24px] border border-ds-border bg-ds-card p-5 shadow-[0_24px_72px_rgba(20,47,95,0.22)]"
       >
         <h2 className="text-[18px] font-semibold tracking-[-0.035em] text-ds-ink">
           {entryDialogTitle(dialog, t)}

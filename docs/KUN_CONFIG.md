@@ -1,18 +1,18 @@
 # Kun Agent 与模型配置说明
 
-本文说明 DeepSeek GUI / Kun 的本地配置文件在哪里、哪些字段由 UI 管理、哪些字段适合手工扩展，以及模型上下文压缩阈值应该如何配置。
+本文说明 Kun（桌面应用与运行时）的本地配置文件在哪里、哪些字段由 UI 管理、哪些字段适合手工扩展，以及模型上下文压缩阈值应该如何配置。
 
 ## 配置文件分层
 
-DeepSeek GUI 有两层配置。
+Kun 有两层配置。
 
 1. GUI settings
 
    这是桌面应用自己的设置文件，保存设置页里的 Agent 运行时选项。
 
-   - macOS: `~/Library/Application Support/DeepSeek GUI/deepseek-gui-settings.json`
-   - Windows: `%APPDATA%/DeepSeek GUI/deepseek-gui-settings.json`
-   - Linux: `~/.config/DeepSeek GUI/deepseek-gui-settings.json`
+   - macOS: `~/Library/Application Support/Kun/kun-settings.json`
+   - Windows: `%APPDATA%/Kun/kun-settings.json`
+   - Linux: `~/.config/Kun/kun-settings.json`
 
    Agent 运行时设置在 `agents.kun` 下，例如端口、data dir、默认模型、审批策略、sandbox、token economy 等。多数用户通过设置页修改这些字段。
 
@@ -21,7 +21,7 @@ DeepSeek GUI 有两层配置。
    这是 Kun 本地运行时读取的高级配置文件。默认路径是：
 
    ```text
-   ~/.deepseekgui/kun/config.json
+   ~/.kun/data/config.json
    ```
 
    如果 `agents.kun.dataDir` 改成了别的目录，实际路径就是：
@@ -36,7 +36,7 @@ DeepSeek GUI 有两层配置。
 
 GUI 启动 Kun 时会按下面的顺序合并配置。
 
-1. GUI 读取 `deepseek-gui-settings.json`，得到 `agents.kun` 和通用 provider 配置。
+1. GUI 读取 `kun-settings.json`（旧版 `deepseek-gui-settings.json` 会自动迁移），得到 `agents.kun` 和通用 provider 配置。
 2. GUI 在启动 Kun 前同步 `<dataDir>/config.json`，写入 UI 管理的 token economy、默认压缩摘要参数、默认模型 profiles、runtime tuning、MCP search 和附件能力。
 3. Kun serve 读取 `<dataDir>/config.json` 或 `--config` 指定的文件。
 4. CLI 参数和环境变量会覆盖 `serve` 里的基础启动字段，例如 `--model`、`--port`、`KUN_MODEL`、`KUN_PORT`。
@@ -49,7 +49,7 @@ GUI 启动 Kun 时会按下面的顺序合并配置。
   "serve": {
     "host": "127.0.0.1",
     "port": 8899,
-    "dataDir": "~/.deepseekgui/kun",
+    "dataDir": "~/.kun/data",
     "runtimeToken": "",
     "apiKey": "",
     "baseUrl": "https://api.deepseek.com/beta",
@@ -200,7 +200,7 @@ Kun 内置 DeepSeek V4 默认模型画像：
       "binaryPath": "",
       "port": 8899,
       "autoStart": true,
-      "dataDir": "~/.deepseekgui/kun",
+      "dataDir": "~/.kun/data",
       "model": "deepseek-v4-pro",
       "approvalPolicy": "auto",
       "sandboxMode": "workspace-write",
@@ -212,6 +212,32 @@ Kun 内置 DeepSeek V4 默认模型画像：
 ```
 
 设置页会保存这些字段。GUI 模式下默认模型以 `agents.kun.model` 为准；`config.json` 里的 `serve.model` 更适合 standalone `kun serve` 使用，因为 GUI 启动时会把设置页里的模型作为启动参数传给 Kun。
+
+## Hooks 配置写在哪里
+
+Hooks 写在 `config.json` 顶层的 `hooks` 数组里，GUI 启动 Kun 时通过
+`--data-dir` 自动加载，无需额外开关：
+
+```json
+{
+  "hooks": [
+    {
+      "phase": "PreToolUse",
+      "matcher": "bash|write_file|mcp__*",
+      "command": "node ~/.kun-hooks/guard.js",
+      "timeoutMs": 10000
+    },
+    { "phase": "UserPromptSubmit", "command": "~/.kun-hooks/prompt-context.sh" }
+  ]
+}
+```
+
+支持的 `phase`：`PreToolUse`、`PostToolUse`（工具调用前后，可改写参数 /
+输出、拒绝或自动放行）、`UserPromptSubmit`（回合开始前，可拒绝或注入
+上下文）、`TurnStart`、`TurnEnd`、`PreCompact`（只读通知）。命令通过
+stdin 收到 JSON invocation，退出码 `0` + stdout JSON 返回结构化结果，
+退出码 `2` 阻断动作，其余非零只产生 `hook_warning` 事件。完整参考
+（各阶段载荷、失败语义、示例脚本）见 [kun-hooks.md](kun-hooks.md)。
 
 ## 用户如何自定义
 

@@ -101,6 +101,42 @@ describe('thread event sink binding', () => {
     expect(getState().lastSeq).toBe(9)
     expect(getState().turnReasoningFirstAtByUserId['user-current']).toEqual(expect.any(Number))
   })
+
+  it('drops replayed deltas at or below the subscription floor', () => {
+    const { getState, set, get } = makeSinkHarness({ activeThreadId: 'thread-current', lastSeq: 100 })
+    const sink = buildThreadEventSink(set, get, {
+      threadId: 'thread-current',
+      sinceSeq: 100
+    })
+
+    sink.onDeltas([
+      { kind: 'agent_message', text: 'replayed history', seq: 90 },
+      { kind: 'agent_message', text: 'fresh answer', seq: 101 }
+    ])
+
+    expect(getState().liveAssistant).toBe('fresh answer')
+    expect(getState().lastSeq).toBe(101)
+  })
+
+  it('drops duplicate delta seqs across batches', () => {
+    const { getState, set, get } = makeSinkHarness({ activeThreadId: 'thread-current' })
+    const sink = buildThreadEventSink(set, get, { threadId: 'thread-current' })
+
+    sink.onDeltas([{ kind: 'agent_message', text: 'hello', seq: 11 }])
+    sink.onDeltas([{ kind: 'agent_message', text: 'hello', seq: 11 }])
+    sink.onDeltas([{ kind: 'agent_message', text: ' world', seq: 12 }])
+
+    expect(getState().liveAssistant).toBe('hello world')
+  })
+
+  it('never rewinds lastSeq when a stale heartbeat seq arrives', () => {
+    const { getState, set, get } = makeSinkHarness({ activeThreadId: 'thread-current', lastSeq: 500 })
+    const sink = buildThreadEventSink(set, get, { threadId: 'thread-current' })
+
+    sink.onSeq(3)
+
+    expect(getState().lastSeq).toBe(500)
+  })
 })
 
 describe('thread event sink runtime errors', () => {
@@ -140,6 +176,45 @@ describe('thread event sink runtime errors', () => {
     expect(systemBlocks[0].detail).not.toContain('secret-token')
   })
 
+  it('deduplicates matching runtime error and turn failure events inside one turn', () => {
+    const { getState, set, get } = makeSinkHarness({
+      activeThreadId: 'thread-current',
+      busy: true,
+      blocks: [{ kind: 'user', id: 'user-current', text: 'draw a poster' }]
+    })
+    const sink = buildThreadEventSink(set, get, { threadId: 'thread-current' })
+    const message = `model request failed with status 400: ${JSON.stringify({
+      error: {
+        code: '400',
+        message: `Not supported model ${'mimo-v2.5-pro-ultraspeed'.repeat(10)}`
+      }
+    })}`
+
+    sink.onRuntimeError?.({
+      itemId: 'runtime_error_turn-current',
+      createdAt: '2026-06-08T00:00:00.000Z',
+      message,
+      code: 'http_400',
+      severity: 'error'
+    })
+    sink.onRuntimeError?.({
+      itemId: 'item_turn-current_error',
+      createdAt: '2026-06-08T00:00:01.000Z',
+      message,
+      code: 'http_400',
+      severity: 'error'
+    })
+
+    const systemBlocks = getState().blocks.filter((block) => block.kind === 'system')
+    expect(systemBlocks).toHaveLength(1)
+    expect(systemBlocks[0]).toMatchObject({
+      id: 'item_turn-current_error',
+      code: 'http_400',
+      severity: 'error'
+    })
+    expect(systemBlocks[0].detail).toContain(`Message:\n${message}`)
+  })
+
   it('does not keep an aborted turn busy after interrupt', () => {
     const blocks: ChatBlock[] = [
       { kind: 'user', id: 'user-1', text: 'run command' },
@@ -175,6 +250,61 @@ describe('thread event sink runtime errors', () => {
     expect(state.currentTurnId).toBeNull()
     expect(state.currentTurnUserId).toBeNull()
     expect(state.error).toBeNull()
+    expect(state.blocks.map((block) => ('status' in block ? block.status : block.kind))).toEqual([
+      'user',
+      'error'
+    ])
+  })
+
+  it('settles terminal turn failures instead of keeping the composer busy', () => {
+    const blocks: ChatBlock[] = [
+      { kind: 'user', id: 'user-1', text: 'work toward goal' },
+      {
+        kind: 'tool',
+        id: 'tool-1',
+        summary: 'Running command',
+        status: 'running',
+        toolKind: 'command_execution'
+      }
+    ]
+    const state = {
+      activeThreadId: 'thr-1',
+      blocks,
+      busy: true,
+      currentTurnId: 'turn-1',
+      currentTurnUserId: 'user-1',
+      error: null,
+      runtimeErrorDetail: null,
+      liveAssistant: '',
+      liveReasoning: '',
+      turnStartedAtByUserId: { 'user-1': Date.now() - 1000 },
+      turnDurationByUserId: {},
+      turnReasoningFirstAtByUserId: {},
+      turnReasoningLastAtByUserId: {},
+      watchTurnCompletion: { 'thr-1': true },
+      unreadThreadIds: { 'thr-1': true },
+      queuedMessages: []
+    } as unknown as ChatState
+    const set = (partial: Partial<ChatState> | ((value: ChatState) => Partial<ChatState>)): void => {
+      Object.assign(state, typeof partial === 'function' ? partial(state) : partial)
+    }
+
+    buildThreadEventSink(set, () => state).onError(
+      new Error(JSON.stringify({
+        code: 'http_400',
+        message: 'model stream exploded',
+        severity: 'error'
+      })),
+      { terminal: true }
+    )
+
+    expect(state.busy).toBe(false)
+    expect(state.currentTurnId).toBeNull()
+    expect(state.currentTurnUserId).toBeNull()
+    expect(state.error).toBe('model stream exploded')
+    expect(state.runtimeErrorDetail).toContain('Code: http_400')
+    expect(state.watchTurnCompletion).toEqual({})
+    expect(state.unreadThreadIds).toEqual({})
     expect(state.blocks.map((block) => ('status' in block ? block.status : block.kind))).toEqual([
       'user',
       'error'

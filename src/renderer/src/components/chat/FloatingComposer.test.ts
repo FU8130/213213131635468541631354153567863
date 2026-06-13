@@ -9,13 +9,18 @@ import {
   imageTransferHasImages,
   parseCompactCommand,
   parseGoalCommand,
-  parseReviewCommand
+  parseNewCommand,
+  parseReviewCommand,
+  shouldShowGoalFloater
 } from './FloatingComposer'
 import {
   FloatingComposerModelPicker,
+  buildComposerModelMenuGroups,
   calculateFloatingMenuPlacement,
   calculateFloatingSubmenuPlacement,
+  composerMenuSupportsModel,
   composerReasoningEffortRequestValue,
+  normalizeComposerReasoningEffort
 } from './FloatingComposerModelPicker'
 import { getGoalPanelDraftObjective } from './floating-composer-commands'
 import { useChatStore } from '../../store/chat-store'
@@ -27,6 +32,12 @@ import {
   removeComposerFileMentionToken,
   replaceFileMentionInInput
 } from '../../lib/composer-file-references'
+
+const DEEPSEEK_PROVIDER_GROUP = {
+  providerId: 'deepseek',
+  label: 'DeepSeek',
+  modelIds: ['deepseek-v4-pro', 'deepseek-v4-flash']
+}
 
 describe('FloatingComposer slash commands', () => {
   it('parses compact command aliases', () => {
@@ -61,6 +72,14 @@ describe('FloatingComposer slash commands', () => {
     expect(parseGoalCommand('/goalkeeper')).toBe(false)
   })
 
+  it('parses new session command aliases', () => {
+    expect(parseNewCommand('/new')).toBe(true)
+    expect(parseNewCommand('/new-thread')).toBe(true)
+    expect(parseNewCommand('/新建会话')).toBe(true)
+    expect(parseNewCommand('/new current task')).toBe(false)
+    expect(parseNewCommand('/new-topic')).toBe(false)
+  })
+
   it('parses review command targets', () => {
     expect(parseReviewCommand('/review')).toEqual({ kind: 'uncommittedChanges' })
     expect(parseReviewCommand('/review base main')).toEqual({ kind: 'baseBranch', branch: 'main' })
@@ -88,6 +107,48 @@ describe('FloatingComposer goal helpers', () => {
     expect(formatGoalElapsedSeconds(60)).toBe('1m')
     expect(formatGoalElapsedSeconds(125)).toBe('2m 5s')
     expect(formatGoalElapsedSeconds(3720)).toBe('1h 2m')
+  })
+
+  it('shows the goal banner only when no other composer overlay is active', () => {
+    expect(shouldShowGoalFloater({
+      compact: false,
+      hasActiveGoal: true,
+      slashQuery: null,
+      goalPanelOpen: false,
+      composerMenuOpen: false
+    })).toBe(true)
+
+    expect(shouldShowGoalFloater({
+      compact: true,
+      hasActiveGoal: true,
+      slashQuery: null,
+      goalPanelOpen: false,
+      composerMenuOpen: false
+    })).toBe(false)
+
+    expect(shouldShowGoalFloater({
+      compact: false,
+      hasActiveGoal: true,
+      slashQuery: 'goal',
+      goalPanelOpen: false,
+      composerMenuOpen: false
+    })).toBe(false)
+
+    expect(shouldShowGoalFloater({
+      compact: false,
+      hasActiveGoal: true,
+      slashQuery: null,
+      goalPanelOpen: true,
+      composerMenuOpen: false
+    })).toBe(false)
+
+    expect(shouldShowGoalFloater({
+      compact: false,
+      hasActiveGoal: false,
+      slashQuery: null,
+      goalPanelOpen: false,
+      composerMenuOpen: false
+    })).toBe(false)
   })
 })
 
@@ -139,9 +200,20 @@ describe('FloatingComposer file references', () => {
 })
 
 describe('FloatingComposer model controls', () => {
-  it('maps the low reasoning chip to disabled thinking for faster turns', () => {
-    expect(composerReasoningEffortRequestValue('low')).toBe('off')
+  it('passes explicit reasoning choices through to the runtime', () => {
+    expect(composerReasoningEffortRequestValue('off')).toBe('off')
+    expect(composerReasoningEffortRequestValue('low')).toBe('low')
     expect(composerReasoningEffortRequestValue('max')).toBe('max')
+  })
+
+  it('falls back to the model default when the selected model does not support the current effort', () => {
+    expect(normalizeComposerReasoningEffort('max', {
+      reasoning: {
+        supportedEfforts: ['off', 'low', 'medium', 'high'],
+        defaultEffort: 'high',
+        requestProtocol: 'mimo-chat-completions'
+      }
+    })).toBe('high')
   })
 
   it('anchors the model menu to the trigger using the rendered menu height', () => {
@@ -193,6 +265,65 @@ describe('FloatingComposer model controls', () => {
     expect(placement.top).toBe(642)
   })
 
+  it('keeps non-text models out of the composer model menu', () => {
+    const group = {
+      modelProfiles: {
+        'glm-4v': {
+          inputModalities: ['text', 'image'],
+          outputModalities: ['text'],
+          supportsToolCalling: true,
+          messageParts: ['text', 'image_url']
+        },
+        'banana-canvas': {
+          inputModalities: ['text'],
+          outputModalities: ['image'],
+          supportsToolCalling: false,
+          messageParts: ['text']
+        }
+      }
+    } satisfies Parameters<typeof composerMenuSupportsModel>[0]
+
+    expect(composerMenuSupportsModel(group, 'glm-4v')).toBe(true)
+    expect(composerMenuSupportsModel(group, 'unknown-chat-model')).toBe(true)
+    expect(composerMenuSupportsModel(group, 'banana-canvas')).toBe(false)
+    expect(composerMenuSupportsModel(group, 'whisper-1')).toBe(false)
+    expect(composerMenuSupportsModel(group, 'dall-e-3')).toBe(false)
+    expect(composerMenuSupportsModel(group, 'seedream-4-0-250828')).toBe(false)
+    expect(composerMenuSupportsModel(group, 'text-embedding-3-large')).toBe(false)
+  })
+
+  it('keeps provider model aliases out of the ungrouped fallback menu', () => {
+    const groups = buildComposerModelMenuGroups({
+      composerModelGroups: [{
+        providerId: 'minimax-token-plan',
+        label: 'MiniMax Token Plan',
+        modelIds: ['minimax-m3'],
+        modelProfiles: {
+          'minimax-m3': {
+            aliases: ['MiniMax-M3'],
+            inputModalities: ['text', 'image'],
+            outputModalities: ['text'],
+            supportsToolCalling: true,
+            messageParts: ['text', 'image_url']
+          }
+        }
+      }],
+      modelOptions: ['MiniMax-M3', 'loose-model'],
+      ungroupedLabel: 'Other models'
+    })
+
+    expect(groups).toHaveLength(2)
+    expect(groups[0]).toMatchObject({
+      providerId: 'minimax-token-plan',
+      modelIds: ['minimax-m3']
+    })
+    expect(groups[1]).toMatchObject({
+      providerId: '__composer_models__',
+      label: 'Other models',
+      modelIds: ['loose-model']
+    })
+  })
+
   it('keeps the reasoning strength visible in the model control', () => {
     const html = renderToStaticMarkup(
       createElement(FloatingComposerModelPicker, {
@@ -200,6 +331,7 @@ describe('FloatingComposer model controls', () => {
         mode: 'select',
         composerModel: 'auto',
         composerPickList: ['auto', 'deepseek-v4-pro'],
+        composerModelGroups: [DEEPSEEK_PROVIDER_GROUP],
         composerReasoningEffort: 'high',
         canChangeModel: true,
         onComposerModelChange: () => undefined,
@@ -209,6 +341,43 @@ describe('FloatingComposer model controls', () => {
 
     expect(html).toContain('Auto')
     expect(html).toContain('High')
+  })
+
+  it('keeps provider setup reachable when no chat providers are available', () => {
+    const html = renderToStaticMarkup(
+      createElement(FloatingComposerModelPicker, {
+        compact: false,
+        mode: 'select',
+        composerModel: 'auto',
+        composerPickList: ['auto'],
+        composerModelGroups: [],
+        canChangeModel: false,
+        onComposerModelChange: () => undefined,
+        onConfigureProviders: () => undefined
+      })
+    )
+
+    expect(html).toContain('Set up provider')
+    expect(html).toContain('aria-haspopup="menu"')
+    expect(html).not.toContain('disabled=""')
+  })
+
+  it('does not treat default fallback models as configured providers', () => {
+    const html = renderToStaticMarkup(
+      createElement(FloatingComposerModelPicker, {
+        compact: false,
+        mode: 'select',
+        composerModel: 'deepseek-v4-pro',
+        composerPickList: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+        composerModelGroups: [],
+        canChangeModel: true,
+        onComposerModelChange: () => undefined,
+        onConfigureProviders: () => undefined
+      })
+    )
+
+    expect(html).toContain('Set up provider')
+    expect(html).not.toContain('deepseek-v4-pro')
   })
 })
 
@@ -271,7 +440,7 @@ describe('FloatingComposer image transfer helpers', () => {
     expect(imageTransferHasImages(source)).toBe(true)
   })
 
-  it('handles pasted image files through the attachment picker', () => {
+  it('routes pasted image files through the clipboard bridge when available', () => {
     const screenshot = new File([new Uint8Array([1])], 'shot.png', { type: 'image/png' })
     const preventDefault = vi.fn()
     const onPickAttachments = vi.fn()
@@ -292,8 +461,30 @@ describe('FloatingComposer image transfer helpers', () => {
 
     expect(handled).toBe(true)
     expect(preventDefault).toHaveBeenCalledTimes(1)
+    expect(onPickAttachments).not.toHaveBeenCalled()
+    expect(onPasteClipboardImage).toHaveBeenCalledWith({ silentNoImage: false })
+  })
+
+  it('still uses the attachment picker for pasted image files when the clipboard bridge is unavailable', () => {
+    const screenshot = new File([new Uint8Array([1])], 'shot.png', { type: 'image/png' })
+    const preventDefault = vi.fn()
+    const onPickAttachments = vi.fn()
+    const handled = handleComposerImagePaste({
+      canPickAttachment: true,
+      clipboardData: {
+        getData: () => '',
+        items: {
+          length: 1,
+          0: { kind: 'file', type: 'image/png', getAsFile: () => screenshot }
+        }
+      },
+      preventDefault,
+      onPickAttachments
+    })
+
+    expect(handled).toBe(true)
+    expect(preventDefault).toHaveBeenCalledTimes(1)
     expect(onPickAttachments).toHaveBeenCalledWith([screenshot])
-    expect(onPasteClipboardImage).not.toHaveBeenCalled()
   })
 
   it('does not intercept ordinary text paste', () => {
@@ -365,6 +556,42 @@ describe('FloatingComposer capability controls', () => {
     const goalButton = html.match(/<button[^>]*>[\s\S]*?\/goal[\s\S]*?<\/button>/)?.[0] ?? ''
     expect(goalButton).toContain('/goal')
     expect(goalButton).not.toContain('disabled=""')
+  })
+
+  it('enables new session before a thread exists when a workspace is available', () => {
+    useChatStore.setState({
+      activeThreadId: null,
+      activeThreadGoal: null,
+      route: 'chat',
+      workspaceRoot: ''
+    })
+
+    const html = renderToStaticMarkup(
+      createElement(FloatingComposer, {
+        input: '/new',
+        setInput: () => undefined,
+        mode: 'agent',
+        setMode: () => undefined,
+        busy: false,
+        runtimeReady: true,
+        hasActiveThread: false,
+        workspaceRootOverride: '/workspace/deepseek-gui',
+        composerModel: '',
+        composerPickList: [],
+        onComposerModelChange: () => undefined,
+        queuedMessages: [],
+        onRemoveQueuedMessage: () => undefined,
+        onSend: () => undefined,
+        onInterrupt: () => undefined,
+        onNewCommand: () => undefined,
+        attachmentUploadEnabled: false,
+        webAccessAvailable: false
+      })
+    )
+
+    const newButton = html.match(/<button[^>]*>[\s\S]*?\/new[\s\S]*?<\/button>/)?.[0] ?? ''
+    expect(newButton).toContain('/new')
+    expect(newButton).not.toContain('disabled=""')
   })
 
   it('enables plan mode before a thread exists when a workspace is available', () => {
@@ -572,6 +799,7 @@ describe('FloatingComposer capability controls', () => {
         hasActiveThread: true,
         composerModel: 'deepseek-v4-pro',
         composerPickList: ['deepseek-v4-pro'],
+        composerModelGroups: [DEEPSEEK_PROVIDER_GROUP],
         onComposerModelChange: () => undefined,
         queuedMessages: [],
         onRemoveQueuedMessage: () => undefined,
@@ -597,6 +825,7 @@ describe('FloatingComposer capability controls', () => {
         mode: 'select',
         composerModel: 'deepseek-v4-pro',
         composerPickList: ['auto', 'deepseek-v4-flash', 'deepseek-v4-pro'],
+        composerModelGroups: [DEEPSEEK_PROVIDER_GROUP],
         canChangeModel: true,
         composerReasoningEffort: 'max',
         onComposerReasoningEffortChange: () => undefined,
@@ -619,6 +848,7 @@ describe('FloatingComposer capability controls', () => {
         mode: 'combobox',
         composerModel: 'deepseek-v4-flash',
         composerPickList: ['auto', 'deepseek-v4-flash', 'deepseek-v4-pro'],
+        composerModelGroups: [DEEPSEEK_PROVIDER_GROUP],
         canChangeModel: true,
         composerReasoningEffort: 'high',
         onComposerReasoningEffortChange: () => undefined,

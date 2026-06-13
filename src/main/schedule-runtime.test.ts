@@ -9,6 +9,7 @@ import {
   mergeScheduleSettings,
   type AppSettingsPatch,
   type AppSettingsV1,
+  type ClawImChannelV1,
   type ScheduledTaskV1
 } from '../shared/app-settings'
 import { ScheduleRuntime, computeScheduleNextRunAt, scheduledThreadTitle } from './schedule-runtime'
@@ -27,6 +28,7 @@ function makeTask(patch: Partial<ScheduledTaskV1> = {}): ScheduledTaskV1 {
     enabled: true,
     prompt: 'Run the task',
     workspaceRoot: '/tmp/workspace',
+    clawChannelId: '',
     model: 'auto',
     reasoningEffort: 'medium',
     mode: 'agent',
@@ -39,6 +41,30 @@ function makeTask(patch: Partial<ScheduledTaskV1> = {}): ScheduledTaskV1 {
     lastThreadId: '',
     ...patch,
     schedule
+  }
+}
+
+function makeClawChannel(patch: Partial<ClawImChannelV1> = {}): ClawImChannelV1 {
+  return {
+    id: 'channel-1',
+    provider: 'feishu',
+    label: 'Feishu Agent',
+    enabled: true,
+    model: 'deepseek-v4-flash',
+    threadId: '',
+    workspaceRoot: '/tmp/claw-workspace',
+    agentProfile: {
+      name: 'Ops Claw',
+      description: '',
+      identity: 'You are the operations assistant.',
+      personality: '',
+      userContext: '',
+      replyRules: ''
+    },
+    conversations: [],
+    createdAt: '2026-06-02T00:00:00.000Z',
+    updatedAt: '2026-06-02T00:00:00.000Z',
+    ...patch
   }
 }
 
@@ -164,7 +190,9 @@ describe('ScheduleRuntime', () => {
     expect(store.read().schedule.tasks[0]).toMatchObject({
       title: 'Ship review reminder',
       workspaceRoot: '/tmp/schedule',
+      providerId: 'deepseek',
       model: 'deepseek-v4-flash',
+      reasoningEffort: 'max',
       mode: 'plan',
       schedule: { kind: 'at', atTime: future }
     })
@@ -203,18 +231,66 @@ describe('ScheduleRuntime', () => {
     expect(JSON.parse(String(createRequest))).toMatchObject({
       title: '[Scheduled task] Task',
       workspace: '/tmp/workspace',
-      model: 'auto',
+      model: 'deepseek-v4-flash',
       mode: 'agent'
     })
     expect(JSON.parse(String(turnRequest))).toMatchObject({
-      model: 'auto',
-      reasoningEffort: 'max'
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'max',
+      // Headless turn: a user_input request would hang until timeout.
+      disableUserInput: true
     })
     expect(store.read().schedule.tasks[0]).toMatchObject({
       lastStatus: 'running',
       lastThreadId: 'thr_1',
       lastMessage: 'Started'
     })
+  })
+
+  it('runs selected Claw channel scheduled tasks with the Claw persona', async () => {
+    const channel = makeClawChannel()
+    const task = makeTask({
+      clawChannelId: channel.id,
+      workspaceRoot: '',
+      model: channel.model
+    })
+    const initial = settingsWith([task])
+    initial.claw.channels = [channel]
+    const runtimeRequest = vi.fn(async (_settings, path, init) => {
+      if (path === '/v1/threads') {
+        return { ok: true, status: 200, body: JSON.stringify({ id: 'thr_claw' }) }
+      }
+      if (path === '/v1/threads/thr_claw' && init?.method === 'PATCH') {
+        return { ok: true, status: 200, body: '{}' }
+      }
+      if (path === '/v1/threads/thr_claw/turns') {
+        return { ok: true, status: 202, body: JSON.stringify({ turnId: 'turn_claw' }) }
+      }
+      throw new Error(`unexpected path ${path}`)
+    })
+    const { runtime } = createRuntime(initial, runtimeRequest)
+    ;(runtime as unknown as { monitorTaskTurn: () => void }).monitorTaskTurn = vi.fn()
+
+    await expect(runtime.runTask(task.id)).resolves.toMatchObject({
+      ok: true,
+      threadId: 'thr_claw',
+      turnId: 'turn_claw'
+    })
+
+    const createRequest = runtimeRequest.mock.calls.find(([, path, init]) =>
+      path === '/v1/threads' && init?.method === 'POST'
+    )?.[2]?.body
+    const turnRequest = runtimeRequest.mock.calls.find(([, path]) =>
+      path === '/v1/threads/thr_claw/turns'
+    )?.[2]?.body
+    expect(JSON.parse(String(createRequest))).toMatchObject({
+      workspace: '/tmp/claw-workspace',
+      model: 'deepseek-v4-flash'
+    })
+    const turnBody = JSON.parse(String(turnRequest))
+    expect(turnBody.prompt).toContain('[Claw managed instructions]')
+    expect(turnBody.prompt).toContain('[Agent name]\nOps Claw')
+    expect(turnBody.prompt).toContain('Run the task')
   })
 
   it('reads assistant text from the real Kun thread detail shape', async () => {

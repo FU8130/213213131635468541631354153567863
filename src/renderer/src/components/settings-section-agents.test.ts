@@ -5,9 +5,12 @@ import {
   DEFAULT_MODEL_PROVIDER_ID,
   defaultKunRuntimeSettings,
   defaultModelProviderSettings,
+  getModelProviderPreset,
+  modelProviderPresetProfile,
   type ModelProviderProfileV1
 } from '@shared/app-settings'
 import { AgentsSettingsSection, modelProvidersSettingsPatch } from './settings-section-agents'
+import { ProvidersSettingsSection } from './settings-section-providers'
 
 const labels: Record<string, string> = {
   agentsQuickBase: 'Base',
@@ -15,12 +18,49 @@ const labels: Record<string, string> = {
   agentsQuickMcp: 'MCP',
   agentsQuickPermissions: 'Permissions',
   agents: 'Agents',
+  providers: 'Providers',
+  providersDesc: 'Providers description',
   kunProvider: 'Provider',
   kunProviderDesc: 'Provider description',
+  kunProviderSelectDesc: 'Provider select description',
+  modelProviderAdd: 'Add provider',
+  modelProviderAddMenuCustom: 'Custom provider…',
+  modelProviderSectionBasics: 'Provider basics',
+  modelProviderSectionConnection: 'Provider connection',
+  modelProviderSectionDanger: 'Danger zone',
+  modelProviderTestConnection: 'Test connection',
+  modelProviderFetchModels: 'Fetch from API',
+  modelProviderModelsPlaceholder: 'Type a model ID and press Enter',
+  modelProviderModelCount: 'models count',
+  modelProviderInUse: 'In use',
+  modelProviderMissingKey: 'No API key',
+  modelProviderDefaultBadge: 'Default',
+  modelProviderPresetBadge: 'Preset',
+  modelProviderCustomBadge: 'Custom',
+  modelProviderDangerHint: 'Danger hint',
+  modelProviderIdLocked: 'Provider ID locked',
+  modelProviderRemove: 'Remove provider',
+  modelProviderName: 'Provider name',
+  modelProviderId: 'Provider ID',
+  modelProviderApiKey: 'Provider API key',
+  modelProviderBaseUrl: 'Provider base URL',
   modelProviderEndpointFormat: 'Endpoint format',
+  modelProviderFetchEmpty: 'No models found',
   modelEndpointChatCompletions: '/v1/chat/completions',
   modelEndpointResponses: '/v1/responses',
   modelEndpointMessages: '/v1/messages',
+  modelProviderModels: 'Provider models',
+  modelProviderImageCapability: 'Image capability',
+  modelProviderImageCapabilityDesc: 'Image capability description',
+  modelProviderImageEnable: 'Enable image',
+  modelProviderImageDisable: 'Disable image',
+  imageGenProtocol: 'Image protocol',
+  imageGenProtocolOpenAi: 'OpenAI Images',
+  imageGenProtocolMiniMax: 'MiniMax image_generation',
+  imageGenBaseUrl: 'Image base URL',
+  imageGenModel: 'Image model',
+  imageGenBaseUrlPlaceholder: 'https://api.example.com/v1',
+  baseUrlPlaceholder: 'https://api.example.com/v1',
   kunApiKey: 'Kun API key',
   kunApiKeyDesc: 'Kun API key description',
   kunApiKeyPlaceholder: 'Inherit API key',
@@ -48,7 +88,7 @@ const labels: Record<string, string> = {
   kunModelDesc: 'Model description',
   kunTokenEconomy: 'Token-saving mode',
   kunTokenEconomyDesc: 'Token-saving mode description',
-  kunTokenEconomySavings: 'Saved {{tokens}} / {{cost}}',
+  kunTokenEconomySavings: 'Saved {{tokens}} tokens',
   kunTokenEconomySavingsLoading: 'Loading savings',
   kunTokenEconomySavingsEmpty: 'Savings empty',
   kunTokenEconomyAdvanced: 'Token-saving advanced settings',
@@ -186,6 +226,7 @@ const labels: Record<string, string> = {
   approvalUntrusted: 'Untrusted',
   approvalSuggest: 'Suggest',
   approvalNever: 'Never',
+  permissionsBehaviorHint: 'Full access and confirmation are separate',
   sandboxMode: 'Sandbox mode',
   sandboxModeDesc: 'Sandbox description',
   sandboxWorkspaceWrite: 'Workspace write',
@@ -310,7 +351,8 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
       apiKey: '',
       baseUrl: 'https://api.example.com/v1',
       endpointFormat: 'responses',
-      models: []
+      models: [],
+      modelProfiles: {}
     } satisfies ModelProviderProfileV1
 
     const patch = modelProvidersSettingsPatch({
@@ -321,6 +363,8 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
 
     expect(patch.provider?.providers).toEqual([...provider.providers, customProvider])
     expect(patch.agents?.kun?.providerId).toBe(customProvider.id)
+    expect(patch.agents?.kun?.apiKey).toBe('')
+    expect(patch.agents?.kun?.baseUrl).toBe('')
   })
 
   it('builds a single patch when removing the active model provider', () => {
@@ -337,7 +381,8 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
             apiKey: '',
             baseUrl: 'https://api.example.com/v1',
             endpointFormat: 'responses',
-            models: []
+            models: [],
+            modelProfiles: {}
           }
         ]
       },
@@ -347,6 +392,74 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
 
     expect(patch.provider?.providers).toEqual(provider.providers)
     expect(patch.agents?.kun?.providerId).toBe(DEFAULT_MODEL_PROVIDER_ID)
+    expect(patch.agents?.kun?.apiKey).toBe('')
+    expect(patch.agents?.kun?.baseUrl).toBe('')
+  })
+
+  it('builds a single patch when adding a preset model provider', () => {
+    const provider = defaultModelProviderSettings()
+    const xiaomi = getModelProviderPreset('xiaomi')
+    expect(xiaomi).not.toBeNull()
+    const xiaomiProvider = modelProviderPresetProfile(xiaomi!)
+
+    const patch = modelProvidersSettingsPatch({
+      provider,
+      providers: [...provider.providers, xiaomiProvider],
+      kun: {
+        providerId: xiaomiProvider.id,
+        model: xiaomiProvider.models[0]
+      }
+    })
+
+    expect(patch.provider?.providers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'xiaomi',
+        baseUrl: 'https://api.xiaomimimo.com/v1',
+        endpointFormat: 'chat_completions',
+        models: expect.arrayContaining(['mimo-v2-flash'])
+      })
+    ]))
+    expect(patch.agents?.kun).toEqual(expect.objectContaining({
+      providerId: 'xiaomi',
+      model: xiaomiProvider.models[0]
+    }))
+  })
+
+  it('defaults MiniMax media generation when adding a configured MiniMax provider', () => {
+    const provider = defaultModelProviderSettings()
+    const minimax = getModelProviderPreset('minimax')
+    expect(minimax).not.toBeNull()
+    const minimaxProvider = modelProviderPresetProfile(minimax!, 'sk-minimax')
+
+    const patch = modelProvidersSettingsPatch({
+      provider,
+      providers: [...provider.providers, minimaxProvider],
+      currentKun: defaultKunRuntimeSettings(),
+      kun: {
+        providerId: minimaxProvider.id,
+        model: minimaxProvider.models[0]
+      }
+    })
+
+    expect(patch.agents?.kun).toEqual(expect.objectContaining({
+      providerId: 'minimax',
+      model: minimaxProvider.models[0],
+      textToSpeech: expect.objectContaining({
+        enabled: true,
+        providerId: 'minimax',
+        model: 'speech-2.8-hd'
+      }),
+      musicGeneration: expect.objectContaining({
+        enabled: true,
+        providerId: 'minimax',
+        model: 'music-2.6'
+      }),
+      videoGeneration: expect.objectContaining({
+        enabled: true,
+        providerId: 'minimax',
+        model: 'MiniMax-Hailuo-2.3'
+      })
+    }))
   })
 
   it('renders custom model provider id as editable', () => {
@@ -357,9 +470,10 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
       apiKey: '',
       baseUrl: 'https://api.example.com/v1',
       endpointFormat: 'messages',
-      models: []
+      models: [],
+      modelProfiles: {}
     } satisfies ModelProviderProfileV1
-    const html = renderToStaticMarkup(createElement(AgentsSettingsSection, {
+    const html = renderToStaticMarkup(createElement(ProvidersSettingsSection, {
       ctx: {
         ...baseCtx(),
         provider: {
@@ -379,15 +493,74 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
     expect(providerIdInput).not.toContain('readonly')
     expect(html).toContain('Endpoint format')
     expect(html).toContain('<option value="messages" selected="">/v1/messages</option>')
+    expect(html).toContain('Add provider')
+    expect(html).toContain('Test connection')
+    expect(html).toContain('Fetch from API')
+    expect(html).toContain('Danger zone')
+    expect(html).toContain('In use')
+    expect(html).toContain('No API key')
+  })
+
+  it('locks preset and default provider ids and shows the danger zone only for removable providers', () => {
+    const provider = defaultModelProviderSettings()
+    const xiaomi = getModelProviderPreset('xiaomi')
+    expect(xiaomi).not.toBeNull()
+    const html = renderToStaticMarkup(createElement(ProvidersSettingsSection, {
+      ctx: {
+        ...baseCtx(),
+        provider: {
+          ...provider,
+          providers: [...provider.providers, modelProviderPresetProfile(xiaomi!)]
+        },
+        kun: {
+          ...defaultKunRuntimeSettings(),
+          providerId: 'xiaomi'
+        }
+      }
+    }))
+    const providerIdInput = html.match(/<input[^>]+value="xiaomi"[^>]*>/)?.[0]
+
+    expect(providerIdInput).toBeTruthy()
+    expect(providerIdInput?.toLowerCase()).toContain('readonly')
+    expect(html).toContain('Provider ID locked')
+    expect(html).toContain('Danger zone')
+  })
+
+  it('hides the danger zone for the default provider', () => {
+    const html = renderToStaticMarkup(createElement(ProvidersSettingsSection, {
+      ctx: {
+        ...baseCtx(),
+        provider: defaultModelProviderSettings(),
+        kun: defaultKunRuntimeSettings()
+      }
+    }))
+
+    expect(html).not.toContain('Danger zone')
+    expect(html).toContain('Test connection')
   })
 
   it('keeps advanced agent controls behind collapsed disclosures', () => {
     const html = renderToStaticMarkup(createElement(AgentsSettingsSection, { ctx: baseCtx() }))
 
     expect(html).toContain('Assistant advanced settings')
-    expect(html).toContain('Token-saving advanced settings')
+    expect(html).toContain('Storage, model context, and tool guards')
     expect(html).toContain('MCP advanced settings')
     expect(html).not.toContain('<details open')
+  })
+
+  it('does not render image generation settings inside the agent section', () => {
+    const html = renderToStaticMarkup(createElement(AgentsSettingsSection, { ctx: baseCtx() }))
+
+    expect(html).not.toContain('imageGen')
+  })
+
+  it('renders permission controls with full access as the default sandbox', () => {
+    const html = renderToStaticMarkup(createElement(AgentsSettingsSection, { ctx: baseCtx() }))
+
+    expect(html).toContain('Permissions')
+    expect(html).toContain('Full access and confirmation are separate')
+    expect(html).toContain('<option value="auto" selected="">Auto</option>')
+    expect(html).toContain('<option value="danger-full-access" selected="">Full access</option>')
   })
 
   it('renders pure JSONL as a selectable storage backend', () => {
@@ -468,5 +641,15 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
     expect(html).not.toContain('DeepSeek auth')
     expect(html).not.toContain('Base URL are stored in this file')
     expect(html).not.toContain('config.toml')
+  })
+
+  it('defines the LiteLLM provider preset for the Providers menu', () => {
+    const litellm = getModelProviderPreset('litellm')
+    expect(litellm && modelProviderPresetProfile(litellm)).toMatchObject({
+      id: 'litellm',
+      name: 'LiteLLM',
+      baseUrl: 'http://localhost:4000',
+      endpointFormat: 'chat_completions'
+    })
   })
 })

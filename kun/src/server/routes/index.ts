@@ -222,8 +222,7 @@ export function buildRouter(runtime: ServerRuntime): Router {
       request,
       threadId: ctx.params.id,
       eventBus: runtime.eventBus,
-      sessionStore: runtime.sessionStore,
-      allocateSeq: runtime.allocateSeq
+      sessionStore: runtime.sessionStore
     })
   })
   router.add('POST', '/v1/approvals/:id', async (request, ctx) => {

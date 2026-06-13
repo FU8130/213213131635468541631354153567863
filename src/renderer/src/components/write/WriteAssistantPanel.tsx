@@ -1,5 +1,7 @@
 import type { ReactElement } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
+  FolderOpen,
   FileText,
   ListTodo,
   MessageSquareQuote,
@@ -9,9 +11,9 @@ import {
   X
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { RuntimeConnectionStatus, ChatBlock } from '../../agent/types'
+import type { AttachmentReference, RuntimeConnectionStatus, ChatBlock } from '../../agent/types'
 import type { QueuedUserMessage } from '../../store/chat-store-types'
-import type { ModelProviderModelGroup } from '@shared/ds-gui-api'
+import type { ModelProviderModelGroup } from '@shared/kun-gui-api'
 import {
   useWriteWorkspaceStore,
   writeRelativeToWorkspace
@@ -32,18 +34,28 @@ type Props = {
   liveReasoning: string
   liveAssistant: string
   composerModel: string
+  composerProviderId?: string
   composerPickList: string[]
   composerModelGroups?: ModelProviderModelGroup[]
   composerReasoningEffort: ComposerReasoningEffort
-  setComposerModel: (modelId: string) => void
+  setComposerModel: (modelId: string, providerId?: string) => void
   setComposerReasoningEffort: (effort: ComposerReasoningEffort) => void
   queuedMessages: QueuedUserMessage[]
   removeQueuedMessage: (id: string) => void
+  attachments?: AttachmentReference[]
+  attachmentUploadEnabled?: boolean
+  attachmentUploadBusy?: boolean
+  attachmentUploadError?: string | null
+  onPickAttachments?: (files: File[]) => void
+  onPasteClipboardImage?: (options?: { silentNoImage?: boolean }) => void | Promise<void>
+  onRemoveAttachment?: (id: string) => void
   onSend: () => void
   onInterrupt: (options?: { discard?: boolean }) => void
   onRetryConnection: () => void
   onOpenSettings: () => void
+  onConfigureProviders?: () => void
   onNewConversation: () => void
+  onPickWorkspace: () => void
   onCollapse: () => void
   className?: string
 }
@@ -60,6 +72,7 @@ export function WriteAssistantPanel({
   liveReasoning,
   liveAssistant,
   composerModel,
+  composerProviderId,
   composerPickList,
   composerModelGroups = [],
   composerReasoningEffort,
@@ -67,15 +80,26 @@ export function WriteAssistantPanel({
   setComposerReasoningEffort,
   queuedMessages,
   removeQueuedMessage,
+  attachments = [],
+  attachmentUploadEnabled = false,
+  attachmentUploadBusy = false,
+  attachmentUploadError = null,
+  onPickAttachments,
+  onPasteClipboardImage,
+  onRemoveAttachment,
   onSend,
   onInterrupt,
   onRetryConnection,
   onOpenSettings,
+  onConfigureProviders,
   onNewConversation,
+  onPickWorkspace,
   onCollapse,
   className = ''
 }: Props): ReactElement {
   const { t } = useTranslation('common')
+  // Field-level subscription: keeps the assistant panel from re-rendering on
+  // fileContent updates emitted for every keystroke in the editor.
   const {
     workspaceRoot,
     activeFilePath,
@@ -83,13 +107,23 @@ export function WriteAssistantPanel({
     quotedSelections,
     quoteCurrentSelection,
     removeQuotedSelection
-  } = useWriteWorkspaceStore()
+  } = useWriteWorkspaceStore(
+    useShallow((s) => ({
+      workspaceRoot: s.workspaceRoot,
+      activeFilePath: s.activeFilePath,
+      selection: s.selection,
+      quotedSelections: s.quotedSelections,
+      quoteCurrentSelection: s.quoteCurrentSelection,
+      removeQuotedSelection: s.removeQuotedSelection
+    }))
+  )
   const activeFileLabel = activeFilePath
     ? writeRelativeToWorkspace(workspaceRoot, activeFilePath)
     : t('writeNoFileOpen')
   const canCreateConversation = runtimeConnection === 'ready' && !busy
   const hasTimeline =
     blocks.length > 0 || liveReasoning.trim().length > 0 || liveAssistant.trim().length > 0
+  const selectionIsPdf = selection.sourceKind === 'pdf'
 
   const setAssistantPrompt = (prompt: string): void => {
     setInput(input.trim() ? `${input.trim()}\n\n${prompt}` : prompt)
@@ -98,7 +132,9 @@ export function WriteAssistantPanel({
   const quoteSelectionForAssistant = (): void => {
     if (!workspaceRoot.trim()) return
     quoteCurrentSelection(workspaceRoot)
-    if (!input.trim()) setInput(t('writeAssistantPolishSelectionPrompt'))
+    if (!input.trim()) {
+      setInput(t(selectionIsPdf ? 'writeAssistantExplainPdfSelectionPrompt' : 'writeAssistantPolishSelectionPrompt'))
+    }
   }
 
   return (
@@ -122,6 +158,15 @@ export function WriteAssistantPanel({
               {t('writeAssistant')}
             </span>
           </div>
+          <button
+            type="button"
+            onClick={onPickWorkspace}
+            className="ds-sidebar-toggle-button shrink-0"
+            aria-label={t('writeAssistantChangeWorkspace')}
+            title={t('writeAssistantChangeWorkspace')}
+          >
+            <FolderOpen className="h-4 w-4" strokeWidth={1.85} />
+          </button>
           <button
             type="button"
             onClick={onNewConversation}
@@ -208,8 +253,12 @@ export function WriteAssistantPanel({
                   <MessageSquareQuote className="h-4 w-4" strokeWidth={1.9} />
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-[13.5px] font-semibold text-ds-ink">{t('writeAssistantPolishSelection')}</span>
-                  <span className="mt-0.5 block truncate text-[12px] text-ds-faint">{t('writeAssistantPolishSelectionSub')}</span>
+                  <span className="block text-[13.5px] font-semibold text-ds-ink">
+                    {t(selectionIsPdf ? 'writeAssistantExplainPdfSelection' : 'writeAssistantPolishSelection')}
+                  </span>
+                  <span className="mt-0.5 block truncate text-[12px] text-ds-faint">
+                    {t(selectionIsPdf ? 'writeAssistantExplainPdfSelectionSub' : 'writeAssistantPolishSelectionSub')}
+                  </span>
                 </span>
               </button>
             </div>
@@ -228,7 +277,9 @@ export function WriteAssistantPanel({
                 <MessageSquareQuote className="h-3.5 w-3.5 shrink-0 text-accent" strokeWidth={1.9} />
                 <span className="min-w-0 flex-1 truncate">
                   {quote.sourceTitle}
-                  {quote.lineStart != null && quote.lineEnd != null ? ` · ${quote.lineStart}-${quote.lineEnd}` : ''}
+                  {quote.sourceKind === 'pdf' && quote.pageStart != null && quote.pageEnd != null
+                    ? ` · p.${quote.pageStart === quote.pageEnd ? quote.pageStart : `${quote.pageStart}-${quote.pageEnd}`}`
+                    : quote.lineStart != null && quote.lineEnd != null ? ` · ${quote.lineStart}-${quote.lineEnd}` : ''}
                 </span>
                 <button
                   type="button"
@@ -254,6 +305,7 @@ export function WriteAssistantPanel({
           runtimeReady={runtimeConnection === 'ready'}
           hasActiveThread={Boolean(activeThreadId)}
           composerModel={composerModel}
+          composerProviderId={composerProviderId}
           composerPickList={composerPickList}
           composerModelGroups={composerModelGroups}
           composerReasoningEffort={composerReasoningEffort}
@@ -262,8 +314,16 @@ export function WriteAssistantPanel({
           modelPickerMode="combobox"
           queuedMessages={queuedMessages}
           onRemoveQueuedMessage={removeQueuedMessage}
+          attachments={attachments}
+          attachmentUploadEnabled={attachmentUploadEnabled}
+          attachmentUploadBusy={attachmentUploadBusy}
+          attachmentUploadError={attachmentUploadError}
+          onPickAttachments={onPickAttachments}
+          onPasteClipboardImage={onPasteClipboardImage}
+          onRemoveAttachment={onRemoveAttachment}
           onSend={onSend}
           onInterrupt={onInterrupt}
+          onConfigureProviders={onConfigureProviders}
         />
       </div>
     </aside>

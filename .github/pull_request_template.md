@@ -20,6 +20,7 @@
 
 ## Validation
 
+- [ ] I agree that this contribution is submitted under the [Contributor License Agreement](https://github.com/KunAgent/Kun/blob/develop/CLA.md).
 - [ ] `npm run test`
 - [ ] `npm run typecheck`
 - [ ] `npm run build`

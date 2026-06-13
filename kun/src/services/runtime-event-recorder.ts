@@ -25,26 +25,57 @@ export type RuntimeEventRecorderOptions = {
  * Application-level event boundary.
  *
  * Services and loops produce semantic event drafts; this recorder
- * stamps ordering/time, validates the public contract, fans out to
- * live subscribers, and persists the same event for SSE replay.
+ * stamps ordering/time, validates the public contract, persists the
+ * event for SSE replay, and then fans out to live subscribers.
+ *
+ * Persist-before-publish is load-bearing: the SSE route replays the
+ * persisted log before relaying live bus events, so an event that is
+ * published first and persisted later can fall between a subscriber's
+ * backlog read and its bus subscription and be lost forever.
  */
 export class RuntimeEventRecorder {
   private readonly options: RuntimeEventRecorderOptions
+  private readonly lastIssuedSeq = new Map<string, number>()
 
   constructor(options: RuntimeEventRecorderOptions) {
     this.options = options
   }
 
   async record(draft: RuntimeEventDraft): Promise<RuntimeEvent> {
-    const allocatedSeq = this.options.allocateSeq(draft.threadId)
-    const persistedSeq = await this.options.sessionStore.highestSeq(draft.threadId)
+    const seq = draft.seq ?? (await this.nextSeq(draft.threadId))
+    this.noteIssuedSeq(draft.threadId, seq)
     const event = RuntimeEventSchema.parse({
       ...draft,
-      seq: draft.seq ?? Math.max(allocatedSeq, persistedSeq + 1),
+      seq,
       timestamp: draft.timestamp ?? this.options.nowIso()
     })
-    this.options.eventBus.publish(event)
     await this.options.sessionStore.appendEvent(event.threadId, event)
+    this.options.eventBus.publish(event)
     return event
+  }
+
+  /**
+   * Issues the next per-thread seq. The persisted high-water mark is
+   * read once per thread and cached; afterwards issuance is synchronous,
+   * so concurrent record() calls can no longer race the store read and
+   * stamp the same seq twice (which made since_seq replay skip events).
+   */
+  private async nextSeq(threadId: string): Promise<number> {
+    let floor = this.lastIssuedSeq.get(threadId)
+    if (floor === undefined) {
+      const persisted = await this.options.sessionStore.highestSeq(threadId).catch(() => 0)
+      // A concurrent first record() may have populated the cache while
+      // we awaited the store; never move the floor backwards.
+      floor = Math.max(persisted, this.lastIssuedSeq.get(threadId) ?? 0)
+    }
+    const allocated = this.options.allocateSeq(threadId)
+    const seq = Math.max(allocated, floor + 1)
+    this.noteIssuedSeq(threadId, seq)
+    return seq
+  }
+
+  private noteIssuedSeq(threadId: string, seq: number): void {
+    const current = this.lastIssuedSeq.get(threadId) ?? 0
+    if (seq > current) this.lastIssuedSeq.set(threadId, seq)
   }
 }

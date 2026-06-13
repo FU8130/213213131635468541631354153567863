@@ -12,13 +12,15 @@ import {
   DEFAULT_KUN_CAPABILITIES_CONFIG,
   KunCapabilitiesConfig,
   ModelInputModality,
-  ModelMessagePartSupport
+  ModelMessagePartSupport,
+  ModelReasoningCapabilityMetadata
 } from '../contracts/capabilities.js'
 import {
   DEFAULT_MODEL_ENDPOINT_FORMAT,
   MODEL_ENDPOINT_FORMATS,
   normalizeModelEndpointFormat
 } from '../contracts/model-endpoint-format.js'
+import { HooksConfigSchema } from '../hooks/hook-config.js'
 
 export const KUN_CONFIG_FILENAME = 'config.json'
 export const DEFAULT_KUN_MODEL = 'deepseek-v4-pro'
@@ -59,7 +61,8 @@ export const ModelContextProfileConfigSchema = z
     inputModalities: z.array(ModelInputModality).optional(),
     outputModalities: z.array(ModelInputModality).optional(),
     supportsToolCalling: z.boolean().optional(),
-    messageParts: z.array(ModelMessagePartSupport).optional()
+    messageParts: z.array(ModelMessagePartSupport).optional(),
+    reasoning: ModelReasoningCapabilityMetadata.optional()
   })
   .strict()
   .superRefine((profile, ctx) => {
@@ -193,7 +196,8 @@ export const KunConfigSchema = z
     models: ModelConfigSchema.optional(),
     contextCompaction: ContextCompactionConfigSchema.optional(),
     runtime: RuntimeTuningConfigSchema.optional(),
-    capabilities: KunCapabilitiesConfig.default(DEFAULT_KUN_CAPABILITIES_CONFIG)
+    capabilities: KunCapabilitiesConfig.default(DEFAULT_KUN_CAPABILITIES_CONFIG),
+    hooks: HooksConfigSchema.optional()
   })
   .strict()
 

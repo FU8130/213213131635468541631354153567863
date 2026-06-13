@@ -1,5 +1,5 @@
-import type { ReactElement, ReactNode } from 'react'
-import { Eye, EyeOff } from 'lucide-react'
+import { useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { ChevronDown, Eye, EyeOff } from 'lucide-react'
 
 export type InlineNotice = {
   tone: 'success' | 'error' | 'info'
@@ -148,6 +148,136 @@ export function SettingRow({
   )
 }
 
+const CUSTOM_MODEL_OPTION = '__custom__'
+
+/**
+ * Model picker shared by the agents/write/speech/image sections. Renders a
+ * select with an optional "default" first option (empty-string value, caller
+ * maps it to its inherit semantics) plus the provider's model list. With
+ * allowCustom, a final option reveals a free-text input for unlisted ids.
+ */
+export function ModelSelect({
+  value,
+  options,
+  defaultLabel,
+  optionLabel,
+  allowCustom = false,
+  customLabel = '',
+  customPlaceholder = '',
+  disabled = false,
+  selectClassName = '',
+  onChange
+}: {
+  value: string
+  options: string[]
+  defaultLabel?: string
+  optionLabel?: (model: string) => string
+  allowCustom?: boolean
+  customLabel?: string
+  customPlaceholder?: string
+  disabled?: boolean
+  selectClassName?: string
+  onChange: (model: string) => void
+}): ReactElement {
+  const trimmed = value.trim()
+  const listed = trimmed === '' || options.includes(trimmed)
+  const [customSelected, setCustomSelected] = useState(allowCustom && !listed)
+  // 自定义输入用本地草稿渲染:调用方可能会把空值钳制回默认模型,
+  // 受控渲染存储值会导致输入框删不空、按键间被回填。
+  const [customDraft, setCustomDraft] = useState(trimmed)
+  const [customEditing, setCustomEditing] = useState(false)
+  const lastValueRef = useRef(trimmed)
+  if (trimmed !== lastValueRef.current) {
+    lastValueRef.current = trimmed
+    // 外部改动(切换供应商、恢复默认)在非编辑状态下同步进来,
+    // 并在新值已在列表里时退出自定义模式,避免界面停留在过期的「自定义」。
+    if (!customEditing && trimmed !== customDraft.trim()) {
+      setCustomDraft(trimmed)
+      if (listed) setCustomSelected(false)
+    }
+  }
+  const customActive = allowCustom && (customSelected || !listed)
+  const selectValue = customActive ? CUSTOM_MODEL_OPTION : trimmed
+  return (
+    <div className="grid w-full min-w-0 gap-2">
+      <select
+        className={selectClassName}
+        value={selectValue}
+        disabled={disabled}
+        onChange={(e) => {
+          const next = e.target.value
+          if (next === CUSTOM_MODEL_OPTION) {
+            setCustomDraft(trimmed)
+            setCustomSelected(true)
+            return
+          }
+          setCustomSelected(false)
+          setCustomDraft(next)
+          onChange(next)
+        }}
+      >
+        {defaultLabel !== undefined ? <option value="">{defaultLabel}</option> : null}
+        {options.map((model) => (
+          <option key={model} value={model}>
+            {optionLabel ? optionLabel(model) : model}
+          </option>
+        ))}
+        {allowCustom ? <option value={CUSTOM_MODEL_OPTION}>{customLabel}</option> : null}
+      </select>
+      {customActive ? (
+        <input
+          className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 font-mono text-[13px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
+          value={customDraft}
+          placeholder={customPlaceholder}
+          spellCheck={false}
+          disabled={disabled}
+          onFocus={() => setCustomEditing(true)}
+          onChange={(e) => {
+            setCustomDraft(e.target.value)
+            onChange(e.target.value)
+          }}
+          onBlur={() => {
+            setCustomEditing(false)
+            const draft = customDraft.trim()
+            const stored = value.trim()
+            if (!draft) {
+              setCustomDraft(stored)
+              if (stored === '' || options.includes(stored)) setCustomSelected(false)
+            } else if (draft !== stored) {
+              setCustomDraft(stored)
+            }
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+export function AdvancedSettingsDisclosure({
+  title,
+  description,
+  children
+}: {
+  title: string
+  description?: string
+  children: ReactNode
+}): ReactElement {
+  return (
+    <details className="group overflow-hidden rounded-xl border border-ds-border-muted bg-ds-main/35">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-ds-hover/70 [&::-webkit-details-marker]:hidden">
+        <span className="min-w-0">
+          <span className="block text-[13px] font-semibold text-ds-ink">{title}</span>
+          {description ? (
+            <span className="mt-1 block text-[12.5px] leading-5 text-ds-faint">{description}</span>
+          ) : null}
+        </span>
+        <ChevronDown className="h-4 w-4 shrink-0 text-ds-faint transition group-open:rotate-180" strokeWidth={1.9} />
+      </summary>
+      <div className="border-t border-ds-border-muted bg-ds-card/45">{children}</div>
+    </details>
+  )
+}
+
 export function Toggle({
   checked,
   onChange,
@@ -167,13 +297,13 @@ export function Toggle({
       onClick={() => {
         if (!disabled) onChange(!checked)
       }}
-      className={`relative h-7 w-12 shrink-0 rounded-full transition ${
+      className={`relative h-7 w-12 shrink-0 rounded-full transition-colors duration-200 ease-out ${
         checked ? 'bg-emerald-500' : 'bg-ds-faint'
-      } ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}
+      } ${disabled ? 'cursor-not-allowed opacity-60' : 'active:scale-[0.98]'}`}
     >
       <span
-        className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition ${
-          checked ? 'left-6' : 'left-0.5'
+        className={`absolute left-0.5 top-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform duration-200 ease-out ${
+          checked ? 'translate-x-5' : 'translate-x-0'
         }`}
       />
     </button>

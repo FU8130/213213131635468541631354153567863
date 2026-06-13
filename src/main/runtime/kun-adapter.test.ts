@@ -109,4 +109,24 @@ describe('runtimeRequestViaHost', () => {
     expect(seenUrl).toBe('/v1/usage?group_by=day&from=2026-06-01&to=2026-06-02&timezone=Asia%2FShanghai')
     expect(seenAuthorization).toBe('Bearer usage-token')
   })
+
+  it('uses settings returned by ensureRuntime when the managed port changes', async () => {
+    let seenUrl = ''
+    const port = await listen((req, res) => {
+      seenUrl = req.url ?? ''
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ ok: true }))
+    })
+
+    const response = await runtimeRequestViaHost(
+      settingsForPort(1),
+      '/v1/threads?limit=1',
+      { method: 'GET' },
+      async () => settingsForPort(port)
+    )
+
+    expect(response.ok).toBe(true)
+    expect(response.status).toBe(200)
+    expect(seenUrl).toBe('/v1/threads?limit=1')
+  })
 })

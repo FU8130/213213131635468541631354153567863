@@ -1,5 +1,16 @@
 import type { ReactElement, RefObject } from 'react'
-import { ChevronDown, Copy, Download, FileCode2, FilePenLine, FolderOpen, Loader2, Save, Sparkles } from 'lucide-react'
+import {
+  BookOpen,
+  ChevronDown,
+  Copy,
+  Download,
+  FileCode2,
+  FilePenLine,
+  FileText,
+  Loader2,
+  Save,
+  Sparkles
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { WriteExportFormat } from '@shared/write-export'
 import type { WritePreviewMode, WriteSaveStatus } from '../../write/write-workspace-store'
@@ -15,6 +26,7 @@ import {
 
 type Props = {
   activeFileIsImage: boolean
+  activeFileIsPdf?: boolean
   activeFileIsText: boolean
   activeFileLabel: string
   activeFileName: string
@@ -30,7 +42,6 @@ type Props = {
   modeMenuRef: RefObject<HTMLDivElement | null>
   onCopyRichText: () => void
   onExportFile: (format: WriteExportFormat) => void
-  onPickWorkspace: () => void
   onSave: () => void
   onToggleLeftSidebar: () => void
   previewMode: WritePreviewMode
@@ -45,6 +56,7 @@ type Props = {
 
 export function WriteWorkspaceToolbar({
   activeFileIsImage,
+  activeFileIsPdf = false,
   activeFileIsText,
   activeFileLabel,
   activeFileName,
@@ -60,7 +72,6 @@ export function WriteWorkspaceToolbar({
   modeMenuRef,
   onCopyRichText,
   onExportFile,
-  onPickWorkspace,
   onSave,
   onToggleLeftSidebar,
   previewMode,
@@ -73,6 +84,60 @@ export function WriteWorkspaceToolbar({
   setPreviewMode
 }: Props): ReactElement {
   const { t } = useTranslation('common')
+  if (activeFileIsPdf) {
+    return (
+      <div className="ds-stage-inset -mx-3 shrink-0 sm:-mx-4 md:-mx-6 lg:-mx-8">
+        <header className="ds-topbar-surface write-pdf-topbar relative z-10 mt-3 flex min-h-[52px] w-full items-stretch overflow-visible rounded-[18px]">
+          <div className="write-pdf-topbar-grid grid w-full min-w-0 items-center gap-2 px-3 py-2 sm:px-4 md:pl-5 md:pr-3">
+            <div
+              className={`flex min-w-0 items-center gap-2.5 ${
+                leftSidebarCollapsed ? 'ds-window-controls-safe-inset' : ''
+              }`}
+            >
+              {leftSidebarCollapsed ? (
+                <SidebarTitlebarToggleButton
+                  onClick={onToggleLeftSidebar}
+                  title={t('sidebarExpand')}
+                  ariaLabel={t('sidebarExpand')}
+                />
+              ) : null}
+              <span className="write-pdf-topbar-file-icon">
+                <FileText className="h-4 w-4" strokeWidth={1.9} />
+              </span>
+              <div className="min-w-0 flex-1 leading-none">
+                <div className="truncate text-[15px] font-semibold text-ds-ink">
+                  {activeFileName}
+                </div>
+                <div className="mt-1.5 truncate text-[12px] text-ds-faint">
+                  {activeFileLabel}
+                </div>
+              </div>
+            </div>
+
+            <div className="write-pdf-topbar-status">
+              <BookOpen className="h-4 w-4" strokeWidth={1.85} />
+              <span>{t('writePdfPreview')}</span>
+              <span className="write-pdf-topbar-dot" aria-hidden="true" />
+              <span>{t('writeReadOnly')}</span>
+            </div>
+
+            <div className="write-pdf-topbar-actions">
+              <button
+                type="button"
+                onClick={() => setAssistantOpen(!assistantOpen)}
+                className={toolbarIconButtonClass(assistantOpen)}
+                title={t('writeToggleAssistant')}
+                aria-label={t('writeToggleAssistant')}
+              >
+                <Sparkles className="h-4 w-4" strokeWidth={1.85} />
+              </button>
+            </div>
+          </div>
+        </header>
+      </div>
+    )
+  }
+
   return (
     <div className="ds-stage-inset -mx-3 shrink-0 sm:-mx-4 md:-mx-6 lg:-mx-8">
       <header className="ds-topbar-surface relative z-10 mt-3 flex min-h-[56px] w-full items-stretch overflow-visible rounded-[18px]">
@@ -135,7 +200,7 @@ export function WriteWorkspaceToolbar({
             {modeMenuOpen ? (
               <div
                 role="menu"
-                className="absolute left-0 top-full z-30 mt-2 min-w-[188px] overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.12)] dark:border-white/10 dark:bg-[#131722]"
+                className="absolute left-0 top-full z-30 mt-2 min-w-[188px] overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(20,47,95,0.12)] dark:border-white/10 dark:bg-[#131722]"
               >
                 {modeMenuItems.map((item) => (
                   <button
@@ -171,14 +236,6 @@ export function WriteWorkspaceToolbar({
           <div className="write-workspace-toolbar-actions flex min-w-0 items-center justify-start gap-1.5">
             <button
               type="button"
-              onClick={onPickWorkspace}
-              className={toolbarIconButtonClass()}
-              title={t('changeWorkspace')}
-            >
-              <FolderOpen className="h-4 w-4" strokeWidth={1.85} />
-            </button>
-            <button
-              type="button"
               onClick={() => setAssistantOpen(!assistantOpen)}
               className={toolbarIconButtonClass(assistantOpen)}
               title={t('writeToggleAssistant')}
@@ -208,7 +265,7 @@ export function WriteWorkspaceToolbar({
               {exportMenuOpen ? (
                 <div
                   role="menu"
-                  className="absolute right-0 top-full z-30 mt-2 w-52 overflow-hidden rounded-2xl border border-ds-border bg-ds-card/95 p-1.5 shadow-[0_22px_48px_rgba(15,23,42,0.16)] backdrop-blur-xl"
+                  className="absolute right-0 top-full z-30 mt-2 w-52 overflow-hidden rounded-2xl border border-ds-border bg-ds-card/95 p-1.5 shadow-[0_22px_48px_rgba(20,47,95,0.16)] backdrop-blur-xl"
                 >
                   <button
                     type="button"
@@ -242,8 +299,8 @@ export function WriteWorkspaceToolbar({
               onClick={onSave}
               disabled={!activeFilePath || !activeFileIsText || readOnly}
               className={`${toolbarIconButtonClass()} disabled:cursor-not-allowed disabled:opacity-40`}
-              title={activeFileIsImage ? t('writeImageSaveDisabled') : readOnly ? t('writeReadOnlySaveDisabled') : t('writeSaveFile')}
-              aria-label={activeFileIsImage ? t('writeImageSaveDisabled') : readOnly ? t('writeReadOnlySaveDisabled') : t('writeSaveFile')}
+              title={activeFileIsPdf ? t('writePdfSaveDisabled') : activeFileIsImage ? t('writeImageSaveDisabled') : readOnly ? t('writeReadOnlySaveDisabled') : t('writeSaveFile')}
+              aria-label={activeFileIsPdf ? t('writePdfSaveDisabled') : activeFileIsImage ? t('writeImageSaveDisabled') : readOnly ? t('writeReadOnlySaveDisabled') : t('writeSaveFile')}
             >
               <Save className="h-4 w-4" strokeWidth={1.85} />
             </button>

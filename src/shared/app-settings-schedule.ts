@@ -23,13 +23,16 @@ export function normalizeScheduledTask(
   now: string
 ): ScheduledTaskV1 {
   const schedule = task.schedule
+  const model = normalizeScheduleModel(task.model)
   return {
     id: typeof task.id === 'string' && task.id.trim() ? task.id.trim() : `task-${index + 1}`,
     title: typeof task.title === 'string' && task.title.trim() ? task.title.trim() : `Task ${index + 1}`,
     enabled: normalizeBoolean(task.enabled, true),
     prompt: typeof task.prompt === 'string' ? task.prompt : '',
     workspaceRoot: typeof task.workspaceRoot === 'string' ? task.workspaceRoot.trim() : '',
-    model: typeof task.model === 'string' && task.model.trim() ? task.model.trim() : DEFAULT_SCHEDULE_MODEL,
+    clawChannelId: typeof task.clawChannelId === 'string' ? task.clawChannelId.trim() : '',
+    providerId: typeof task.providerId === 'string' ? task.providerId.trim() : '',
+    model,
     reasoningEffort: normalizeScheduleReasoningEffort(task.reasoningEffort),
     mode: normalizeRunMode(task.mode),
     schedule: {
@@ -52,6 +55,7 @@ export function defaultScheduleSettings(): ScheduleSettingsV1 {
   return {
     enabled: false,
     defaultWorkspaceRoot: '',
+    providerId: '',
     model: DEFAULT_SCHEDULE_MODEL,
     mode: 'agent',
     promptPrefix: '',
@@ -80,7 +84,8 @@ export function normalizeScheduleSettings(
     enabled: normalizeBoolean(source.enabled, defaults.enabled),
     defaultWorkspaceRoot:
       typeof source.defaultWorkspaceRoot === 'string' ? source.defaultWorkspaceRoot.trim() : '',
-    model: typeof source.model === 'string' && source.model.trim() ? source.model.trim() : DEFAULT_SCHEDULE_MODEL,
+    providerId: typeof source.providerId === 'string' ? source.providerId.trim() : '',
+    model: normalizeScheduleModel(source.model),
     mode: normalizeRunMode(source.mode),
     promptPrefix: typeof source.promptPrefix === 'string' ? source.promptPrefix : '',
     skills: {
@@ -96,6 +101,12 @@ export function normalizeScheduleSettings(
       ? source.tasks.map((task, index) => normalizeScheduledTask(task as Partial<ScheduledTaskV1>, index, now))
       : []
   }
+}
+
+function normalizeScheduleModel(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_SCHEDULE_MODEL
+  const trimmed = value.trim()
+  return trimmed && trimmed.toLowerCase() !== 'auto' ? trimmed : DEFAULT_SCHEDULE_MODEL
 }
 
 export function mergeScheduleSettings(

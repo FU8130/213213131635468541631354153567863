@@ -103,35 +103,6 @@ export function estimateDeepseekCost(input: {
   }
 }
 
-export function estimateDeepseekInputTokenCost(input: {
-  model: string
-  inputTokens: number
-  providerHost?: string
-}): DeepseekCurrencyCosts | null {
-  return estimateDeepseekCost({
-    model: input.model,
-    cacheHitTokens: 0,
-    cacheMissTokens: input.inputTokens,
-    outputTokens: 0,
-    providerHost: input.providerHost
-  })
-}
-
-export function estimateDeepseekCacheSavings(input: {
-  model: string
-  cacheHitTokens: number
-  providerHost?: string
-}): DeepseekCurrencyCosts | null {
-  if (input.providerHost !== undefined && !isDeepSeekHost(input.providerHost)) {
-    return null
-  }
-  const tier = pricingTierForModel(input.model)
-  if (!tier) return null
-  const prices = DEEPSEEK_V4_PRICES[tier]
-  return {
-    costUsd: (input.cacheHitTokens / TOKENS_PER_MILLION) *
-      Math.max(0, prices.usd.inputCacheMiss - prices.usd.inputCacheHit),
-    costCny: (input.cacheHitTokens / TOKENS_PER_MILLION) *
-      Math.max(0, prices.cny.inputCacheMiss - prices.cny.inputCacheHit)
-  }
-}
+// Savings are reported in tokens only. Money estimates for savings were
+// removed: list prices drift and third-party providers make any currency
+// figure unreliable, so the UI now shows saved tokens instead.

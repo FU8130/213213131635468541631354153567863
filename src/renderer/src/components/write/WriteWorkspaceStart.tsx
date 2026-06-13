@@ -37,7 +37,7 @@ export function WriteWorkspaceStart({
             <button
               type="button"
               onClick={onCreateDraft}
-              className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-accent px-5 text-[14px] font-semibold text-white shadow-[0_14px_30px_rgba(0,136,255,0.22)] transition hover:brightness-110"
+              className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-accent px-5 text-[14px] font-semibold text-white shadow-[0_14px_30px_rgba(59,130,216,0.22)] transition hover:brightness-110"
             >
               <FilePlus2 className="h-4 w-4" strokeWidth={1.9} />
               {t('writeStartNewDraft')}
@@ -90,7 +90,7 @@ export function WriteWorkspaceStart({
           </div>
         </section>
 
-        <aside className="write-start-card min-w-0 rounded-[24px] border border-ds-border-muted bg-white/58 p-5 shadow-[0_18px_48px_rgba(15,23,42,0.07)] dark:bg-white/[0.04]">
+        <aside className="write-start-card min-w-0 rounded-[24px] border border-ds-border-muted bg-white/58 p-5 shadow-[0_18px_48px_rgba(20,47,95,0.07)] dark:bg-white/[0.04]">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="text-[12px] font-semibold text-ds-faint">

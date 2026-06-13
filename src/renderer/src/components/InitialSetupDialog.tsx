@@ -1,19 +1,48 @@
 import { type ReactElement, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  getActiveAgentApiKey,
-  getModelProviderSettings,
+  DEFAULT_MODEL_PROVIDER_ID,
   normalizeAppSettings,
   type AppSettingsPatch,
-  type AppSettingsV1
+  type AppSettingsV1,
+  type ModelProviderPreset
 } from '@shared/app-settings'
+import {
+  buildInitialSetupSettings,
+  INITIAL_SETUP_PROVIDER_PRESETS,
+  initialSetupAutoWirePlan,
+  initialSetupDrafts,
+  initialSetupProfileId,
+  initialSetupSelection,
+  type InitialSetupDrafts,
+  type InitialSetupSelection
+} from './initial-setup-save'
 import { rendererRuntimeClient } from '../agent/runtime-client'
+import type { RuntimeConnectionStatus } from '../agent/types'
 import { applyTheme } from '../lib/apply-theme'
+import { emitRendererSettingsChanged } from '../lib/keyboard-shortcut-settings'
 import { useChatStore } from '../store/chat-store'
-import { Eye, EyeOff, ExternalLink, Sparkles, Sun, Moon, Monitor, X } from 'lucide-react'
+import type { InitialSetupMode } from '../store/chat-store-types'
+import {
+  Eye,
+  EyeOff,
+  ExternalLink,
+  Image as ImageIcon,
+  MessageCircle,
+  Mic,
+  Sparkles,
+  Sun,
+  Moon,
+  Monitor,
+  X
+} from 'lucide-react'
 
 type ThemePref = AppSettingsV1['theme']
 type SetupFormPatch = AppSettingsPatch
+type InitialSetupCompletionState = {
+  runtimeConnection: RuntimeConnectionStatus
+  error: string | null
+}
 
 const themeOptions: { value: ThemePref; icon: typeof Sun; labelKey: string }[] = [
   { value: 'system', icon: Monitor, labelKey: 'themeSystem' },
@@ -22,6 +51,83 @@ const themeOptions: { value: ThemePref; icon: typeof Sun; labelKey: string }[] =
 ]
 const DEEPSEEK_USAGE_URL = 'https://platform.deepseek.com/usage'
 
+type SetupProviderCard = {
+  presetId: string
+  name: string
+  descKey: string
+  capability: 'speech' | 'image' | null
+  preset: ModelProviderPreset | null
+}
+
+const PROVIDER_CARDS: SetupProviderCard[] = [
+  {
+    presetId: DEFAULT_MODEL_PROVIDER_ID,
+    name: 'DeepSeek',
+    descKey: 'firstRunProviderDeepseekDesc',
+    capability: null,
+    preset: null
+  },
+  ...INITIAL_SETUP_PROVIDER_PRESETS.map((preset) => ({
+    presetId: preset.id,
+    name: preset.name,
+    descKey: preset.id === 'xiaomi' ? 'firstRunProviderXiaomiDesc' : 'firstRunProviderMinimaxDesc',
+    capability: preset.speech ? ('speech' as const) : preset.image ? ('image' as const) : null,
+    preset
+  }))
+]
+
+function keyHintKey(card: SetupProviderCard, mode: InitialSetupSelection['mode']): string {
+  if (card.presetId === DEFAULT_MODEL_PROVIDER_ID) return 'firstRunBuyApiHint'
+  const suffix = mode === 'token-plan' ? 'TokenPlan' : 'Api'
+  return card.presetId === 'xiaomi' ? `firstRunKeyHintXiaomi${suffix}` : `firstRunKeyHintMinimax${suffix}`
+}
+
+function keyPageUrl(card: SetupProviderCard, mode: InitialSetupSelection['mode']): string {
+  if (!card.preset) return DEEPSEEK_USAGE_URL
+  if (mode === 'token-plan' && card.preset.tokenPlan) return card.preset.tokenPlan.apiKeyUrl
+  return card.preset.apiKeyUrl
+}
+
+function keyPlaceholder(card: SetupProviderCard, mode: InitialSetupSelection['mode']): string {
+  if (mode === 'token-plan') {
+    const prefix = card.preset?.tokenPlan?.keyPrefix
+    return prefix ? `${prefix}...` : 'API Key'
+  }
+  return card.presetId === 'minimax' ? 'API Key' : 'sk-...'
+}
+
+export function canCloseInitialSetup(mode: InitialSetupMode): boolean {
+  return mode === 'preview'
+}
+
+export async function completeInitialSetupAfterSave(input: {
+  mode: InitialSetupMode
+  reloadUiSettings: () => Promise<void>
+  probeRuntime: (mode?: 'user' | 'background') => Promise<void>
+  openCode: () => Promise<void>
+  closeInitialSetup: () => void
+  getState: () => InitialSetupCompletionState
+  setDialogError: (message: string) => void
+  fallbackRuntimeError: string
+}): Promise<boolean> {
+  await input.reloadUiSettings()
+  if (input.mode === 'preview') {
+    void input.probeRuntime('background')
+    input.closeInitialSetup()
+    return true
+  }
+
+  await input.probeRuntime('user')
+  const state = input.getState()
+  if (state.runtimeConnection !== 'ready') {
+    input.setDialogError(state.error?.trim() || input.fallbackRuntimeError)
+    return false
+  }
+  await input.openCode()
+  input.closeInitialSetup()
+  return true
+}
+
 export function InitialSetupDialog(): ReactElement {
   const { t } = useTranslation('settings')
   const initialSetupMode = useChatStore((s) => s.initialSetupMode)
@@ -29,14 +135,20 @@ export function InitialSetupDialog(): ReactElement {
   const applyI18n = useChatStore((s) => s.applyI18nFromSettings)
   const reloadUiSettings = useChatStore((s) => s.reloadUiSettings)
   const probeRuntime = useChatStore((s) => s.probeRuntime)
+  const openCode = useChatStore((s) => s.openCode)
 
   const [form, setForm] = useState<AppSettingsV1 | null>(null)
+  const [drafts, setDrafts] = useState<InitialSetupDrafts | null>(null)
+  const [selection, setSelection] = useState<InitialSetupSelection>({
+    presetId: DEFAULT_MODEL_PROVIDER_ID,
+    mode: 'api'
+  })
   const [showApiKey, setShowApiKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const formRef = useRef<AppSettingsV1 | null>(null)
   const isPreview = initialSetupMode === 'preview'
-  const provider = form ? getModelProviderSettings(form) : null
+  const closeAllowed = canCloseInitialSetup(initialSetupMode)
 
   const setCurrentForm = (next: AppSettingsV1 | null): void => {
     formRef.current = next
@@ -48,7 +160,10 @@ export function InitialSetupDialog(): ReactElement {
     void rendererRuntimeClient
       .getSettings({ forceRefresh: true })
       .then((s) => {
-        if (!cancelled) setCurrentForm(s)
+        if (cancelled) return
+        setCurrentForm(s)
+        setDrafts(initialSetupDrafts(s))
+        setSelection(initialSetupSelection(s))
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -61,17 +176,9 @@ export function InitialSetupDialog(): ReactElement {
     if (!current) return
     const next = normalizeAppSettings({
       ...current,
-      ...patch,
-      provider: {
-        ...current.provider,
-        ...(patch.provider ?? {})
-      }
+      ...patch
     } as AppSettingsV1)
     setCurrentForm(next)
-  }
-
-  const updateProvider = (patch: Partial<AppSettingsV1['provider']>): void => {
-    updateForm({ provider: patch })
   }
 
   const handleThemeChange = (theme: ThemePref) => {
@@ -81,32 +188,71 @@ export function InitialSetupDialog(): ReactElement {
   }
 
   const handleClose = () => {
+    if (!closeAllowed) return
     setError(null)
     closeInitialSetup()
     void reloadUiSettings()
   }
 
-  const handleOpenOfficialApiPage = () => {
-    if (typeof window.dsGui?.openExternal !== 'function') return
-    void window.dsGui.openExternal(DEEPSEEK_USAGE_URL).catch(() => undefined)
+  const handleOpenKeyPage = (url: string) => {
+    if (typeof window.kunGui?.openExternal !== 'function') return
+    void window.kunGui.openExternal(url).catch(() => undefined)
+  }
+
+  const selectedCard = PROVIDER_CARDS.find((card) => card.presetId === selection.presetId) ?? PROVIDER_CARDS[0]
+  const selectedProfileId = initialSetupProfileId(selection)
+  const selectedDraft = drafts?.[selectedProfileId] ?? { apiKey: '', baseUrl: '' }
+
+  const updateSelectedDraft = (patch: Partial<typeof selectedDraft>): void => {
+    setDrafts((current) => current
+      ? { ...current, [selectedProfileId]: { ...current[selectedProfileId], ...patch } }
+      : current)
+  }
+
+  const selectCard = (presetId: string): void => {
+    setError(null)
+    setSelection((current) => (current.presetId === presetId ? current : { presetId, mode: 'api' }))
+  }
+
+  const selectMode = (mode: InitialSetupSelection['mode']): void => {
+    setError(null)
+    setSelection((current) => ({ ...current, mode }))
+  }
+
+  const cardFilled = (card: SetupProviderCard): boolean => {
+    if (!drafts) return false
+    if (drafts[card.presetId]?.apiKey.trim()) return true
+    if (!card.preset?.tokenPlan) return false
+    return Boolean(drafts[initialSetupProfileId({ presetId: card.presetId, mode: 'token-plan' })]?.apiKey.trim())
   }
 
   const handleSave = async () => {
     const current = formRef.current
-    if (!current) return
-    if (!getActiveAgentApiKey(current).trim()) {
-      setError(t('firstRunApiKeyValidation'))
+    if (!current || !drafts) return
+    if (!selectedDraft.apiKey.trim()) {
+      setError(t('firstRunApiKeyValidation', { provider: selectedCard.name }))
       return
     }
     setSaving(true)
     setError(null)
     try {
-      const next = await rendererRuntimeClient.setSettings(current)
+      const next = await rendererRuntimeClient.setSettings(
+        buildInitialSetupSettings(current, drafts, selection)
+      )
       setCurrentForm(next)
+      setDrafts(initialSetupDrafts(next))
+      emitRendererSettingsChanged(next)
       await applyI18n(next.locale)
-      void reloadUiSettings()
-      void probeRuntime('background')
-      closeInitialSetup()
+      await completeInitialSetupAfterSave({
+        mode: initialSetupMode,
+        reloadUiSettings,
+        probeRuntime,
+        openCode,
+        closeInitialSetup,
+        getState: useChatStore.getState,
+        setDialogError: setError,
+        fallbackRuntimeError: t('common:runtimeFetchFailed')
+      })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -114,7 +260,7 @@ export function InitialSetupDialog(): ReactElement {
     }
   }
 
-  if (!form) {
+  if (!form || !drafts) {
     return (
       <div className="ds-no-drag fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4 backdrop-blur-md dark:bg-black/70">
         <div className="rounded-xl border border-ds-border bg-ds-card/95 px-5 py-4 text-sm text-ds-muted shadow-panel backdrop-blur-xl">
@@ -125,12 +271,46 @@ export function InitialSetupDialog(): ReactElement {
   }
 
   const selectedTheme = form.theme
+  const tokenPlan = selectedCard.preset?.tokenPlan ?? null
+  const showTokenPlanMode = Boolean(tokenPlan)
+  const regions = selection.mode === 'token-plan' ? tokenPlan?.regions ?? [] : []
+  const wire = initialSetupAutoWirePlan(form, drafts)
+  const wireNote = (() => {
+    if (!selectedCard.capability) return null
+    const wiredProfileId = selectedCard.capability === 'speech' ? wire.speechProviderId : wire.imageProviderId
+    if (wiredProfileId && wiredProfileId === selectedProfileId) {
+      return {
+        tone: 'success' as const,
+        text: t(selectedCard.capability === 'speech' ? 'firstRunAutoWireSpeech' : 'firstRunAutoWireImage')
+      }
+    }
+    if (selection.mode === 'token-plan' && selectedDraft.apiKey.trim()) {
+      const planServesCapability = selectedCard.capability === 'speech'
+        ? Boolean(tokenPlan?.speech)
+        : selectedCard.capability === 'image' && Boolean(tokenPlan?.image)
+      if (!planServesCapability) {
+        return {
+          tone: 'warning' as const,
+          text: t(selectedCard.capability === 'speech' ? 'firstRunTokenPlanNoSpeech' : 'firstRunTokenPlanNoImage')
+        }
+      }
+    }
+    return null
+  })()
+
   const choiceButtonClass = (active: boolean): string =>
     [
       'flex min-h-10 min-w-0 items-center justify-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium transition-all duration-200 sm:min-h-11 sm:px-4',
       active
         ? 'border-[#1388ff] bg-[#1388ff]/[0.07] text-[#1377df] shadow-[0_0_0_1px_rgba(19,136,255,0.12),0_8px_18px_rgba(19,136,255,0.07)] dark:border-[#3aa0ff] dark:bg-[#3aa0ff]/[0.12] dark:text-[#88c8ff]'
         : 'border-slate-300/80 bg-white/72 text-slate-600 hover:border-slate-400/80 hover:bg-white dark:border-white/10 dark:bg-white/[0.035] dark:text-slate-300 dark:hover:border-white/16 dark:hover:bg-white/[0.055]'
+    ].join(' ')
+  const cardButtonClass = (active: boolean): string =>
+    [
+      'flex min-w-0 flex-col items-start gap-1 rounded-xl border px-3 py-2.5 text-left transition-all duration-200',
+      active
+        ? 'border-[#1388ff] bg-[#1388ff]/[0.07] shadow-[0_0_0_1px_rgba(19,136,255,0.12),0_8px_18px_rgba(19,136,255,0.07)] dark:border-[#3aa0ff] dark:bg-[#3aa0ff]/[0.12]'
+        : 'border-slate-300/80 bg-white/72 hover:border-slate-400/80 hover:bg-white dark:border-white/10 dark:bg-white/[0.035] dark:hover:border-white/16 dark:hover:bg-white/[0.055]'
     ].join(' ')
   const fieldClass =
     'w-full rounded-xl border border-slate-300/75 bg-white/88 px-4 py-3 text-[15px] text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)] outline-none transition focus:border-[#1388ff]/70 focus:ring-2 focus:ring-[#1388ff]/15 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:shadow-none dark:focus:border-[#3aa0ff]/70 dark:focus:ring-[#3aa0ff]/15 dark:placeholder:text-slate-500'
@@ -150,15 +330,17 @@ export function InitialSetupDialog(): ReactElement {
               <Sparkles className="h-3.5 w-3.5" strokeWidth={1.9} />
               <span className="min-w-0 truncate">{t(isPreview ? 'firstRunPreviewBadge' : 'firstRunBadge')}</span>
             </div>
-            <button
-              type="button"
-              onClick={handleClose}
-              aria-label={t('firstRunClose')}
-              title={t('firstRunClose')}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-slate-300/80 bg-white/72 text-slate-500 transition hover:border-slate-400 hover:text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-400 dark:hover:border-white/18 dark:hover:text-slate-200"
-            >
-              <X className="h-[18px] w-[18px]" strokeWidth={1.8} />
-            </button>
+            {closeAllowed ? (
+              <button
+                type="button"
+                onClick={handleClose}
+                aria-label={t('firstRunClose')}
+                title={t('firstRunClose')}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-slate-300/80 bg-white/72 text-slate-500 transition hover:border-slate-400 hover:text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-400 dark:hover:border-white/18 dark:hover:text-slate-200"
+              >
+                <X className="h-[18px] w-[18px]" strokeWidth={1.8} />
+              </button>
+            ) : null}
           </div>
           <h1 id="initial-setup-title" className="mt-3 text-xl font-semibold leading-tight text-slate-900 dark:text-white sm:mt-4 sm:text-[22px]">
             {t('firstRunTitle')}
@@ -217,14 +399,104 @@ export function InitialSetupDialog(): ReactElement {
 
           <div className="space-y-2.5 sm:space-y-3.5">
             <label className={labelClass}>
-              {t('apiKey')}
+              {t('firstRunProviderLabel')}
+            </label>
+            <div className="grid grid-cols-1 gap-2 sm:gap-2.5 min-[440px]:grid-cols-3">
+              {PROVIDER_CARDS.map((card) => {
+                const isActive = selection.presetId === card.presetId
+                const filled = cardFilled(card)
+                return (
+                  <button
+                    key={card.presetId}
+                    type="button"
+                    onClick={() => selectCard(card.presetId)}
+                    className={cardButtonClass(isActive)}
+                  >
+                    <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-800 dark:text-slate-100">
+                      {card.name}
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${filled ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-white/20'}`}
+                      />
+                    </span>
+                    <span className="text-[12px] leading-tight text-slate-500 dark:text-slate-400">
+                      {t(card.descKey)}
+                    </span>
+                    {card.capability ? (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                        {card.capability === 'speech'
+                          ? <Mic className="h-3 w-3" strokeWidth={2} />
+                          : <ImageIcon className="h-3 w-3" strokeWidth={2} />}
+                        {t(card.capability === 'speech' ? 'firstRunCapabilitySpeech' : 'firstRunCapabilityImage')}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-slate-400 dark:text-slate-500">
+                        <MessageCircle className="h-3 w-3" strokeWidth={2} />
+                        {t('firstRunCapabilityChat')}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          {showTokenPlanMode && (
+            <div className="space-y-2.5 sm:space-y-3.5">
+              <label className={labelClass}>
+                {t('firstRunModeLabel')}
+              </label>
+              <div className="grid grid-cols-1 gap-2 sm:gap-2.5 min-[440px]:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => selectMode('api')}
+                  className={choiceButtonClass(selection.mode === 'api')}
+                >
+                  <span className="min-w-0 text-center leading-tight">{t('firstRunModeApi')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectMode('token-plan')}
+                  className={choiceButtonClass(selection.mode === 'token-plan')}
+                >
+                  <span className="min-w-0 text-center leading-tight">{t('firstRunModeTokenPlan')}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {regions.length > 0 && (
+            <div className="space-y-2.5 sm:space-y-3.5">
+              <label className={labelClass}>
+                {t('firstRunRegionLabel')}
+              </label>
+              <div className="grid grid-cols-1 gap-2 sm:gap-2.5 min-[440px]:grid-cols-3">
+                {regions.map((region) => (
+                  <button
+                    key={region.id}
+                    type="button"
+                    onClick={() => updateSelectedDraft({ baseUrl: region.baseUrl })}
+                    className={choiceButtonClass(selectedDraft.baseUrl.trim() === region.baseUrl)}
+                  >
+                    <span className="min-w-0 text-center leading-tight">
+                      {t(`firstRunRegion_${region.id}`)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2.5 sm:space-y-3.5">
+            <label className={labelClass}>
+              {t('firstRunApiKeyLabel', { provider: selectedCard.name })}
             </label>
             <div className="relative">
               <input
                 type={showApiKey ? 'text' : 'password'}
-                value={provider?.apiKey ?? ''}
-                onChange={(e) => updateProvider({ apiKey: e.target.value })}
-                placeholder="sk-..."
+                value={selectedDraft.apiKey}
+                onChange={(e) => updateSelectedDraft({ apiKey: e.target.value })}
+                placeholder={keyPlaceholder(selectedCard, selection.mode)}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -241,17 +513,28 @@ export function InitialSetupDialog(): ReactElement {
             </div>
             <div className="grid gap-3 rounded-xl border border-slate-200/80 bg-slate-50/75 px-4 py-3 text-[13px] text-slate-500 dark:border-white/10 dark:bg-white/[0.035] dark:text-slate-400 min-[560px]:grid-cols-[1fr_auto] min-[560px]:items-center">
               <p className="min-w-0 leading-6">
-                {t('firstRunBuyApiHint')}
+                {t(keyHintKey(selectedCard, selection.mode))}
               </p>
               <button
                 type="button"
-                onClick={handleOpenOfficialApiPage}
+                onClick={() => handleOpenKeyPage(keyPageUrl(selectedCard, selection.mode))}
                 className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[#1388ff]/24 bg-[#1388ff]/[0.06] px-3 py-1.5 text-[12.5px] font-semibold text-[#1377df] transition hover:bg-[#1388ff]/[0.1] dark:border-[#3aa0ff]/22 dark:bg-[#3aa0ff]/[0.12] dark:text-[#88c8ff] dark:hover:bg-[#3aa0ff]/[0.18]"
               >
-                <span className="min-w-0 text-center leading-tight">{t('firstRunBuyApiAction')}</span>
+                <span className="min-w-0 text-center leading-tight">{t('firstRunGetKeyAction')}</span>
                 <ExternalLink className="h-3.5 w-3.5" strokeWidth={1.9} />
               </button>
             </div>
+            {wireNote && (
+              <div
+                className={
+                  wireNote.tone === 'success'
+                    ? 'rounded-xl border border-emerald-300/60 bg-emerald-50/80 px-4 py-2.5 text-[12.5px] leading-5 text-emerald-700 dark:border-emerald-800/60 dark:bg-emerald-950/30 dark:text-emerald-300'
+                    : 'rounded-xl border border-amber-300/60 bg-amber-50/80 px-4 py-2.5 text-[12.5px] leading-5 text-amber-700 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300'
+                }
+              >
+                {wireNote.text}
+              </div>
+            )}
           </div>
 
           <div className="space-y-2.5 sm:space-y-3.5">
@@ -260,9 +543,9 @@ export function InitialSetupDialog(): ReactElement {
             </label>
             <input
               type="text"
-              value={provider?.baseUrl ?? ''}
-              onChange={(e) => updateProvider({ baseUrl: e.target.value })}
-              placeholder="https://api.deepseek.com"
+              value={selectedDraft.baseUrl}
+              onChange={(e) => updateSelectedDraft({ baseUrl: e.target.value })}
+              placeholder="https://"
               className={fieldClass}
             />
           </div>
@@ -275,14 +558,16 @@ export function InitialSetupDialog(): ReactElement {
             </div>
           )}
 
-          <div className="flex flex-col-reverse gap-3 sm:grid sm:grid-cols-[0.85fr_1fr]">
-            <button
-              type="button"
-              onClick={handleClose}
-              className="min-h-11 rounded-xl border border-slate-300/80 bg-white/75 px-4 py-2 text-[15px] font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-white dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200 dark:hover:border-white/16 dark:hover:bg-white/[0.06]"
-            >
-              {t('firstRunClose')}
-            </button>
+          <div className={closeAllowed ? 'flex flex-col-reverse gap-3 sm:grid sm:grid-cols-[0.85fr_1fr]' : 'grid gap-3'}>
+            {closeAllowed ? (
+              <button
+                type="button"
+                onClick={handleClose}
+                className="min-h-11 rounded-xl border border-slate-300/80 bg-white/75 px-4 py-2 text-[15px] font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-white dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200 dark:hover:border-white/16 dark:hover:bg-white/[0.06]"
+              >
+                {t('firstRunClose')}
+              </button>
+            ) : null}
             <button
               type="button"
               disabled={saving}

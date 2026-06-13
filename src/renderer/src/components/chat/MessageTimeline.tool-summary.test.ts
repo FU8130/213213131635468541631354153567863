@@ -3,8 +3,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ChatBlock, NormalizedThread, ToolBlock } from '../../agent/types'
 import { useChatStore } from '../../store/chat-store'
-import { MessageTimeline, summarizeToolBlock } from './MessageTimeline'
-import { MessageBubble } from './message-timeline-bubbles'
+import { MessageTimeline, goalTimelinePaddingClass, liveTurnProgressClass, summarizeToolBlock } from './MessageTimeline'
+import { GeneratedFilesPanel, MessageBubble } from './message-timeline-bubbles'
 import { ProcessSectionRow } from './message-timeline-process'
 
 const labels: Record<string, string> = {
@@ -162,6 +162,29 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
     expect(html).toContain('src="data:image/png;base64,abc"')
     expect(html).toContain('为什么图片完全没有识别啊')
     expect(html).not.toContain('Attachments 1')
+    expect(html).not.toContain('ds-media-printer-reveal')
+  })
+
+  it('renders generated image previews with the printer reveal effect', () => {
+    const block: ToolBlock = toolBlock({
+      id: 'tool_img',
+      summary: 'generate_image',
+      meta: {
+        generatedFiles: [
+          {
+            name: 'painting.png',
+            mimeType: 'image/png',
+            previewUrl: 'data:image/png;base64,paint'
+          }
+        ]
+      }
+    })
+
+    const html = renderToStaticMarkup(createElement(GeneratedFilesPanel, { blocks: [block] }))
+
+    expect(html).toContain('<img')
+    expect(html).toContain('src="data:image/png;base64,paint"')
+    expect(html).toContain('ds-media-printer-reveal')
   })
 
   it('renders managed Claw prompts as the user-visible message', () => {
@@ -385,6 +408,39 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
     expect(html).not.toContain('read detail should stay tucked away')
   })
 
+  it('auto-expands pending approvals while keeping other tool details tucked away', () => {
+    const readBlock: ChatBlock = toolBlock({
+      id: 'tool_read',
+      summary: 'read: file',
+      detail: 'read detail should stay tucked away',
+      meta: { toolName: 'read' },
+      filePath: '/tmp/readme.md'
+    })
+    const approvalBlock: ChatBlock = {
+      kind: 'approval',
+      id: 'approval_appr_1',
+      approvalId: 'appr_1',
+      status: 'pending',
+      toolName: 'edit',
+      summary: 'Run edit(path="/tmp/app.ts")'
+    }
+
+    const html = renderToStaticMarkup(
+      createElement(ProcessSectionRow, {
+        section: { id: 'execution-batch', kind: 'execution', blocks: [readBlock, approvalBlock] },
+        processing: true,
+        singleReasoningSection: false,
+        viewportRef: { current: null }
+      })
+    )
+
+    expect(html).toContain('ds-work-stack')
+    expect(html).toContain('Run edit(path=&quot;/tmp/app.ts&quot;)')
+    expect(html).toMatch(/Approval required|需要审批|approvalTitle/)
+    expect(html).toMatch(/Allow|允许|approvalAllow/)
+    expect(html).not.toContain('read detail should stay tucked away')
+  })
+
   it('renders request_user_input without options as a freeform answer field', () => {
     const inputBlock: ChatBlock = {
       kind: 'user_input',
@@ -453,5 +509,62 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
     expect(html).toContain('Read')
     expect(html).toContain('/tmp/project/src/app.ts')
     expect(html).not.toContain('running timeline detail should stay collapsed')
+  })
+
+  it('keeps completed runtime errors visible instead of folding them into the work summary', () => {
+    const blocks: ChatBlock[] = [
+      {
+        kind: 'user',
+        id: 'user_1',
+        text: 'draw this'
+      },
+      {
+        kind: 'system',
+        id: 'error_1',
+        text: 'model request failed with status 400',
+        detail: [
+          'Code: http_400',
+          '',
+          'Severity: error',
+          '',
+          'Message:',
+          'full provider body only visible in the expanded error detail'
+        ].join('\n'),
+        code: 'http_400',
+        severity: 'error'
+      }
+    ]
+    useChatStore.setState({
+      busy: false,
+      currentTurnUserId: null,
+      turnStartedAtByUserId: {}
+    })
+
+    const html = renderToStaticMarkup(
+      createElement(MessageTimeline, {
+        blocks,
+        liveReasoning: '',
+        live: '',
+        activeThreadId: 'thr_1',
+        runtimeConnection: 'ready',
+        onRetryConnection: () => undefined,
+        onOpenSettings: () => undefined
+      })
+    )
+
+    expect(html).toContain('request failed with status 400')
+    expect(html).toContain('Code: http_400')
+    expect(html).toContain('full provider body only visible in the expanded error detail')
+  })
+
+  it('adds extra bottom padding only for chat timelines with an active goal banner', () => {
+    expect(goalTimelinePaddingClass('chat', true)).toBe('pb-32 md:pb-40')
+    expect(goalTimelinePaddingClass('chat', false)).toBe('pb-10')
+    expect(goalTimelinePaddingClass('claw', true)).toBe('pb-10')
+  })
+
+  it('pushes the live progress row above the goal banner when a goal is active', () => {
+    expect(liveTurnProgressClass(true)).toContain('mb-16 md:mb-20')
+    expect(liveTurnProgressClass(false)).not.toContain('mb-16 md:mb-20')
   })
 })

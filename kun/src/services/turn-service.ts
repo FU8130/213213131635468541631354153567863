@@ -1,6 +1,7 @@
 import type { ThreadRecord, ThreadStatus } from '../contracts/threads.js'
 import type { CompactRequest, CompactResponse, StartTurnRequest, StartTurnResponse, Turn, TurnStatus } from '../contracts/turns.js'
 import type { TurnItem } from '../contracts/items.js'
+import type { RuntimeErrorSeverity } from '../contracts/errors.js'
 import type { SessionStore } from '../ports/session-store.js'
 import type { ThreadStore } from '../ports/thread-store.js'
 import type { IdGenerator } from '../ports/id-generator.js'
@@ -53,7 +54,8 @@ export class TurnService {
       reasoningEffort: input.request.reasoningEffort,
       attachmentIds: input.request.attachmentIds ?? [],
       guiPlan: input.request.guiPlan,
-      mode: input.request.mode
+      mode: input.request.mode,
+      disableUserInput: input.request.disableUserInput
     })
     const userItem = makeUserItem({
       id: `item_${turnId}_user`,
@@ -67,6 +69,12 @@ export class TurnService {
     await this.upsertThread(input.threadId, (current) => ({
       ...touchThread(current, this.deps.nowIso()),
       status: 'running',
+      ...(input.request.approvalPolicy !== undefined
+        ? { approvalPolicy: input.request.approvalPolicy }
+        : {}),
+      ...(input.request.sandboxMode !== undefined
+        ? { sandboxMode: input.request.sandboxMode }
+        : {}),
       turns: [...current.turns, startTurnRecord(appendTurnItem(turn, userItem))]
     }))
     await this.deps.sessionStore.appendItem(input.threadId, userItem)
@@ -116,6 +124,8 @@ export class TurnService {
     })
     if (input.discard) {
       await this.discardTurnItems(input.threadId, input.turnId)
+    } else {
+      await this.finalizePersistedOpenItems(input.threadId, input.turnId, 'aborted')
     }
     await this.upsertThread(input.threadId, (current) => {
       const turn = current.turns.find((t) => t.id === input.turnId)
@@ -202,10 +212,14 @@ export class TurnService {
     turnId: string
     status: Extract<TurnStatus, 'completed' | 'failed' | 'aborted'>
     error?: string
+    code?: string
+    details?: unknown
+    severity?: RuntimeErrorSeverity
   }): Promise<void> {
     this.inflightTurns.delete(input.turnId)
     this.deps.inflight.end(input.turnId)
     this.deps.steering.clear()
+    await this.finalizePersistedOpenItems(input.threadId, input.turnId, input.status)
     await this.upsertThread(input.threadId, (current) => {
       const next = current.turns.map((t) => {
         if (t.id !== input.turnId) return t
@@ -214,24 +228,67 @@ export class TurnService {
       })
       return { ...touchThread(current, this.deps.nowIso()), turns: next, status: 'idle' }
     })
+    const errorItem = input.error
+      ? makeErrorItem({
+          id: `item_${input.turnId}_error`,
+          turnId: input.turnId,
+          threadId: input.threadId,
+          message: input.error,
+          ...(input.code ? { code: input.code } : {}),
+          ...(input.details !== undefined ? { details: input.details } : {}),
+          ...(input.severity ? { severity: input.severity } : {})
+        })
+      : null
     await this.deps.events.record({
       kind: input.status === 'completed' ? 'turn_completed' : input.status === 'aborted' ? 'turn_aborted' : 'turn_failed',
       threadId: input.threadId,
       turnId: input.turnId,
-      ...(input.error ? { message: input.error } : {})
+      ...(errorItem ? { itemId: errorItem.id } : {}),
+      ...(input.error ? { message: input.error } : {}),
+      ...(input.code ? { code: input.code } : {}),
+      ...(input.details !== undefined ? { details: input.details } : {}),
+      ...(input.severity ? { severity: input.severity } : {})
     })
-    if (input.error) {
-      await this.appendItem(input.threadId, makeErrorItem({
-        id: `item_${input.turnId}_error`,
-        turnId: input.turnId,
-        threadId: input.threadId,
-        message: input.error
-      }))
+    if (errorItem) {
+      await this.appendItem(input.threadId, errorItem)
     }
   }
 
   getAbortController(turnId: string): AbortSignal | undefined {
     return this.inflightTurns.get(turnId)?.signal
+  }
+
+  /**
+   * Mark turns left 'queued'/'running' by a previous process as failed
+   * so clients stop waiting on them after a crash or restart. Turns
+   * owned by this process (inflight) are skipped, so the sweep is safe
+   * to run in the background after the server starts listening.
+   */
+  async reconcileOrphanedTurns(): Promise<number> {
+    const summaries = await this.deps.threadStore.list()
+    let reconciled = 0
+    for (const summary of summaries) {
+      const thread = await this.deps.threadStore.get(summary.id).catch(() => null)
+      if (!thread) continue
+      for (const turn of thread.turns) {
+        if (turn.status !== 'running' && turn.status !== 'queued') continue
+        if (this.inflightTurns.has(turn.id)) continue
+        try {
+          await this.finishTurn({
+            threadId: thread.id,
+            turnId: turn.id,
+            status: 'failed',
+            error: 'Turn was interrupted by a runtime restart.',
+            code: 'orphaned_after_restart',
+            severity: 'warning'
+          })
+          reconciled += 1
+        } catch {
+          // Best-effort sweep; one unreadable thread must not stop the rest.
+        }
+      }
+    }
+    return reconciled
   }
 
   async getTurn(threadId: string, turnId: string): Promise<Turn | null> {
@@ -366,6 +423,21 @@ export class TurnService {
       threadId,
       items.filter((item) => item.turnId !== turnId || item.kind === 'user_message')
     )
+  }
+
+  private async finalizePersistedOpenItems(
+    threadId: string,
+    turnId: string,
+    status: Extract<TurnStatus, 'completed' | 'failed' | 'aborted'>
+  ): Promise<void> {
+    const items = await this.deps.sessionStore.loadItems(threadId)
+    const finishedAt = this.deps.nowIso()
+    for (const item of items) {
+      if (item.turnId !== turnId) continue
+      const finalized = this.finalizeOpenItem(item, status, finishedAt)
+      if (finalized === item) continue
+      await this.updateItem(threadId, item.id, finalized)
+    }
   }
 
   private keepUserItems(items: TurnItem[]): TurnItem[] {

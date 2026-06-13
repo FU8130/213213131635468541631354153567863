@@ -1,6 +1,7 @@
 import type {
   ChatBlock,
   CompactionEventPayload,
+  GeneratedFileReference,
   NormalizedThread,
   ReviewBlock,
   ReviewEventPayload,
@@ -52,6 +53,8 @@ export function threadFromCore(thread: CoreThreadSummaryJson): NormalizedThread 
     mode: thread.mode,
     workspace: thread.workspace,
     status: thread.status,
+    approvalPolicy: normalizeApprovalPolicy(thread.approvalPolicy),
+    sandboxMode: normalizeSandboxMode(thread.sandboxMode),
     archived: thread.status === 'archived',
     relation: thread.relation,
     parentThreadId: thread.parentThreadId,
@@ -62,6 +65,31 @@ export function threadFromCore(thread: CoreThreadSummaryJson): NormalizedThread 
     forkedFromTurnCount: thread.forkedFromTurnCount,
     goal: thread.goal ? goalFromCore(thread.goal) : null,
     todos: thread.todos ? todosFromCore(thread.todos) : null
+  }
+}
+
+function normalizeApprovalPolicy(value: string | undefined): NormalizedThread['approvalPolicy'] {
+  switch (value) {
+    case 'auto':
+    case 'on-request':
+    case 'untrusted':
+    case 'suggest':
+    case 'never':
+      return value
+    default:
+      return undefined
+  }
+}
+
+function normalizeSandboxMode(value: string | undefined): NormalizedThread['sandboxMode'] {
+  switch (value) {
+    case 'read-only':
+    case 'workspace-write':
+    case 'danger-full-access':
+    case 'external-sandbox':
+      return value
+    default:
+      return undefined
   }
 }
 
@@ -242,6 +270,103 @@ function extractToolSources(item: CoreTurnItemJson): Array<Record<string, string
   return normalizeWebSources(payload.sources) ?? normalizeWebSources(payload.citations)
 }
 
+type ToolAttachmentReference = {
+  id: string
+  name?: string
+  mimeType?: string
+  byteSize?: number
+  width?: number
+  height?: number
+  previewUrl?: string
+}
+
+function extractToolAttachments(item: CoreTurnItemJson): ToolAttachmentReference[] | undefined {
+  if (item.kind !== 'tool_result') return undefined
+  const payload = payloadFor(item)
+  if (!Array.isArray(payload.attachments)) return undefined
+  const attachments = payload.attachments
+    .map((entry): ToolAttachmentReference | null => {
+      if (!entry || typeof entry !== 'object') return null
+      const raw = entry as Record<string, unknown>
+      const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : ''
+      if (!id) return null
+      return {
+        id,
+        ...(typeof raw.name === 'string' && raw.name.trim() ? { name: raw.name.trim() } : {}),
+        ...(typeof raw.mimeType === 'string' && raw.mimeType.trim() ? { mimeType: raw.mimeType.trim() } : {}),
+        ...(typeof raw.byteSize === 'number' && Number.isFinite(raw.byteSize) ? { byteSize: raw.byteSize } : {}),
+        ...(typeof raw.width === 'number' && Number.isFinite(raw.width) ? { width: raw.width } : {}),
+        ...(typeof raw.height === 'number' && Number.isFinite(raw.height) ? { height: raw.height } : {}),
+        ...(typeof raw.previewUrl === 'string' && raw.previewUrl.trim() ? { previewUrl: raw.previewUrl.trim() } : {}),
+        ...(typeof raw.dataUrl === 'string' && raw.dataUrl.trim() ? { previewUrl: raw.dataUrl.trim() } : {})
+      }
+    })
+    .filter((entry): entry is ToolAttachmentReference => entry !== null)
+  return attachments.length > 0 ? attachments : undefined
+}
+
+function readGeneratedFileString(raw: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = raw[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+function normalizeGeneratedFileReference(entry: unknown): GeneratedFileReference | null {
+  if (!entry || typeof entry !== 'object') return null
+  const raw = entry as Record<string, unknown>
+  const id = readGeneratedFileString(raw, 'id', 'attachmentId')
+  const name = readGeneratedFileString(raw, 'name', 'fileName', 'filename')
+  const mimeType = readGeneratedFileString(raw, 'mimeType', 'type', 'mediaType')
+  const previewUrl = readGeneratedFileString(raw, 'previewUrl', 'dataUrl', 'url')
+  const path = readGeneratedFileString(raw, 'path', 'file')
+  const relativePath = readGeneratedFileString(raw, 'relativePath', 'relative_path')
+  const absolutePath = readGeneratedFileString(raw, 'absolutePath', 'absolute_path')
+  const byteSize = raw.byteSize
+  const width = raw.width
+  const height = raw.height
+  const normalized: GeneratedFileReference = {
+    ...(id ? { id } : {}),
+    ...(name ? { name } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(typeof byteSize === 'number' && Number.isFinite(byteSize) ? { byteSize } : {}),
+    ...(typeof width === 'number' && Number.isFinite(width) ? { width } : {}),
+    ...(typeof height === 'number' && Number.isFinite(height) ? { height } : {}),
+    ...(previewUrl ? { previewUrl } : {}),
+    ...(path ? { path } : {}),
+    ...(relativePath ? { relativePath } : {}),
+    ...(absolutePath ? { absolutePath } : {})
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null
+}
+
+function extractToolGeneratedFiles(item: CoreTurnItemJson): GeneratedFileReference[] | undefined {
+  if (item.kind !== 'tool_result') return undefined
+  const payload = payloadFor(item)
+  const candidates = [
+    ...(Array.isArray(payload.files) ? payload.files : []),
+    ...(Array.isArray(payload.generatedFiles) ? payload.generatedFiles : [])
+  ]
+  const generatedFiles: GeneratedFileReference[] = []
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    const normalized = normalizeGeneratedFileReference(candidate)
+    if (!normalized) continue
+    const key =
+      normalized.id ??
+      normalized.absolutePath ??
+      normalized.relativePath ??
+      normalized.path ??
+      normalized.previewUrl ??
+      normalized.name
+    if (key && seen.has(key)) continue
+    if (key) seen.add(key)
+    generatedFiles.push(normalized)
+  }
+  return generatedFiles.length > 0 ? generatedFiles : undefined
+}
+
 function applyCommandResultMeta(meta: Record<string, unknown>, item: CoreTurnItemJson): void {
   const payload = payloadFor(item)
   for (const key of COMMAND_RESULT_META_KEYS) {
@@ -351,6 +476,10 @@ function toolBlockFromItem(item: CoreTurnItemJson, child?: CoreChildRuntimeMetad
   applyRuntimeDisclosureMeta(meta, item, child)
   const sources = extractToolSources(item)
   if (sources) meta.sources = sources
+  const attachments = extractToolAttachments(item)
+  if (attachments) meta.attachments = attachments
+  const generatedFiles = extractToolGeneratedFiles(item)
+  if (generatedFiles) meta.generatedFiles = generatedFiles
   const presentation = inferToolPresentation(item)
   if (presentation.command) meta.command = presentation.command
   if (presentation.toolKind === 'command_execution') applyCommandResultMeta(meta, item)
@@ -478,11 +607,7 @@ function usageFromCore(usage: CoreUsageSnapshotJson): ThreadUsageSnapshot {
     totalTokens: usage.totalTokens ?? inputTokens + outputTokens,
     costUsd: usage.costUsd ?? 0,
     costCny: usage.costCny ?? null,
-    cacheSavingsUsd: usage.cacheSavingsUsd ?? 0,
-    cacheSavingsCny: usage.cacheSavingsCny ?? null,
     tokenEconomySavingsTokens: usage.tokenEconomySavingsTokens ?? 0,
-    tokenEconomySavingsUsd: usage.tokenEconomySavingsUsd ?? 0,
-    tokenEconomySavingsCny: usage.tokenEconomySavingsCny ?? null,
     turns: usage.turns ?? 0
   }
 }
@@ -932,6 +1057,40 @@ function runtimeStatusFromEvent(event: CoreRuntimeEventJson): RuntimeStatusEvent
 	  return null
 	}
 
+/**
+ * Dispatches a batch of runtime events, coalescing consecutive text and
+ * reasoning deltas into a single sink.onDeltas call so one network chunk
+ * costs one store update instead of one per token.
+ */
+export async function dispatchKunRuntimeEvents(
+  events: CoreRuntimeEventJson[],
+  sink: ThreadEventSink,
+  handleApprovalRequest: (event: CoreRuntimeEventJson, sink: ThreadEventSink) => Promise<void>
+): Promise<void> {
+  let pendingDeltas: ThreadDeltaEvent[] = []
+  const flushDeltas = (): void => {
+    if (pendingDeltas.length === 0) return
+    sink.onDeltas(pendingDeltas)
+    pendingDeltas = []
+  }
+  for (const event of events) {
+    if (event.kind === 'assistant_text_delta' || event.kind === 'assistant_reasoning_delta') {
+      const text = event.item?.text ?? ''
+      if (text) {
+        pendingDeltas.push({
+          text,
+          kind: event.kind === 'assistant_text_delta' ? 'agent_message' : 'agent_reasoning',
+          seq: event.seq
+        })
+      }
+      continue
+    }
+    flushDeltas()
+    await dispatchKunRuntimeEvent(event, sink, handleApprovalRequest)
+  }
+  flushDeltas()
+}
+
 export async function dispatchKunRuntimeEvent(
   event: CoreRuntimeEventJson,
   sink: ThreadEventSink,
@@ -1037,7 +1196,7 @@ export async function dispatchKunRuntimeEvent(
     case 'turn_failed': {
       const payload = runtimeErrorFromEvent(event, 'Kun turn failed')
       sink.onRuntimeError?.(payload)
-      sink.onError(errorForRuntimeEvent(payload))
+      sink.onError(errorForRuntimeEvent(payload), { terminal: true })
       return
     }
     case 'error':

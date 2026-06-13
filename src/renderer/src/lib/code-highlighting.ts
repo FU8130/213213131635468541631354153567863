@@ -9,18 +9,18 @@ const CODEX_CODE_THEME = {
   colors: {
     'editor.background': '#181818',
     'editor.foreground': '#ffffff',
-    'editor.selectionBackground': '#339cff44',
-    'editor.inactiveSelectionBackground': '#339cff22',
+    'editor.selectionBackground': '#6fb0e844',
+    'editor.inactiveSelectionBackground': '#6fb0e822',
     'editor.lineHighlightBackground': '#ffffff08',
     'editorCursor.foreground': '#ffffff',
     'editorGutter.addedBackground': '#40c977',
     'editorGutter.deletedBackground': '#fa423e',
-    'editorGutter.modifiedBackground': '#339cff',
+    'editorGutter.modifiedBackground': '#6fb0e8',
     'diffEditor.insertedTextBackground': '#40c97724',
     'diffEditor.removedTextBackground': '#fa423e24',
     'terminal.ansiGreen': '#40c977',
     'terminal.ansiRed': '#fa423e',
-    'terminal.ansiBlue': '#339cff',
+    'terminal.ansiBlue': '#6fb0e8',
     'terminal.ansiMagenta': '#ad7bf9'
   },
   settings: [
@@ -76,7 +76,7 @@ const CODEX_CODE_THEME = {
     {
       scope: ['entity.name.tag', 'entity.other.attribute-name'],
       settings: {
-        foreground: '#339cff'
+        foreground: '#6fb0e8'
       }
     },
     {
@@ -102,7 +102,7 @@ const CODEX_CODE_THEME = {
     {
       scope: ['markup.changed', 'punctuation.definition.changed', 'meta.diff.range'],
       settings: {
-        foreground: '#339cff'
+        foreground: '#6fb0e8'
       }
     }
   ]

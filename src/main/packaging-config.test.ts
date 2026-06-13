@@ -60,7 +60,7 @@ function createMacPackContext(root: string): {
     electronPlatformName: 'darwin',
     packager: {
       appInfo: {
-        productFilename: 'DeepSeek GUI'
+        productFilename: 'Kun'
       }
     }
   }
@@ -93,7 +93,10 @@ describe('electron-builder Kun packaging', () => {
       '**/node_modules/openclaw/**/*',
       '**/node_modules/@tencent-weixin/openclaw-weixin/**/*'
     ]))
-    expect(builderConfig.files).toEqual(expect.arrayContaining([
+    // The openclaw shim (vendor/openclaw-shim) must ship: the WeChat bridge
+    // imports the bundled plugin's dist at runtime to send media, and that
+    // import chain resolves openclaw/plugin-sdk/*.
+    expect(builderConfig.files).not.toEqual(expect.arrayContaining([
       '!**/node_modules/openclaw/**/*'
     ]))
   })
@@ -141,8 +144,8 @@ describe('electron-builder Kun packaging', () => {
 
   it('checks timestamp candidates across nested macOS signed code', () => {
     const root = tempRoot()
-    const appBundle = join(root, 'DeepSeek GUI.app')
-    const mainExecutable = join(appBundle, 'Contents/MacOS/DeepSeek GUI')
+    const appBundle = join(root, 'Kun.app')
+    const mainExecutable = join(appBundle, 'Contents/MacOS/Kun')
     const framework = join(appBundle, 'Contents/Frameworks/Electron Framework.framework')
     const nativeAddon = join(
       appBundle,

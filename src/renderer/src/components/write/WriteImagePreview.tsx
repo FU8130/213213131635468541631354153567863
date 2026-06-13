@@ -53,12 +53,12 @@ export function WriteImagePreview({
     setDimensions(null)
   }, [src, filePath])
   const openImage = (): void => {
-    if (typeof window.dsGui?.openEditorPath !== 'function') return
-    void window.dsGui.openEditorPath({ path: filePath, workspaceRoot, editorId: 'system' }).catch(() => undefined)
+    if (typeof window.kunGui?.openEditorPath !== 'function') return
+    void window.kunGui.openEditorPath({ path: filePath, workspaceRoot, editorId: 'system' }).catch(() => undefined)
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(0,136,255,0.08),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.82),rgba(247,250,255,0.68))] dark:bg-[radial-gradient(circle_at_top,rgba(96,165,250,0.13),transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.025))]">
+    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(59,130,216,0.08),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.82),rgba(247,250,255,0.68))] dark:bg-[radial-gradient(circle_at_top,rgba(96,165,250,0.13),transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.025))]">
       <div className="flex min-h-[54px] shrink-0 items-center justify-between gap-3 border-b border-ds-border-muted px-4 py-2.5 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
@@ -135,7 +135,7 @@ export function WriteImagePreview({
           <img
             src={src}
             alt={fileName}
-            className={`${actualMode ? 'max-w-none' : 'max-h-full max-w-full'} select-none rounded-lg object-contain shadow-[0_18px_50px_rgba(15,23,42,0.16)]`}
+            className={`${actualMode ? 'max-w-none' : 'max-h-full max-w-full'} select-none rounded-lg object-contain shadow-[0_18px_50px_rgba(20,47,95,0.16)]`}
             style={actualMode && dimensions ? {
               width: `${Math.round(dimensions.width * zoom / 100)}px`,
               height: 'auto'

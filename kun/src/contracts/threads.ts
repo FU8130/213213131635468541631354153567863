@@ -123,6 +123,8 @@ export const ThreadSummarySchema = ThreadSchema.pick({
   model: true,
   mode: true,
   status: true,
+  approvalPolicy: true,
+  sandboxMode: true,
   costBudgetUsd: true,
   costBudgetWarningSent: true,
   relation: true,

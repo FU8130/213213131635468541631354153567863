@@ -221,7 +221,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
       }),
 
     refreshClawChannels: async () => {
-      if (typeof window.dsGui === 'undefined') return
+      if (typeof window.kunGui === 'undefined') return
       const settings = await rendererRuntimeClient.getSettings()
       const channels = settings.claw.channels
       const current = get().activeClawChannelId
@@ -242,7 +242,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
     },
 
     addClawChannel: async (provider, agentProfile, platformCredential, optionsArg) => {
-      if (typeof window.dsGui === 'undefined') return
+      if (typeof window.kunGui === 'undefined') return
       const preserveRoute = optionsArg?.preserveRoute === true
       const settings = await rendererRuntimeClient.getSettings()
       const targetChannelId = optionsArg?.channelId?.trim() ?? ''
@@ -329,7 +329,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
         set({ activeClawChannelId: channelId, error: i18n.t('common:runtimeActionNeedsConnection') })
         return
       }
-      if (typeof window.dsGui === 'undefined') return
+      if (typeof window.kunGui === 'undefined') return
       const settings = await rendererRuntimeClient.getSettings()
       const channels = settings.claw.channels
       const channel = channels.find((item) => item.id === channelId)
@@ -337,7 +337,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
         set({ clawChannels: channels, activeClawChannelId: '' })
         return
       }
-      set({ route: 'claw', clawChannels: channels, activeClawChannelId: channel.id, composerModel: channel.model })
+      set({ route: 'claw', clawChannels: channels, activeClawChannelId: channel.id })
       const provider = getProvider()
       const latestConversation =
         [...channel.conversations]
@@ -378,7 +378,6 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
             ...clearedThreadSelection(),
             route: 'claw',
             activeClawChannelId: channel.id,
-            composerModel: channel.model,
             error: null
           })
           return
@@ -430,7 +429,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
         set({ activeClawChannelId: channelId, error: i18n.t('common:runtimeActionNeedsConnection') })
         return
       }
-      if (typeof window.dsGui === 'undefined') return
+      if (typeof window.kunGui === 'undefined') return
       const settings = await rendererRuntimeClient.getSettings()
       const channels = settings.claw.channels
       const channel = channels.find((item) => item.id === channelId)
@@ -449,8 +448,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
       set({
         route: 'claw',
         clawChannels: channels,
-        activeClawChannelId: channel.id,
-        composerModel: channel.model
+        activeClawChannelId: channel.id
       })
       const provider = getProvider()
       const workspaceRoot = normalizeWorkspaceRoot(
@@ -509,7 +507,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
     },
 
     deleteClawChannel: async (channelId) => {
-      if (typeof window.dsGui === 'undefined') return
+      if (typeof window.kunGui === 'undefined') return
       const settings = await rendererRuntimeClient.getSettings()
       const channel = settings.claw.channels.find((item) => item.id === channelId)
       const channels = settings.claw.channels.filter((item) => item.id !== channelId)
@@ -541,7 +539,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
         set({ error: i18n.t('common:runtimeActionNeedsConnection') })
         return
       }
-      if (typeof window.dsGui === 'undefined') return
+      if (typeof window.kunGui === 'undefined') return
       const settings = await rendererRuntimeClient.getSettings()
       const channel = settings.claw.channels.find((item) => item.id === channelId)
       if (!channel) return
@@ -596,7 +594,7 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
     },
 
     setClawChannelModel: async (channelId, model) => {
-      if (typeof window.dsGui === 'undefined') return
+      if (typeof window.kunGui === 'undefined') return
       const normalized = normalizeClawComposerModel(model)
       const settings = await rendererRuntimeClient.getSettings()
       const now = new Date().toISOString()
@@ -606,7 +604,6 @@ export function createClawActions(options: CreateClawActionsOptions): Pick<
       const saved = await rendererRuntimeClient.setSettings({ claw: { channels } })
       set({
         clawChannels: saved.claw.channels,
-        composerModel: normalized,
         error: i18n.t('common:clawModelChanged', { model: normalized })
       })
     }

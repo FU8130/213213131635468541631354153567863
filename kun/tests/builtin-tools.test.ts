@@ -57,14 +57,15 @@ import type { TurnItem } from '../src/contracts/items.js'
 import type { FsStats } from '../src/adapters/tool/builtin-tool-types.js'
 import type { ToolHostContext } from '../src/ports/tool-host.js'
 
-function buildContext(workspace: string): ToolHostContext {
+function buildContext(workspace: string, overrides: Partial<ToolHostContext> = {}): ToolHostContext {
   return {
     threadId: 'thr_1',
     turnId: 'turn_1',
     workspace,
     approvalPolicy: 'on-request',
     abortSignal: new AbortController().signal,
-    awaitApproval: async () => 'allow'
+    awaitApproval: async () => 'allow',
+    ...overrides
   }
 }
 
@@ -108,8 +109,148 @@ describe('Kun built-in tools', () => {
     expect([...allBuiltinToolNames].every((name) => toolNames.has(name))).toBe(true)
   })
 
+  it('converts a throwing tool execute into an error tool result instead of failing the turn', async () => {
+    const explosive = LocalToolHost.defineTool({
+      name: 'explode',
+      description: 'always throws',
+      inputSchema: { type: 'object', properties: {} },
+      policy: 'auto',
+      execute: async () => {
+        throw new Error('MCP error -32603: Validation Error: Validation Failed')
+      }
+    })
+    const throwingHost = new LocalToolHost({ tools: [explosive] })
+
+    const result = await throwingHost.execute(
+      { callId: 'call_explode', toolName: 'explode', arguments: {} },
+      buildContext(workspace)
+    )
+
+    expect(result.item.kind).toBe('tool_result')
+    if (result.item.kind !== 'tool_result') throw new Error('expected tool_result')
+    expect(result.item.isError).toBe(true)
+    expect(result.item.output).toMatchObject({
+      code: 'tool_execution_failed',
+      error: expect.stringContaining('-32603')
+    })
+  })
+
+  it('still propagates aborts raised while a tool executes', async () => {
+    const abortController = new AbortController()
+    const abortingTool = LocalToolHost.defineTool({
+      name: 'abort_self',
+      description: 'aborts mid-flight',
+      inputSchema: { type: 'object', properties: {} },
+      policy: 'auto',
+      execute: async () => {
+        abortController.abort()
+        throw new Error('aborted mid tool')
+      }
+    })
+    const abortHost = new LocalToolHost({ tools: [abortingTool] })
+
+    await expect(
+      abortHost.execute(
+        { callId: 'call_abort', toolName: 'abort_self', arguments: {} },
+        buildContext(workspace, { abortSignal: abortController.signal })
+      )
+    ).rejects.toThrow('aborted mid tool')
+  })
+
+  it('hides mutating and shell tools in read-only sandbox mode', async () => {
+    const tools = await host.listTools(buildContext(workspace, { sandboxMode: 'read-only' }))
+    const names = tools.map((tool) => tool.name)
+
+    expect(names).toEqual(expect.arrayContaining(['read', 'grep', 'find', 'ls']))
+    expect(names).not.toContain('bash')
+    expect(names).not.toContain('edit')
+    expect(names).not.toContain('write')
+  })
+
+  it('allows file tools but hides host shell commands in workspace-write sandbox mode', async () => {
+    const tools = await host.listTools(buildContext(workspace, { sandboxMode: 'workspace-write' }))
+    const names = tools.map((tool) => tool.name)
+
+    expect(names).toEqual(expect.arrayContaining(['read', 'grep', 'find', 'ls', 'edit', 'write']))
+    expect(names).not.toContain('bash')
+  })
+
+  it('blocks direct file writes in read-only sandbox mode', async () => {
+    const result = await host.execute(
+      {
+        callId: 'call_write',
+        toolName: 'write',
+        arguments: { path: 'blocked.md', content: 'nope' }
+      },
+      buildContext(workspace, { sandboxMode: 'read-only' })
+    )
+
+    expect(result.approved).toBe(false)
+    expect(result.item).toMatchObject({
+      kind: 'tool_result',
+      toolName: 'write',
+      isError: true,
+      output: {
+        code: 'sandbox_read_only'
+      }
+    })
+    await expect(readFile(join(workspace, 'blocked.md'), 'utf8')).rejects.toThrow()
+  })
+
+  it('answers truncated tool arguments with actionable chunking guidance', async () => {
+    // tool-argument-repair wraps unparseable JSON (usually cut off by the
+    // model output limit mid-payload) as { __raw }.
+    const truncated = '{"content": "<!DOCTYPE html><html><body>cut off mid stri'
+    const writeResult = await host.execute(
+      {
+        callId: 'call_write_raw',
+        toolName: 'write',
+        arguments: { __raw: truncated }
+      },
+      buildContext(workspace)
+    )
+    expect(writeResult.item).toMatchObject({ kind: 'tool_result', isError: true })
+    const writeError = String((writeResult.item as { output?: { error?: string } }).output?.error)
+    expect(writeError).toContain('truncated')
+    expect(writeError).toContain('smaller')
+
+    const editResult = await host.execute(
+      {
+        callId: 'call_edit_raw',
+        toolName: 'edit',
+        arguments: { __raw: truncated }
+      },
+      buildContext(workspace)
+    )
+    expect(editResult.item).toMatchObject({ kind: 'tool_result', isError: true })
+    expect(String((editResult.item as { output?: { error?: string } }).output?.error)).toContain('truncated')
+  })
+
+  it('blocks host shell execution in workspace-write sandbox mode', async () => {
+    const result = await host.execute(
+      {
+        callId: 'call_bash',
+        toolName: 'bash',
+        arguments: { command: 'echo hello' }
+      },
+      buildContext(workspace, { sandboxMode: 'workspace-write' })
+    )
+
+    expect(result.approved).toBe(false)
+    expect(result.item).toMatchObject({
+      kind: 'tool_result',
+      toolName: 'bash',
+      isError: true,
+      output: {
+        code: 'sandbox_command_blocked'
+      }
+    })
+  })
+
   it('advertises structured GUI input choices and normalizes single-question options', async () => {
-    const tools = await host.listTools(buildContext(workspace))
+    const tools = await host.listTools(
+      buildContext(workspace, { awaitUserInput: async () => ({ status: 'cancelled' }) })
+    )
     const requestInputTool = tools.find((tool) => tool.name === 'request_user_input')
     expect(requestInputTool?.inputSchema).toMatchObject({
       properties: {
@@ -118,7 +259,7 @@ describe('Kun built-in tools', () => {
       }
     })
 
-    let seenInput: { questions: Array<{ options: Array<{ label: string; description: string }> }> } | null = null
+    const seenInputs: Array<{ questions: Array<{ options: Array<{ label: string; description: string }> }> }> = []
     const result = await host.execute(
       {
         callId: 'call_input',
@@ -132,7 +273,7 @@ describe('Kun built-in tools', () => {
       {
         ...buildContext(workspace),
         awaitUserInput: async (input) => {
-          seenInput = input
+          seenInputs.push(input)
           return {
             status: 'submitted',
             answers: [{ id: input.questions[0]?.id ?? 'choice', label: 'South', value: 'South' }]
@@ -141,7 +282,7 @@ describe('Kun built-in tools', () => {
       }
     )
 
-    expect(seenInput?.questions[0]?.options).toEqual([
+    expect(seenInputs[0]?.questions[0]?.options).toEqual([
       { label: 'South', description: '' },
       { label: 'North', description: 'Cooler weather' }
     ])
@@ -150,6 +291,13 @@ describe('Kun built-in tools', () => {
       toolName: 'request_user_input',
       isError: false
     })
+  })
+
+  it('hides GUI input tools when the turn context has no user-input gate', async () => {
+    const tools = await host.listTools(buildContext(workspace))
+    const names = tools.map((tool) => tool.name)
+    expect(names).not.toContain('user_input')
+    expect(names).not.toContain('request_user_input')
   })
 
   it('exposes pi-style coding and read-only tool groups', () => {

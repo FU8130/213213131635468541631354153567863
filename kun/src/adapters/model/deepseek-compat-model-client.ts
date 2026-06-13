@@ -1,7 +1,9 @@
 import type { ModelClient, ModelRequest, ModelStreamChunk, ModelToolSpec } from '../../ports/model-client.js'
 import type { TurnItem } from '../../contracts/items.js'
 import { emptyUsageSnapshot, type UsageSnapshot } from '../../contracts/usage.js'
-import { estimateDeepseekCacheSavings, estimateDeepseekCost } from './deepseek-pricing.js'
+import type { ModelCapabilityMetadata } from '../../contracts/capabilities.js'
+import { estimateDeepseekCost } from './deepseek-pricing.js'
+import { estimateMiniMaxCost } from './minimax-pricing.js'
 import { isToolResultBridgeItem, repairModelHistoryItems } from '../../domain/model-history-repair.js'
 import { repairToolArguments } from './tool-argument-repair.js'
 import { isDeepSeekHost, probeDeepSeekReachable } from './model-error-probe.js'
@@ -33,6 +35,8 @@ export type DeepseekCompatConfig = {
   nonStreaming?: boolean
   /** Maximum idle time between streaming chunks before the turn fails. */
   streamIdleTimeoutMs?: number
+  /** Optional model capability resolver used for provider-specific reasoning translation. */
+  modelCapabilities?: (model: string) => ModelCapabilityMetadata
 }
 
 type ChatMessage = {
@@ -52,11 +56,15 @@ type ChatMessageContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
 
-type AnthropicContentBlock =
+type AnthropicCacheControl = { type: 'ephemeral' }
+
+type AnthropicContentBlock = (
   | { type: 'text'; text: string }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } }
+  | { type: 'thinking'; thinking: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string }
+) & { cache_control?: AnthropicCacheControl }
 
 type AnthropicImageSource = Extract<AnthropicContentBlock, { type: 'image' }>['source']
 
@@ -162,6 +170,7 @@ export class DeepseekCompatModelClient implements ModelClient {
     const endpointFormat = this.endpointFormat()
     const url = buildModelEndpointUrl(this.config.baseUrl, endpointFormat)
     const stream = request.stream ?? !this.config.nonStreaming
+    const requestModel = request.model?.trim() || this.config.model
     const body = this.buildRequestBody(request, stream)
     const headers = this.buildHeaders(stream, endpointFormat)
     const result = await this.postChatCompletion(url, headers, body, request.abortSignal)
@@ -183,14 +192,14 @@ export class DeepseekCompatModelClient implements ModelClient {
         if (response.ok) {
           if (this.config.nonStreaming || response.headers.get('content-type')?.includes('application/json')) {
             const json = (await response.json()) as ChatCompletionResponse
-            yield* this.materializeNonStreaming(json, endpointFormat)
+            yield* this.materializeNonStreaming(json, endpointFormat, requestModel)
             return
           }
           if (!response.body) {
             yield { kind: 'error', message: 'model response had no body' }
             return
           }
-          yield* this.streamSse(response.body, request.abortSignal, endpointFormat)
+          yield* this.streamSse(response.body, request.abortSignal, endpointFormat, requestModel)
           return
         }
         const retryText = await response.text()
@@ -212,18 +221,22 @@ export class DeepseekCompatModelClient implements ModelClient {
     }
     if (this.config.nonStreaming || response.headers.get('content-type')?.includes('application/json')) {
       const json = (await response.json()) as ChatCompletionResponse
-      yield* this.materializeNonStreaming(json, endpointFormat)
+      yield* this.materializeNonStreaming(json, endpointFormat, requestModel)
       return
     }
     if (!response.body) {
       yield { kind: 'error', message: 'model response had no body' }
       return
     }
-    yield* this.streamSse(response.body, request.abortSignal, endpointFormat)
+    yield* this.streamSse(response.body, request.abortSignal, endpointFormat, requestModel)
   }
 
   private endpointFormat(): ModelEndpointFormat {
     return normalizeModelEndpointFormat(this.config.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT)
+  }
+
+  private modelReasoningFor(model: string): ModelCapabilityMetadata['reasoning'] | undefined {
+    return this.config.modelCapabilities?.(model).reasoning
   }
 
   private async postChatCompletion(
@@ -248,9 +261,12 @@ export class DeepseekCompatModelClient implements ModelClient {
 
   private buildHeaders(stream: boolean, endpointFormat: ModelEndpointFormat): Record<string, string> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Accept: stream ? 'text/event-stream' : 'application/json'
+      'Content-Type': 'application/json'
     }
+    // `stream: true` is enough for OpenAI-compatible providers to return SSE.
+    // Some Windows Node/Electron paths time out when routing requests with
+    // `Accept: text/event-stream`, while the same stream works without it.
+    if (!stream) headers.Accept = 'application/json'
     if (this.config.apiKey) {
       if (endpointFormat === 'messages') {
         headers.Authorization = `Bearer ${this.config.apiKey}`
@@ -264,7 +280,7 @@ export class DeepseekCompatModelClient implements ModelClient {
   }
 
   private async classifyHttpError(status: number, text: string): Promise<{ message: string; code: string }> {
-    const body = text.slice(0, 500)
+    const body = text
     if (status === 429) {
       return {
         message: `model request was rate limited (HTTP 429): ${body}`,
@@ -323,7 +339,11 @@ export class DeepseekCompatModelClient implements ModelClient {
       body.stream_options = { include_usage: true }
     }
     const includeThinking = !isAzureOpenAiEndpoint(this.config.baseUrl)
-    applyReasoningEffort(body, request.reasoningEffort, { includeThinking })
+    applyReasoningEffort(body, request.reasoningEffort, {
+      includeThinking,
+      reasoning: this.modelReasoningFor(model),
+      maxReasoningEffort: isDeepSeekHost(this.config.baseUrl) ? 'max' : 'high'
+    })
     if (
       includeThinking &&
       isDeepSeekHost(this.config.baseUrl) &&
@@ -369,7 +389,10 @@ export class DeepseekCompatModelClient implements ModelClient {
     if (request.responseFormat === 'json_object') {
       body.text = { format: { type: 'json_object' } }
     }
-    const reasoning = responsesReasoningForEffort(request.reasoningEffort)
+    const reasoning = responsesReasoningForEffort(
+      request.reasoningEffort,
+      this.modelReasoningFor(model)
+    )
     if (reasoning) body.reasoning = reasoning
     const tools = normalizeToolSpecs(request.tools)
     if (tools.length > 0) {
@@ -389,25 +412,34 @@ export class DeepseekCompatModelClient implements ModelClient {
     messages: ChatMessage[],
     stream: boolean
   ): Record<string, unknown> {
-    const converted = messagesToAnthropic(messages)
+    const converted = messagesToAnthropic(
+      messages,
+      this.modelReasoningFor(model)?.requestProtocol === 'anthropic-thinking'
+    )
+    applyAnthropicCacheControl(converted.messages)
     const body: Record<string, unknown> = {
       model,
       stream,
       max_tokens: request.maxTokens ?? DEFAULT_MESSAGES_MAX_TOKENS,
       messages: converted.messages
     }
-    if (converted.system) body.system = converted.system
+    const systemText = request.responseFormat === 'json_object'
+      ? [converted.system, 'Return a valid JSON object only.']
+          .filter((item) => item.trim().length > 0)
+          .join('\n\n')
+      : converted.system
+    if (systemText) {
+      body.system = [
+        { type: 'text', text: systemText, cache_control: { type: 'ephemeral' } }
+      ] satisfies AnthropicContentBlock[]
+    }
     if (request.temperature !== undefined) {
       body.temperature = request.temperature
     }
     if (request.topP !== undefined) {
       body.top_p = request.topP
     }
-    if (request.responseFormat === 'json_object') {
-      body.system = [converted.system, 'Return a valid JSON object only.']
-        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-        .join('\n\n')
-    }
+    applyAnthropicReasoningEffort(body, request.reasoningEffort, this.modelReasoningFor(model))
     const tools = normalizeToolSpecs(request.tools)
     if (tools.length > 0) {
       body.tools = tools.map((tool) => ({
@@ -427,18 +459,28 @@ export class DeepseekCompatModelClient implements ModelClient {
     if (request.modeInstruction) {
       out.push({ role: 'system', content: request.modeInstruction })
     }
-    for (const instruction of request.contextInstructions ?? []) {
-      if (instruction.trim()) out.push({ role: 'system', content: instruction })
-    }
     const windowSize = this.config.historyLimit
     const history = windowSize
       ? limitHistoryPreservingCompaction(request.history, windowSize)
       : request.history
-    const thinkingMode = requiresReasoningRoundTrip(request.reasoningEffort, model, this.config.baseUrl)
+    const thinkingMode = requiresReasoningRoundTrip(
+      request.reasoningEffort,
+      model,
+      this.config.baseUrl,
+      this.modelReasoningFor(model)
+    )
     out.push(...this.itemsToMessages(
       repairModelHistoryItems([...request.prefix, ...history]),
       thinkingMode
     ))
+    // Per-turn context (goal budgets, todo state, memories, skill notes,
+    // drift warnings) is volatile — the goal instruction alone embeds a
+    // tokens-used counter that changes every step. It must trail the
+    // stable history: placed before it, every counter tick invalidated
+    // the provider prompt cache for the entire conversation.
+    for (const instruction of request.contextInstructions ?? []) {
+      if (instruction.trim()) out.push({ role: 'system', content: instruction })
+    }
     if (request.attachments?.length) {
       attachImagesToLatestUserMessage(out, request.attachments)
     }
@@ -611,7 +653,8 @@ export class DeepseekCompatModelClient implements ModelClient {
   private async *streamSse(
     body: ReadableStream<Uint8Array>,
     signal: AbortSignal,
-    endpointFormat: ModelEndpointFormat
+    endpointFormat: ModelEndpointFormat,
+    model: string
   ): AsyncIterable<ModelStreamChunk> {
     const decoder = new TextDecoder('utf-8')
     const reader = body.getReader()
@@ -673,7 +716,8 @@ export class DeepseekCompatModelClient implements ModelClient {
             completedToolCalls,
             textAccumulator,
             reasoningAccumulator,
-            endpointFormat
+            endpointFormat,
+            model
           )
           textAccumulator = result.text
           reasoningAccumulator = result.reasoning
@@ -717,7 +761,8 @@ export class DeepseekCompatModelClient implements ModelClient {
     completedToolCalls: Set<string>,
     textAccumulator: string,
     reasoningAccumulator: string,
-    endpointFormat: ModelEndpointFormat
+    endpointFormat: ModelEndpointFormat,
+    model: string
   ): {
     chunks: ModelStreamChunk[]
     text: string
@@ -725,6 +770,20 @@ export class DeepseekCompatModelClient implements ModelClient {
     finishReason: string | null
     usage: UsageSnapshot | null
   } {
+    const payloadError = modelPayloadError(payload)
+    if (payloadError) {
+      return {
+        chunks: [{
+          kind: 'error',
+          message: payloadError.message,
+          ...(payloadError.code ? { code: payloadError.code } : {})
+        }],
+        text: textAccumulator,
+        reasoning: reasoningAccumulator,
+        finishReason: 'error',
+        usage: null
+      }
+    }
     if (endpointFormat === 'responses') {
       return this.consumeResponsesStreamPayload(
         payload,
@@ -732,7 +791,8 @@ export class DeepseekCompatModelClient implements ModelClient {
         pendingByIndex,
         completedToolCalls,
         textAccumulator,
-        reasoningAccumulator
+        reasoningAccumulator,
+        model
       )
     }
     if (endpointFormat === 'messages') {
@@ -742,7 +802,8 @@ export class DeepseekCompatModelClient implements ModelClient {
         pendingByIndex,
         completedToolCalls,
         textAccumulator,
-        reasoningAccumulator
+        reasoningAccumulator,
+        model
       )
     }
     const chunks: ModelStreamChunk[] = []
@@ -797,7 +858,7 @@ export class DeepseekCompatModelClient implements ModelClient {
     }
     const usagePayload = payload.usage as Record<string, unknown> | undefined
     if (usagePayload) {
-      usage = this.mapUsage(usagePayload)
+      usage = this.mapUsage(usagePayload, model)
     }
     if (finishReason === 'tool_calls' && pendingArguments.size > 0) {
       for (const [callId, value] of pendingArguments) {
@@ -821,7 +882,8 @@ export class DeepseekCompatModelClient implements ModelClient {
     pendingByIndex: Map<number, string>,
     completedToolCalls: Set<string>,
     textAccumulator: string,
-    reasoningAccumulator: string
+    reasoningAccumulator: string,
+    model: string
   ): {
     chunks: ModelStreamChunk[]
     text: string
@@ -915,7 +977,7 @@ export class DeepseekCompatModelClient implements ModelClient {
         skipText: Boolean(text),
         pendingArguments,
         completedToolCalls
-      })
+      }, model)
       chunks.push(...materialized.chunks)
       if (materialized.usage) usage = materialized.usage
       finishReason = materialized.finishReason
@@ -933,7 +995,8 @@ export class DeepseekCompatModelClient implements ModelClient {
     pendingByIndex: Map<number, string>,
     completedToolCalls: Set<string>,
     textAccumulator: string,
-    reasoningAccumulator: string
+    reasoningAccumulator: string,
+    model: string
   ): {
     chunks: ModelStreamChunk[]
     text: string
@@ -952,7 +1015,7 @@ export class DeepseekCompatModelClient implements ModelClient {
     if (type === 'message_start') {
       const message = recordValue(payload, 'message')
       const usagePayload = message ? recordValue(message, 'usage') : null
-      if (usagePayload) usage = this.mapUsage(usagePayload)
+      if (usagePayload) usage = this.mapUsage(usagePayload, model)
     } else if (type === 'content_block_start') {
       const block = recordValue(payload, 'content_block')
       if (block && recordString(block, 'type') === 'tool_use') {
@@ -1022,7 +1085,7 @@ export class DeepseekCompatModelClient implements ModelClient {
       const mappedStopReason = anthropicStopReason(stopReason)
       if (mappedStopReason) finishReason = mappedStopReason
       const usagePayload = recordValue(payload, 'usage')
-      if (usagePayload) usage = this.mapUsage(usagePayload)
+      if (usagePayload) usage = this.mapUsage(usagePayload, model)
     } else if (type === 'message_stop') {
       finishReason = finishReason ?? 'stop'
     } else if (type === 'error') {
@@ -1034,14 +1097,24 @@ export class DeepseekCompatModelClient implements ModelClient {
 
   private *materializeNonStreaming(
     payload: ChatCompletionResponse,
-    endpointFormat: ModelEndpointFormat
+    endpointFormat: ModelEndpointFormat,
+    model: string
   ): Generator<ModelStreamChunk> {
+    const payloadError = modelPayloadError(payload as unknown as Record<string, unknown>)
+    if (payloadError) {
+      yield {
+        kind: 'error',
+        message: payloadError.message,
+        ...(payloadError.code ? { code: payloadError.code } : {})
+      }
+      return
+    }
     if (endpointFormat === 'responses') {
-      yield* this.materializeResponsesNonStreaming(payload as unknown as ResponsesApiResponse)
+      yield* this.materializeResponsesNonStreaming(payload as unknown as ResponsesApiResponse, model)
       return
     }
     if (endpointFormat === 'messages') {
-      yield* this.materializeAnthropicMessagesNonStreaming(payload as unknown as AnthropicMessageResponse)
+      yield* this.materializeAnthropicMessagesNonStreaming(payload as unknown as AnthropicMessageResponse, model)
       return
     }
     const choice = payload.choices?.[0]
@@ -1069,7 +1142,7 @@ export class DeepseekCompatModelClient implements ModelClient {
       }
     }
     if (payload.usage) {
-      yield { kind: 'usage', usage: this.mapUsage(payload.usage) }
+      yield { kind: 'usage', usage: this.mapUsage(payload.usage, model) }
     }
     let stopReason: 'stop' | 'tool_calls' | 'length' | 'error' = 'stop'
     if (choice.finish_reason === 'tool_calls') stopReason = 'tool_calls'
@@ -1079,13 +1152,14 @@ export class DeepseekCompatModelClient implements ModelClient {
   }
 
   private *materializeResponsesNonStreaming(
-    payload: ResponsesApiResponse
+    payload: ResponsesApiResponse,
+    model: string
   ): Generator<ModelStreamChunk> {
     if (payload.error?.message) {
       yield { kind: 'error', message: payload.error.message, code: payload.error.type }
       return
     }
-    const materialized = this.materializeResponsesOutput(payload)
+    const materialized = this.materializeResponsesOutput(payload, {}, model)
     yield* materialized.chunks
     if (materialized.usage) {
       yield { kind: 'usage', usage: materialized.usage }
@@ -1099,7 +1173,8 @@ export class DeepseekCompatModelClient implements ModelClient {
       skipText?: boolean
       pendingArguments?: Map<string, PendingToolCall>
       completedToolCalls?: Set<string>
-    } = {}
+    } = {},
+    model = this.config.model
   ): {
     chunks: ModelStreamChunk[]
     finishReason: ModelStopReason
@@ -1134,7 +1209,7 @@ export class DeepseekCompatModelClient implements ModelClient {
         arguments: this.parseToolArguments(argsRaw)
       })
     }
-    const usage = payload.usage ? this.mapUsage(payload.usage) : null
+    const usage = payload.usage ? this.mapUsage(payload.usage, model) : null
     let finishReason: ModelStopReason = sawToolCall ? 'tool_calls' : 'stop'
     if (payload.status === 'incomplete') {
       finishReason = payload.incomplete_details?.reason === 'max_output_tokens' ? 'length' : 'error'
@@ -1145,7 +1220,8 @@ export class DeepseekCompatModelClient implements ModelClient {
   }
 
   private *materializeAnthropicMessagesNonStreaming(
-    payload: AnthropicMessageResponse
+    payload: AnthropicMessageResponse,
+    model: string
   ): Generator<ModelStreamChunk> {
     let sawToolCall = false
     for (const block of payload.content ?? []) {
@@ -1172,15 +1248,13 @@ export class DeepseekCompatModelClient implements ModelClient {
       }
     }
     if (payload.usage) {
-      yield { kind: 'usage', usage: this.mapUsage(payload.usage) }
+      yield { kind: 'usage', usage: this.mapUsage(payload.usage, model) }
     }
     yield { kind: 'completed', stopReason: anthropicStopReason(payload.stop_reason) ?? (sawToolCall ? 'tool_calls' : 'stop') }
   }
 
-  private mapUsage(usage: Record<string, unknown>): UsageSnapshot {
-    const promptTokens = Number(usage.prompt_tokens ?? usage.prompt_eval_count ?? usage.input_tokens ?? 0) || 0
+  private mapUsage(usage: Record<string, unknown>, model = this.config.model): UsageSnapshot {
     const completionTokens = Number(usage.completion_tokens ?? usage.eval_count ?? usage.output_tokens ?? 0) || 0
-    const totalTokens = Number(usage.total_tokens ?? promptTokens + completionTokens) || 0
     const promptDetails = usage.prompt_tokens_details as
       | { cached_tokens?: number }
       | undefined
@@ -1190,21 +1264,41 @@ export class DeepseekCompatModelClient implements ModelClient {
     const cachedTokens = Number(promptDetails?.cached_tokens ?? 0) || 0
     const cacheRead = Number(usage.cache_read_input_tokens ?? 0) || 0
     const cacheCreation = Number(usage.cache_creation_input_tokens ?? 0) || 0
+    // Anthropic-protocol usage (MiniMax et al.) reports input_tokens
+    // EXCLUDING cache reads/writes; OpenAI-style prompt_tokens includes
+    // everything and marks the cached subset in prompt_tokens_details.
+    const anthropicUsage = usage.prompt_tokens === undefined &&
+      usage.prompt_eval_count === undefined &&
+      usage.input_tokens !== undefined
+    const reportedPromptTokens = Number(usage.prompt_tokens ?? usage.prompt_eval_count ?? usage.input_tokens ?? 0) || 0
+    const promptTokens = anthropicUsage
+      ? reportedPromptTokens + cacheRead + cacheCreation
+      : reportedPromptTokens
     const cacheHit = hasNativeCache ? nativeHit : (cachedTokens > 0 ? cachedTokens : cacheRead)
     const cacheMiss = hasNativeCache ? nativeMiss : Math.max(promptTokens - cacheHit, 0)
     const cacheTotal = cacheHit + cacheMiss
     const cacheHitRate = cacheTotal === 0 ? null : cacheHit / cacheTotal
+    const totalTokens = anthropicUsage
+      ? promptTokens + completionTokens
+      : Number(usage.total_tokens ?? promptTokens + completionTokens) || 0
+    const pricingCacheRead = cacheRead || cacheHit
+    const pricingCacheWrite = cacheCreation
+    const pricingInputTokens = anthropicUsage
+      ? reportedPromptTokens
+      : Math.max(promptTokens - pricingCacheRead - pricingCacheWrite, 0)
     const estimatedCost = estimateDeepseekCost({
-      model: this.config.model,
+      model,
       providerHost: this.config.baseUrl,
       cacheHitTokens: cacheHit,
       cacheMissTokens: cacheMiss,
       outputTokens: completionTokens
-    })
-    const estimatedSavings = estimateDeepseekCacheSavings({
-      model: this.config.model,
+    }) ?? estimateMiniMaxCost({
+      model,
       providerHost: this.config.baseUrl,
-      cacheHitTokens: cacheHit
+      inputTokens: pricingInputTokens,
+      cacheReadTokens: pricingCacheRead,
+      cacheWriteTokens: pricingCacheWrite,
+      outputTokens: completionTokens
     })
     const reportedCostUsd = Number(usage.cost_usd ?? usage.costUsd)
     const reportedCostCny = Number(usage.cost_cny ?? usage.costCny)
@@ -1219,9 +1313,7 @@ export class DeepseekCompatModelClient implements ModelClient {
       cacheHitRate,
       turns: 1,
       costUsd: Number.isFinite(reportedCostUsd) ? reportedCostUsd : estimatedCost?.costUsd,
-      costCny: Number.isFinite(reportedCostCny) ? reportedCostCny : estimatedCost?.costCny,
-      cacheSavingsUsd: estimatedSavings?.costUsd,
-      cacheSavingsCny: estimatedSavings?.costCny
+      costCny: Number.isFinite(reportedCostCny) ? reportedCostCny : estimatedCost?.costCny
     }
   }
 
@@ -1273,13 +1365,28 @@ function messagesToResponsesInput(messages: ChatMessage[]): Array<Record<string,
   return input
 }
 
-function messagesToAnthropic(messages: ChatMessage[]): { system: string; messages: AnthropicMessage[] } {
+function messagesToAnthropic(
+  messages: ChatMessage[],
+  includeThinkingBlocks = false
+): { system: string; messages: AnthropicMessage[] } {
   const system: string[] = []
   const out: AnthropicMessage[] = []
   for (const message of messages) {
     if (message.role === 'system') {
       const text = chatContentToPlainText(message.content).trim()
-      if (text) system.push(text)
+      if (!text) continue
+      // System messages that arrive after conversation turns are the
+      // volatile per-turn context (goal budgets, memories, drift
+      // warnings). Hoisting them into the top-level `system` block
+      // would invalidate the provider's prompt cache for the whole
+      // conversation on every counter tick, so they trail the history
+      // inside a user turn instead — mirroring the chat_completions
+      // ordering in collectMessages.
+      if (out.length > 0) {
+        appendTrailingInstruction(out, text)
+        continue
+      }
+      system.push(text)
       continue
     }
     if (message.role === 'tool') {
@@ -1300,6 +1407,10 @@ function messagesToAnthropic(messages: ChatMessage[]): { system: string; message
       : content.trim()
         ? [{ type: 'text' as const, text: content }]
         : []
+    if (includeThinkingBlocks && message.role === 'assistant') {
+      const thinking = message.reasoning_content?.trim()
+      if (thinking) blocks.unshift({ type: 'thinking', thinking })
+    }
     for (const call of message.tool_calls ?? []) {
       blocks.push({
         type: 'tool_use',
@@ -1314,6 +1425,46 @@ function messagesToAnthropic(messages: ChatMessage[]): { system: string; message
     }
   }
   return { system: system.join('\n\n'), messages: out }
+}
+
+/**
+ * Folds a trailing system instruction into the conversation as user
+ * content. Appends to the final user message when one exists so the
+ * request keeps strict user/assistant alternation.
+ */
+function appendTrailingInstruction(out: AnthropicMessage[], text: string): void {
+  const block: AnthropicContentBlock = { type: 'text', text }
+  const last = out[out.length - 1]
+  if (last && last.role === 'user') {
+    if (typeof last.content === 'string') {
+      last.content = last.content.trim()
+        ? [{ type: 'text', text: last.content }, block]
+        : [block]
+      return
+    }
+    last.content.push(block)
+    return
+  }
+  out.push({ role: 'user', content: [block] })
+}
+
+/**
+ * Marks the stable prefix for provider-side prompt caching. Anthropic
+ * protocol caching is explicit: providers such as MiniMax only cache
+ * content before `cache_control` breakpoints (up to 4 per request).
+ * One breakpoint goes on the system block (which also covers the tool
+ * definitions that precede it) and one on the final content block of
+ * each of the last two messages, so consecutive agent steps re-hit the
+ * prefix cached by the previous request.
+ */
+function applyAnthropicCacheControl(messages: AnthropicMessage[]): void {
+  let breakpoints = 0
+  for (let i = messages.length - 1; i >= 0 && breakpoints < 2; i -= 1) {
+    const content = messages[i].content
+    if (typeof content === 'string' || content.length === 0) continue
+    content[content.length - 1].cache_control = { type: 'ephemeral' }
+    breakpoints += 1
+  }
 }
 
 function chatContentToResponsesContent(
@@ -1377,19 +1528,26 @@ function chatContentToPlainText(content: ChatMessage['content']): string {
   }).join('\n')
 }
 
-function responsesReasoningForEffort(effort: string | undefined): Record<string, unknown> | null {
-  const normalized = effort?.trim().toLowerCase()
+type ModelReasoningCapability = NonNullable<ModelCapabilityMetadata['reasoning']>
+type NormalizedReasoningEffort = ModelReasoningCapability['defaultEffort']
+
+function responsesReasoningForEffort(
+  effort: string | undefined,
+  reasoning?: ModelReasoningCapability
+): Record<string, unknown> | null {
+  if (reasoning && reasoning.requestProtocol !== 'openai-responses') return null
+  const resolved = reasoning
+    ? resolveReasoningEffort(effort, reasoning)
+    : normalizeReasoningEffortValue(effort)
+  if (resolved === 'auto' || resolved === 'off' || !resolved) return null
+  const normalized = resolved
   switch (normalized) {
     case 'low':
-    case 'minimal':
       return { effort: 'low' }
     case 'medium':
-    case 'mid':
       return { effort: 'medium' }
     case 'high':
     case 'max':
-    case 'maximum':
-    case 'xhigh':
       return { effort: 'high' }
     default:
       return null
@@ -1484,6 +1642,66 @@ function responseErrorMessage(payload: Record<string, unknown>): string {
   return message || recordString(payload, 'message') || 'model stream reported an error'
 }
 
+function modelPayloadError(payload: Record<string, unknown>): { message: string; code?: string } | null {
+  const rawError = payload.error
+  if (typeof rawError === 'string' && rawError.trim()) {
+    return { message: rawError.trim() }
+  }
+  const directError = modelErrorObject(recordValue(payload, 'error'))
+  if (directError) return directError
+  const responseError = modelErrorObject(recordValue(recordValue(payload, 'response'), 'error'))
+  if (responseError) return responseError
+  const baseResp = recordValue(payload, 'base_resp') ?? recordValue(payload, 'baseResp')
+  if (baseResp) {
+    const code = errorCodeString(
+      baseResp.status_code ?? baseResp.status ?? baseResp.code ?? baseResp.err_code
+    )
+    if (code && !successErrorCode(code)) {
+      return {
+        message:
+          recordString(baseResp, 'status_msg') ||
+          recordString(baseResp, 'message') ||
+          recordString(baseResp, 'msg') ||
+          `model provider error (${code})`,
+        code
+      }
+    }
+  }
+  const topLevelCode = errorCodeString(payload.code ?? payload.type ?? payload.status_code ?? payload.err_code)
+  const topLevelMessage =
+    recordString(payload, 'message') ||
+    recordString(payload, 'error_msg') ||
+    recordString(payload, 'status_msg')
+  if (topLevelCode && topLevelMessage && !successErrorCode(topLevelCode)) {
+    return { message: topLevelMessage, code: topLevelCode }
+  }
+  return null
+}
+
+function modelErrorObject(error: Record<string, unknown> | null): { message: string; code?: string } | null {
+  if (!error) return null
+  const message =
+    recordString(error, 'message') ||
+    recordString(error, 'msg') ||
+    recordString(error, 'status_msg') ||
+    recordString(error, 'error_msg')
+  const code = errorCodeString(error.code ?? error.type ?? error.status ?? error.status_code ?? error.err_code)
+  if (message) return { message, ...(code ? { code } : {}) }
+  if (code && !successErrorCode(code)) return { message: `model provider error (${code})`, code }
+  return null
+}
+
+function errorCodeString(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+function successErrorCode(code: string): boolean {
+  const normalized = code.trim().toLowerCase()
+  return normalized === '0' || normalized === 'ok' || normalized === 'success'
+}
+
 function anthropicStopReason(value: unknown): ModelStopReason | undefined {
   if (typeof value !== 'string') return undefined
   switch (value) {
@@ -1535,41 +1753,151 @@ function mergeUsageSnapshots(current: UsageSnapshot | null, next: UsageSnapshot)
     cacheMissTokens: Math.max(current.cacheMissTokens ?? 0, next.cacheMissTokens ?? 0),
     cacheHitRate: next.cacheHitRate ?? current.cacheHitRate,
     costUsd: next.costUsd ?? current.costUsd,
-    costCny: next.costCny ?? current.costCny,
-    cacheSavingsUsd: next.cacheSavingsUsd ?? current.cacheSavingsUsd,
-    cacheSavingsCny: next.cacheSavingsCny ?? current.cacheSavingsCny
+    costCny: next.costCny ?? current.costCny
   }
 }
 
 function applyReasoningEffort(
   body: Record<string, unknown>,
   effort: string | undefined,
-  options: { includeThinking?: boolean } = {}
+  options: {
+    includeThinking?: boolean
+    reasoning?: ModelReasoningCapability
+    maxReasoningEffort?: 'high' | 'max'
+  } = {}
 ): void {
-  const normalized = effort?.trim().toLowerCase()
+  const normalized = options.reasoning
+    ? resolveReasoningEffort(effort, options.reasoning)
+    : normalizeReasoningEffortValue(effort)
   if (!normalized) return
   const includeThinking = options.includeThinking !== false
+  if (options.reasoning) {
+    applyProfileReasoningEffort(body, normalized, options.reasoning, includeThinking)
+    return
+  }
   switch (normalized) {
     case 'off':
-    case 'disabled':
-    case 'none':
-    case 'false':
       if (includeThinking) body.thinking = { type: 'disabled' }
       break
     case 'low':
-    case 'minimal':
     case 'medium':
-    case 'mid':
     case 'high':
       body.reasoning_effort = 'high'
       if (includeThinking) body.thinking = { type: 'enabled' }
       break
     case 'max':
-    case 'maximum':
-    case 'xhigh':
-      body.reasoning_effort = 'max'
+      body.reasoning_effort = options.maxReasoningEffort ?? 'max'
       if (includeThinking) body.thinking = { type: 'enabled' }
       break
+  }
+}
+
+function applyProfileReasoningEffort(
+  body: Record<string, unknown>,
+  effort: NormalizedReasoningEffort,
+  reasoning: ModelReasoningCapability,
+  includeThinking: boolean
+): void {
+  switch (reasoning.requestProtocol) {
+    case 'none':
+    case 'openai-responses':
+    case 'anthropic-thinking':
+      return
+    case 'deepseek-chat-completions':
+      applyDeepSeekChatReasoningEffort(body, effort, includeThinking)
+      return
+    case 'mimo-chat-completions':
+      applyMimoChatReasoningEffort(body, effort, includeThinking)
+      return
+  }
+}
+
+function applyDeepSeekChatReasoningEffort(
+  body: Record<string, unknown>,
+  effort: NormalizedReasoningEffort,
+  includeThinking: boolean
+): void {
+  if (effort === 'off') {
+    if (includeThinking) body.thinking = { type: 'disabled' }
+    return
+  }
+  if (effort === 'max') {
+    body.reasoning_effort = 'max'
+  } else if (effort !== 'auto') {
+    body.reasoning_effort = 'high'
+  }
+  if (includeThinking && effort !== 'auto') body.thinking = { type: 'enabled' }
+}
+
+function applyMimoChatReasoningEffort(
+  body: Record<string, unknown>,
+  effort: NormalizedReasoningEffort,
+  includeThinking: boolean
+): void {
+  if (effort === 'off') {
+    if (includeThinking) body.thinking = { type: 'disabled' }
+    return
+  }
+  if (effort === 'low' || effort === 'medium' || effort === 'high') {
+    body.reasoning_effort = effort
+    if (includeThinking) body.thinking = { type: 'enabled' }
+  }
+}
+
+function applyAnthropicReasoningEffort(
+  body: Record<string, unknown>,
+  effort: string | undefined,
+  reasoning?: ModelReasoningCapability
+): void {
+  if (reasoning?.requestProtocol !== 'anthropic-thinking') return
+  const resolved = resolveReasoningEffort(effort, reasoning)
+  if (!resolved) return
+  body.thinking = {
+    type: resolved === 'off' ? 'disabled' : 'adaptive'
+  }
+}
+
+function resolveReasoningEffort(
+  effort: string | undefined,
+  reasoning: ModelReasoningCapability
+): NormalizedReasoningEffort | undefined {
+  const normalized = normalizeReasoningEffortValue(effort)
+  if (!normalized) return undefined
+  if (reasoning.supportedEfforts.includes(normalized)) return normalized
+  if (
+    normalized === 'low' &&
+    reasoning.supportedEfforts.includes('off') &&
+    !reasoning.supportedEfforts.includes('low')
+  ) {
+    return 'off'
+  }
+  return reasoning.defaultEffort
+}
+
+function normalizeReasoningEffortValue(effort: string | undefined): NormalizedReasoningEffort | undefined {
+  switch (effort?.trim().toLowerCase()) {
+    case 'auto':
+    case 'adaptive':
+      return 'auto'
+    case 'off':
+    case 'disabled':
+    case 'none':
+    case 'false':
+      return 'off'
+    case 'low':
+    case 'minimal':
+      return 'low'
+    case 'medium':
+    case 'mid':
+      return 'medium'
+    case 'high':
+      return 'high'
+    case 'max':
+    case 'maximum':
+    case 'xhigh':
+      return 'max'
+    default:
+      return undefined
   }
 }
 
@@ -1602,8 +1930,16 @@ function isThinkingMode(effort: string | undefined): boolean {
 function requiresReasoningRoundTrip(
   effort: string | undefined,
   model: string | undefined,
-  baseUrl: string
+  baseUrl: string,
+  reasoning?: ModelReasoningCapability
 ): boolean {
+  if (reasoning) {
+    const resolved = resolveReasoningEffort(effort, reasoning)
+    if (resolved) {
+      return resolved !== 'off' && reasoning.requestProtocol !== 'none'
+    }
+    return isDeepSeekHost(baseUrl) && isThinkingProducerModel(model)
+  }
   // Thinking-mode round trip is a DeepSeek-specific protocol extension.
   // OpenAI-compat providers (OpenRouter, llama.cpp, etc.) may reject
   // or misinterpret the `thinking` field, so we only auto-enable it
@@ -1869,6 +2205,7 @@ function formatAttachmentTextFallback(
   return [
     '[Attached image as base64 text]',
     `Name: ${attachment.name}`,
+    `FilePath: ${attachment.localFilePath ?? 'unknown'}`,
     `MIME: ${attachment.mimeType}`,
     `Dimensions: ${formatAttachmentDimensions(attachment)}`,
     `Bytes: ${attachment.byteSize}`,

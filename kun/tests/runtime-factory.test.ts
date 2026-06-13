@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { InMemorySessionStore } from '../src/adapters/in-memory-session-store.js'
 import { InMemoryThreadStore } from '../src/adapters/in-memory-thread-store.js'
 import { createThreadRecord } from '../src/domain/thread.js'
 import { UsageService } from '../src/services/usage-service.js'
 import { seedUsageCarryover } from '../src/server/runtime-factory.js'
 import type { UsageSnapshot } from '../src/contracts/usage.js'
+import type { SessionStore } from '../src/ports/session-store.js'
 
 function usage(overrides: Partial<UsageSnapshot>): UsageSnapshot {
   const promptTokens = overrides.promptTokens ?? 10
@@ -65,6 +66,34 @@ describe('runtime factory usage carryover', () => {
       hits: 72,
       misses: 8,
       hitRate: 0.9
+    })
+  })
+
+  it('seeds runtime usage from indexed latest snapshots without replaying event logs', async () => {
+    const threadStore = new InMemoryThreadStore()
+    const sessionStore = new InMemorySessionStore() as InMemorySessionStore & {
+      loadLatestUsageSnapshots: NonNullable<SessionStore['loadLatestUsageSnapshots']>
+    }
+    const usageService = new UsageService()
+    sessionStore.loadLatestUsageSnapshots = vi.fn(async () => [
+      {
+        threadId: 'thr_indexed',
+        seq: 9,
+        usage: usage({ promptTokens: 120, completionTokens: 30, cacheHitTokens: 100, cacheMissTokens: 20, turns: 4 })
+      }
+    ])
+    const loadEventsSince = vi.spyOn(sessionStore, 'loadEventsSince')
+
+    await seedUsageCarryover({ threadStore, sessionStore, usageService })
+
+    expect(loadEventsSince).not.toHaveBeenCalled()
+    expect(usageService.forThread('thr_indexed')).toMatchObject({
+      promptTokens: 120,
+      completionTokens: 30,
+      totalTokens: 150,
+      cacheHitTokens: 100,
+      cacheMissTokens: 20,
+      turns: 4
     })
   })
 })

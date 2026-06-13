@@ -6,9 +6,39 @@ import {
   runAgentCommand,
   splitKunCliCommand
 } from './agent-cli.js'
-import { startKunServe } from '../server/runtime-factory.js'
+import { startKunServe, type KunServeHandle } from '../server/runtime-factory.js'
 
 export const KUN_READY_PREFIX = 'KUN_READY '
+
+/**
+ * Serve mode runs unattended under the GUI. An uncaught error must not
+ * leave a half-dead process: report it on stderr (the GUI captures the
+ * tail), attempt a bounded graceful close, then exit non-zero so the
+ * GUI supervisor can restart us.
+ */
+function installServeCrashHandlers(getHandle: () => KunServeHandle | null): void {
+  let crashing = false
+  const crash = (kind: string, error: unknown): void => {
+    if (crashing) return
+    crashing = true
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    process.stderr.write(`kun serve: ${kind}: ${detail}\n`)
+    const finish = (): void => process.exit(ServeExitCode.runtime)
+    const handle = getHandle()
+    if (!handle) {
+      finish()
+      return
+    }
+    const deadline = setTimeout(finish, 3000)
+    deadline.unref()
+    void handle
+      .close()
+      .catch(() => undefined)
+      .finally(finish)
+  }
+  process.on('uncaughtException', (error) => crash('uncaughtException', error))
+  process.on('unhandledRejection', (reason) => crash('unhandledRejection', reason))
+}
 
 /**
  * Serve-mode command. Kept separate from the dispatcher so GUI startup
@@ -27,13 +57,16 @@ async function serveMain(argv: readonly string[]): Promise<number> {
     }
     return parsed.exitCode
   }
-  const handle = await startKunServe(parsed.options)
-  const info = handle.runtime.info()
+  let handle: KunServeHandle | null = null
+  installServeCrashHandlers(() => handle)
+  const server = await startKunServe(parsed.options)
+  handle = server
+  const info = server.runtime.info()
   const startupInfo = {
     service: 'kun',
     mode: 'serve',
-    host: handle.host,
-    port: handle.port,
+    host: server.host,
+    port: server.port,
     configPath: info.configPath,
     dataDir: info.dataDir,
     model: info.model,
@@ -42,13 +75,13 @@ async function serveMain(argv: readonly string[]): Promise<number> {
     insecure: info.insecure,
     startedAt: info.startedAt,
     pid: info.pid,
-    message: `kun runtime listening on http://${handle.host}:${handle.port}`
+    message: `kun runtime listening on http://${server.host}:${server.port}`
   }
   process.stdout.write(`${KUN_READY_PREFIX}${JSON.stringify(startupInfo)}\n`)
   process.stdout.write(JSON.stringify(startupInfo, null, 2) + '\n')
   await new Promise<void>((resolve) => {
     const stop = () => {
-      void handle.close().finally(resolve)
+      void server.close().finally(resolve)
     }
     process.once('SIGTERM', stop)
     process.once('SIGINT', stop)

@@ -13,6 +13,7 @@ import {
 import {
   isKunChildRunning,
   reclaimKunPort,
+  resolveAvailableKunPort,
   startKunChild,
   stopKunChildAndWait
 } from '../kun-process'
@@ -60,6 +61,10 @@ export const kunRuntimeAdapter = {
 
   reclaimPort(port: number): Promise<{ ok: true } | { ok: false; message: string }> {
     return reclaimKunPort(port)
+  },
+
+  resolveAvailablePort(port: number): Promise<{ port: number; changed: boolean; message?: string }> {
+    return resolveAvailableKunPort(port)
   }
 }
 
@@ -87,13 +92,14 @@ export async function runtimeRequestViaHost(
   settings: AppSettingsV1,
   pathAndQuery: string,
   init: RuntimeRequestInit,
-  ensureRuntime: (settings: AppSettingsV1) => Promise<void>
+  ensureRuntime: (settings: AppSettingsV1) => Promise<AppSettingsV1 | void>
 ): Promise<{ ok: boolean; status: number; body: string }> {
-  await ensureRuntime(settings)
-  const base = getRuntimeBaseUrlForSettings(settings)
+  const ensuredSettings = await ensureRuntime(settings)
+  const requestSettings = ensuredSettings ?? settings
+  const base = getRuntimeBaseUrlForSettings(requestSettings)
   const pathNorm = pathAndQuery.startsWith('/') ? pathAndQuery : `/${pathAndQuery}`
   const url = `${base}${pathNorm}`
-  const hdrs = runtimeAuthHeaders(settings)
+  const hdrs = runtimeAuthHeaders(requestSettings)
   for (const [key, value] of Object.entries(init.headers ?? {})) {
     hdrs.set(key, value)
   }

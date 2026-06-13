@@ -1,23 +1,45 @@
 import {
   DEFAULT_APPROVAL_POLICY,
   DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_IMAGE_GENERATION_PROTOCOL,
   DEFAULT_KUN_DATA_DIR,
   DEFAULT_KUN_MODEL,
   DEFAULT_KUN_PORT,
+  DEFAULT_MUSIC_GENERATION_PROTOCOL,
   DEFAULT_MODEL_ENDPOINT_FORMAT,
   DEFAULT_SANDBOX_MODE,
+  DEFAULT_SPEECH_TO_TEXT_PROTOCOL,
+  DEFAULT_TEXT_TO_SPEECH_PROTOCOL,
+  DEFAULT_VIDEO_GENERATION_PROTOCOL,
+  MODEL_REASONING_EFFORTS,
+  MODEL_REASONING_REQUEST_PROTOCOLS,
   type AppSettingsV1,
   type KunContextCompactionSettingsV1,
   type KunHistoryHygieneSettingsV1,
+  type KunImageGenerationSettingsV1,
   type KunMcpSearchSettingsV1,
+  type KunMusicGenerationSettingsV1,
   type KunRuntimeTuningSettingsV1,
   type KunRuntimeSettingsPatchV1,
   type KunRuntimeSettingsV1,
   type KunSettingsEnvelopePatchV1,
   type KunSettingsEnvelopeV1,
+  type KunSpeechToTextSettingsV1,
   type KunStorageSettingsV1,
+  type KunTextToSpeechSettingsV1,
   type KunTokenEconomySettingsV1,
+  type KunVideoGenerationSettingsV1,
+  type ImageGenerationProtocol,
+  type MusicGenerationProtocol,
+  type ModelProviderInputModality,
+  type ModelProviderMessagePartSupport,
+  type ModelProviderModelProfilePatchV1,
+  type ModelProviderModelProfileV1,
+  type ModelProviderReasoningCapabilityV1,
   type ModelProviderSettingsV1,
+  type SpeechToTextProtocol,
+  type TextToSpeechProtocol,
+  type VideoGenerationProtocol,
   type ApprovalPolicy,
   type SandboxMode
 } from './app-settings-types'
@@ -108,7 +130,81 @@ export function defaultKunRuntimeSettings(
     mcpSearch: defaultKunMcpSearchSettings(),
     storage: defaultKunStorageSettings(),
     contextCompaction: defaultKunContextCompactionSettings(),
-    runtimeTuning: defaultKunRuntimeTuningSettings()
+    runtimeTuning: defaultKunRuntimeTuningSettings(),
+    imageGeneration: defaultKunImageGenerationSettings(),
+    speechToText: defaultKunSpeechToTextSettings(),
+    textToSpeech: defaultKunTextToSpeechSettings(),
+    musicGeneration: defaultKunMusicGenerationSettings(),
+    videoGeneration: defaultKunVideoGenerationSettings(),
+    modelProfiles: {}
+  }
+}
+
+export function defaultKunImageGenerationSettings(): KunImageGenerationSettingsV1 {
+  return {
+    enabled: false,
+    providerId: '',
+    protocol: DEFAULT_IMAGE_GENERATION_PROTOCOL,
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    defaultSize: '',
+    timeoutMs: 180_000
+  }
+}
+
+export function defaultKunSpeechToTextSettings(): KunSpeechToTextSettingsV1 {
+  return {
+    enabled: false,
+    providerId: '',
+    protocol: DEFAULT_SPEECH_TO_TEXT_PROTOCOL,
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    language: '',
+    timeoutMs: 60_000
+  }
+}
+
+export function defaultKunTextToSpeechSettings(): KunTextToSpeechSettingsV1 {
+  return {
+    enabled: false,
+    providerId: '',
+    protocol: DEFAULT_TEXT_TO_SPEECH_PROTOCOL,
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    voice: '',
+    format: 'mp3',
+    timeoutMs: 120_000
+  }
+}
+
+export function defaultKunMusicGenerationSettings(): KunMusicGenerationSettingsV1 {
+  return {
+    enabled: false,
+    providerId: '',
+    protocol: DEFAULT_MUSIC_GENERATION_PROTOCOL,
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    format: 'mp3',
+    timeoutMs: 300_000
+  }
+}
+
+export function defaultKunVideoGenerationSettings(): KunVideoGenerationSettingsV1 {
+  return {
+    enabled: false,
+    providerId: '',
+    protocol: DEFAULT_VIDEO_GENERATION_PROTOCOL,
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    defaultDuration: 6,
+    defaultResolution: '1080P',
+    timeoutMs: 900_000,
+    pollIntervalMs: 10_000
   }
 }
 
@@ -234,6 +330,31 @@ export function mergeKunRuntimeSettings(
     ...currentContextCompaction,
     ...(patch?.contextCompaction ?? {})
   })
+  const currentImageGeneration = normalizeKunImageGenerationSettings(current.imageGeneration)
+  const nextImageGeneration = normalizeKunImageGenerationSettings({
+    ...currentImageGeneration,
+    ...(patch?.imageGeneration ?? {})
+  })
+  const currentSpeechToText = normalizeKunSpeechToTextSettings(current.speechToText)
+  const nextSpeechToText = normalizeKunSpeechToTextSettings({
+    ...currentSpeechToText,
+    ...(patch?.speechToText ?? {})
+  })
+  const currentTextToSpeech = normalizeKunTextToSpeechSettings(current.textToSpeech)
+  const nextTextToSpeech = normalizeKunTextToSpeechSettings({
+    ...currentTextToSpeech,
+    ...(patch?.textToSpeech ?? {})
+  })
+  const currentMusicGeneration = normalizeKunMusicGenerationSettings(current.musicGeneration)
+  const nextMusicGeneration = normalizeKunMusicGenerationSettings({
+    ...currentMusicGeneration,
+    ...(patch?.musicGeneration ?? {})
+  })
+  const currentVideoGeneration = normalizeKunVideoGenerationSettings(current.videoGeneration)
+  const nextVideoGeneration = normalizeKunVideoGenerationSettings({
+    ...currentVideoGeneration,
+    ...(patch?.videoGeneration ?? {})
+  })
   const currentRuntimeTuning = normalizeKunRuntimeTuningSettings(current.runtimeTuning)
   const nextRuntimeTuning = normalizeKunRuntimeTuningSettings({
     ...currentRuntimeTuning,
@@ -250,6 +371,7 @@ export function mergeKunRuntimeSettings(
         }
       : {})
   })
+  const nextModelProfiles = normalizeKunModelProfiles(current.modelProfiles, patch?.modelProfiles)
   return {
     ...current,
     ...(patch ?? {}),
@@ -258,8 +380,128 @@ export function mergeKunRuntimeSettings(
     mcpSearch: nextMcpSearch,
     storage: nextStorage,
     contextCompaction: nextContextCompaction,
-    runtimeTuning: nextRuntimeTuning
+    runtimeTuning: nextRuntimeTuning,
+    imageGeneration: nextImageGeneration,
+    speechToText: nextSpeechToText,
+    textToSpeech: nextTextToSpeech,
+    musicGeneration: nextMusicGeneration,
+    videoGeneration: nextVideoGeneration,
+    modelProfiles: nextModelProfiles
   }
+}
+
+function normalizeKunImageGenerationSettings(
+  input: Partial<KunImageGenerationSettingsV1> | undefined
+): KunImageGenerationSettingsV1 {
+  const defaults = defaultKunImageGenerationSettings()
+  const defaultSize = typeof input?.defaultSize === 'string' ? input.defaultSize.trim() : ''
+  return {
+    enabled: input?.enabled === true,
+    providerId: typeof input?.providerId === 'string' ? input.providerId.trim() : defaults.providerId,
+    protocol: normalizeKunImageGenerationProtocol(input?.protocol),
+    baseUrl: typeof input?.baseUrl === 'string' ? input.baseUrl.trim() : defaults.baseUrl,
+    apiKey: typeof input?.apiKey === 'string' ? input.apiKey.trim() : defaults.apiKey,
+    model: typeof input?.model === 'string' ? input.model.trim() : defaults.model,
+    defaultSize: /^(auto|\d+x\d+)$/.test(defaultSize) ? defaultSize : '',
+    timeoutMs: boundedPositiveInt(input?.timeoutMs, defaults.timeoutMs, 600_000)
+  }
+}
+
+function normalizeKunImageGenerationProtocol(value: unknown): ImageGenerationProtocol {
+  return value === 'minimax-image' ? 'minimax-image' : DEFAULT_IMAGE_GENERATION_PROTOCOL
+}
+
+function normalizeKunSpeechToTextSettings(
+  input: Partial<KunSpeechToTextSettingsV1> | undefined
+): KunSpeechToTextSettingsV1 {
+  const defaults = defaultKunSpeechToTextSettings()
+  return {
+    enabled: input?.enabled === true,
+    providerId: typeof input?.providerId === 'string' ? input.providerId.trim() : defaults.providerId,
+    protocol: normalizeKunSpeechToTextProtocol(input?.protocol),
+    baseUrl: typeof input?.baseUrl === 'string' ? input.baseUrl.trim() : defaults.baseUrl,
+    apiKey: typeof input?.apiKey === 'string' ? input.apiKey.trim() : defaults.apiKey,
+    model: typeof input?.model === 'string' ? input.model.trim() : defaults.model,
+    language: typeof input?.language === 'string' ? input.language.trim().toLowerCase().slice(0, 16) : defaults.language,
+    timeoutMs: boundedPositiveInt(input?.timeoutMs, defaults.timeoutMs, 600_000)
+  }
+}
+
+function normalizeKunSpeechToTextProtocol(value: unknown): SpeechToTextProtocol {
+  return value === 'mimo-asr' ? 'mimo-asr' : DEFAULT_SPEECH_TO_TEXT_PROTOCOL
+}
+
+function normalizeKunTextToSpeechSettings(
+  input: Partial<KunTextToSpeechSettingsV1> | undefined
+): KunTextToSpeechSettingsV1 {
+  const defaults = defaultKunTextToSpeechSettings()
+  return {
+    enabled: input?.enabled === true,
+    providerId: typeof input?.providerId === 'string' ? input.providerId.trim() : defaults.providerId,
+    protocol: normalizeKunTextToSpeechProtocol(input?.protocol),
+    baseUrl: typeof input?.baseUrl === 'string' ? input.baseUrl.trim() : defaults.baseUrl,
+    apiKey: typeof input?.apiKey === 'string' ? input.apiKey.trim() : defaults.apiKey,
+    model: typeof input?.model === 'string' ? input.model.trim() : defaults.model,
+    voice: typeof input?.voice === 'string' ? input.voice.trim().slice(0, 128) : defaults.voice,
+    format: normalizeAudioFormat(input?.format, defaults.format),
+    timeoutMs: boundedPositiveInt(input?.timeoutMs, defaults.timeoutMs, 600_000)
+  }
+}
+
+function normalizeKunTextToSpeechProtocol(value: unknown): TextToSpeechProtocol {
+  return value === 'minimax-t2a' || value === 'mimo-tts'
+    ? value
+    : DEFAULT_TEXT_TO_SPEECH_PROTOCOL
+}
+
+function normalizeKunMusicGenerationSettings(
+  input: Partial<KunMusicGenerationSettingsV1> | undefined
+): KunMusicGenerationSettingsV1 {
+  const defaults = defaultKunMusicGenerationSettings()
+  return {
+    enabled: input?.enabled === true,
+    providerId: typeof input?.providerId === 'string' ? input.providerId.trim() : defaults.providerId,
+    protocol: normalizeKunMusicGenerationProtocol(input?.protocol),
+    baseUrl: typeof input?.baseUrl === 'string' ? input.baseUrl.trim() : defaults.baseUrl,
+    apiKey: typeof input?.apiKey === 'string' ? input.apiKey.trim() : defaults.apiKey,
+    model: typeof input?.model === 'string' ? input.model.trim() : defaults.model,
+    format: normalizeAudioFormat(input?.format, defaults.format),
+    timeoutMs: boundedPositiveInt(input?.timeoutMs, defaults.timeoutMs, 900_000)
+  }
+}
+
+function normalizeKunMusicGenerationProtocol(value: unknown): MusicGenerationProtocol {
+  return value === 'minimax-music' ? 'minimax-music' : DEFAULT_MUSIC_GENERATION_PROTOCOL
+}
+
+function normalizeKunVideoGenerationSettings(
+  input: Partial<KunVideoGenerationSettingsV1> | undefined
+): KunVideoGenerationSettingsV1 {
+  const defaults = defaultKunVideoGenerationSettings()
+  return {
+    enabled: input?.enabled === true,
+    providerId: typeof input?.providerId === 'string' ? input.providerId.trim() : defaults.providerId,
+    protocol: normalizeKunVideoGenerationProtocol(input?.protocol),
+    baseUrl: typeof input?.baseUrl === 'string' ? input.baseUrl.trim() : defaults.baseUrl,
+    apiKey: typeof input?.apiKey === 'string' ? input.apiKey.trim() : defaults.apiKey,
+    model: typeof input?.model === 'string' ? input.model.trim() : defaults.model,
+    defaultDuration: boundedPositiveInt(input?.defaultDuration, defaults.defaultDuration, 60),
+    defaultResolution: typeof input?.defaultResolution === 'string' && input.defaultResolution.trim()
+      ? input.defaultResolution.trim().slice(0, 32)
+      : defaults.defaultResolution,
+    timeoutMs: boundedPositiveInt(input?.timeoutMs, defaults.timeoutMs, 1_800_000),
+    pollIntervalMs: boundedPositiveInt(input?.pollIntervalMs, defaults.pollIntervalMs, 60_000)
+  }
+}
+
+function normalizeKunVideoGenerationProtocol(value: unknown): VideoGenerationProtocol {
+  return value === 'minimax-video' ? 'minimax-video' : DEFAULT_VIDEO_GENERATION_PROTOCOL
+}
+
+function normalizeAudioFormat(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback
+  const normalized = value.trim().toLowerCase()
+  return /^(mp3|wav|flac|pcm16)$/.test(normalized) ? normalized : fallback
 }
 
 function normalizeKunTokenEconomySettings(
@@ -380,6 +622,150 @@ function normalizeKunRuntimeTuningSettings(
       )
     }
   }
+}
+
+function normalizeKunModelProfiles(
+  current: Record<string, ModelProviderModelProfileV1> | undefined,
+  patch: Record<string, ModelProviderModelProfilePatchV1 | null> | undefined
+): Record<string, ModelProviderModelProfileV1> {
+  const profiles: Record<string, ModelProviderModelProfileV1> = {}
+  for (const [rawModelId, rawProfile] of Object.entries(current ?? {})) {
+    const modelId = normalizeModelProfileId(rawModelId)
+    if (!modelId) continue
+    profiles[modelId] = normalizeKunModelProfile(rawProfile)
+  }
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return profiles
+  for (const [rawModelId, rawProfile] of Object.entries(patch)) {
+    const modelId = normalizeModelProfileId(rawModelId)
+    if (!modelId) continue
+    if (rawProfile === null) {
+      delete profiles[modelId]
+      continue
+    }
+    profiles[modelId] = normalizeKunModelProfile({
+      ...(profiles[modelId] ?? {}),
+      ...rawProfile
+    })
+  }
+  return profiles
+}
+
+function normalizeKunModelProfile(
+  input: ModelProviderModelProfilePatchV1 | undefined
+): ModelProviderModelProfileV1 {
+  const inputModalities = normalizeKunModelInputModalities(input?.inputModalities)
+  const fallbackMessageParts: ModelProviderMessagePartSupport[] = inputModalities.includes('image')
+    ? ['text', 'image_url']
+    : ['text']
+  const contextWindowTokens = typeof input?.contextWindowTokens === 'number' &&
+    Number.isInteger(input.contextWindowTokens) &&
+    input.contextWindowTokens > 0
+    ? input.contextWindowTokens
+    : undefined
+  const reasoning = normalizeKunReasoningCapability(input?.reasoning)
+  return {
+    ...(normalizeKunProfileAliases(input?.aliases).length
+      ? { aliases: normalizeKunProfileAliases(input?.aliases) }
+      : {}),
+    ...(contextWindowTokens ? { contextWindowTokens } : {}),
+    inputModalities,
+    outputModalities: normalizeKunModelInputModalities(input?.outputModalities),
+    supportsToolCalling: input?.supportsToolCalling !== false,
+    messageParts: normalizeKunModelMessageParts(input?.messageParts, fallbackMessageParts),
+    ...(reasoning ? { reasoning } : {})
+  }
+}
+
+function normalizeKunReasoningCapability(
+  input: ModelProviderModelProfilePatchV1['reasoning'] | undefined
+): ModelProviderReasoningCapabilityV1 | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const supportedEfforts = normalizeKunReasoningEfforts(input.supportedEfforts)
+  if (supportedEfforts.length === 0) return undefined
+  const defaultEffort = normalizeKunReasoningEffort(input.defaultEffort)
+  const requestProtocol = normalizeKunReasoningRequestProtocol(input.requestProtocol)
+  if (!requestProtocol) return undefined
+  return {
+    supportedEfforts,
+    defaultEffort: defaultEffort && supportedEfforts.includes(defaultEffort)
+      ? defaultEffort
+      : supportedEfforts[0],
+    requestProtocol
+  }
+}
+
+function normalizeKunReasoningEfforts(value: unknown): ModelProviderReasoningCapabilityV1['supportedEfforts'] {
+  if (!Array.isArray(value)) return []
+  const efforts: ModelProviderReasoningCapabilityV1['supportedEfforts'] = []
+  for (const item of value) {
+    const effort = normalizeKunReasoningEffort(item)
+    if (effort && !efforts.includes(effort)) efforts.push(effort)
+  }
+  return efforts
+}
+
+function normalizeKunReasoningEffort(value: unknown): ModelProviderReasoningCapabilityV1['defaultEffort'] | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim().toLowerCase()
+  return MODEL_REASONING_EFFORTS.includes(normalized as ModelProviderReasoningCapabilityV1['defaultEffort'])
+    ? normalized as ModelProviderReasoningCapabilityV1['defaultEffort']
+    : undefined
+}
+
+function normalizeKunReasoningRequestProtocol(
+  value: unknown
+): ModelProviderReasoningCapabilityV1['requestProtocol'] | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim().toLowerCase()
+  return MODEL_REASONING_REQUEST_PROTOCOLS.includes(normalized as ModelProviderReasoningCapabilityV1['requestProtocol'])
+    ? normalized as ModelProviderReasoningCapabilityV1['requestProtocol']
+    : undefined
+}
+
+function normalizeModelProfileId(value: string): string {
+  return value.trim().slice(0, 128)
+}
+
+function normalizeKunProfileAliases(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const aliases: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const alias = item.trim().slice(0, 128)
+    if (alias && !aliases.includes(alias)) aliases.push(alias)
+    if (aliases.length >= 50) break
+  }
+  return aliases
+}
+
+function normalizeKunModelInputModalities(value: unknown): ModelProviderInputModality[] {
+  if (!Array.isArray(value)) return ['text']
+  const modalities: ModelProviderInputModality[] = []
+  for (const item of value) {
+    if ((item === 'text' || item === 'image') && !modalities.includes(item)) {
+      modalities.push(item)
+    }
+    if (modalities.length >= 8) break
+  }
+  return modalities.length > 0 ? modalities : ['text']
+}
+
+function normalizeKunModelMessageParts(
+  value: unknown,
+  fallback: ModelProviderMessagePartSupport[]
+): ModelProviderMessagePartSupport[] {
+  if (!Array.isArray(value)) return [...fallback]
+  const parts: ModelProviderMessagePartSupport[] = []
+  for (const item of value) {
+    if (
+      (item === 'text' || item === 'image_url' || item === 'input_image') &&
+      !parts.includes(item)
+    ) {
+      parts.push(item)
+    }
+    if (parts.length >= 8) break
+  }
+  return parts.length > 0 ? parts : [...fallback]
 }
 
 export function withKunRuntimeSettings(
@@ -521,7 +907,12 @@ export function migrateLegacyAppSettings(parsed: LegacyAppSettingsShape): Partia
     mcpSearch: normalizeKunMcpSearchSettings(explicitKun.mcpSearch),
     storage: normalizeKunStorageSettings(explicitKun.storage),
     contextCompaction: normalizeKunContextCompactionSettings(explicitKun.contextCompaction),
-    runtimeTuning: normalizeKunRuntimeTuningSettings(explicitKun.runtimeTuning)
+    runtimeTuning: normalizeKunRuntimeTuningSettings(explicitKun.runtimeTuning),
+    imageGeneration: normalizeKunImageGenerationSettings(explicitKun.imageGeneration),
+    speechToText: normalizeKunSpeechToTextSettings(explicitKun.speechToText),
+    textToSpeech: normalizeKunTextToSpeechSettings(explicitKun.textToSpeech),
+    musicGeneration: normalizeKunMusicGenerationSettings(explicitKun.musicGeneration),
+    videoGeneration: normalizeKunVideoGenerationSettings(explicitKun.videoGeneration)
   }
   // Strip the legacy `agentProvider` discriminator and the legacy
   // per-provider settings from the surfaced migration result. The

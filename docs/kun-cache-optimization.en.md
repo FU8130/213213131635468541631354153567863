@@ -1,6 +1,6 @@
 # Kun cache optimization technical documentation
 
-This article records the cache optimization design, implementation location, and implementation of the current Kun runtime of DeepSeek GUI.
+This article records the cache optimization design, implementation location, and implementation of the current Kun runtime.
 Statistical caliber and subsequent evolution direction. The goal is not to simply "get the cache numbers high" but to keep the GUI and
 the local agent's request prefix long-term stable, verifiable, and observable across Code, Write, and Connect phone.
 
@@ -8,8 +8,8 @@ the local agent's request prefix long-term stable, verifiable, and observable ac
 
 Kun's cache optimization serves four goals:
 
-- Make request prefixes sent to DeepSeek as byte stable as possible.
-- Make cache hit statistics consistent with DeepSeek native fields instead of relying on guesswork.
+- Make request prefixes sent to upstream models as byte stable as possible.
+- Make cache hit statistics prefer provider-native fields instead of relying on guesswork.
 - Let prefix drift and message history pollution be discovered during development.
 - Let the GUI only bear the responsibility of HTTP/SSE calls, and consolidate the caching discipline inside Kun.
 
@@ -42,7 +42,7 @@ single cache-hit metric:
 
 ## General principles
 
-Kun borrowed Reasonix’s cache-first design, but adapted it to the GUI scenario:
+Kun's cache-first design is adapted to the GUI scenario:
 
 - The GUI does not spell prompt, and does not make cache judgments in renderer or main process.
 - `kun serve` is the only request exit, and cache-related strategies are placed inside the runtime.
@@ -140,7 +140,7 @@ Implementation location:
 - `kun/src/adapters/model/deepseek-compat-model-client.ts`
 - `kun/src/loop/agent-loop.ts`
 
-Kun will also do a layer of Reasonix-style history hygiene at model request boundaries:
+Kun will also do a shared layer of history hygiene at model request boundaries:
 
 - Only the history sent to the model is compressed, and the complete tool results saved in the disk/session are not changed.
 - Extra large `tool_result` will retain head,
@@ -185,14 +185,14 @@ Implementation location:
 
 There are several direct benefits to doing this:
 
-- Prevent DeepSeek from returning 400 due to illegal message structure
+- Prevent upstream model providers from returning 400 due to illegal message structure
 - Avoid lowering the cache hot prefix ratio due to retry, historical pollution or large tool results
 - Avoid repeated tool loops that continue to expand dynamic history and create meaningless cache misses
 - Avoid inheriting malformed tool history for the first request after fork/resume
 
 ## Cache statistics caliber
 
-Kun's cache hit statistics preferentially use DeepSeek's native usage field:
+Kun's cache hit statistics preferentially use provider-native usage fields:
 
 - `prompt_cache_hit_tokens`
 - `prompt_cache_miss_tokens`
@@ -220,7 +220,7 @@ cacheHitRate = hit / prompt_tokens
 
 ```
 
-The reason is that DeepSeek's native miss caliber is not guaranteed to be equal to `prompt_tokens - hit`. If the denominator is wrong,
+The reason is that a provider-native miss field is not guaranteed to be equal to `prompt_tokens - hit`. If the denominator is wrong,
 Panels that look "high" or "low" could just be statistical distortions.
 
 The cumulative statistics use the same formula simultaneously to avoid inconsistency between the caliber of a single round and the cumulative panel:
@@ -231,7 +231,7 @@ The cumulative statistics use the same formula simultaneously to avoid inconsist
 Kun will also use a single round of real `prompt_tokens` as the compaction pressure for the next request.
 If the number of prompt tokens reported by the provider has reached the current model soft threshold, the next time
 The model step will trigger compaction first; this is more efficient than relying solely on local estimates of 4 characters/token.
-Close to the actual context pressure of DeepSeek, it can also maintain the proportion of hot prefixes before tool continuation.
+Close to the actual context pressure of the model, it can also maintain the proportion of hot prefixes before tool continuation.
 
 Implementation location:
 
@@ -324,13 +324,13 @@ In this way, the Code / Write / Connect phone entry points can share the same se
 
 ## Current referenced and unfinished items
 
-Reasonix ideas that have been implemented:
+Kun cache mechanisms that have been implemented:
 
 - Stable prefix file
 - immutable prefix fingerprint
 - Tool schema canonical sorting
 - tool catalog fingerprint / drift metadata
-- DeepSeek native cache fields are given priority
+- Provider-native cache fields are given priority
 - tool-call / tool-result pairing fix
 - multi-tool call block reorganization and complete subset salvage
 - streamed tool-call delta press `index` to continue
@@ -347,8 +347,8 @@ Points worth learning from in the next stage:
   Explicit restart or new session boundaries
 - LLM fold summarizer: If you use the model for compaction in the future, you should reuse the main prefix to avoid
   The summarizer turns itself into a cold request
-- Big tool result token cap: Currently lightweight token-aware estimation has been added; DeepSeek will be built-in in the future
-  tokenizer, which can be changed to the precise upper limit of tokens like Reasonix
+- Big tool result token cap: lightweight token-aware estimation has been added; a future precise
+  tokenizer can move this to an exact token cap
 - Volatile scratch boundary: continue to separate "the thinking displayed to the user" and the "history replayed to the model"
 
 ## Related documents

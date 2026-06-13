@@ -1,5 +1,5 @@
 import i18n from '../i18n'
-import { isWriteImageFilePath, isWriteWorkspaceFilePath } from '@shared/write-text-file'
+import { isWriteImageFilePath, isWritePdfFilePath, isWriteWorkspaceFilePath } from '@shared/write-text-file'
 import { writePathToFileUrl } from '@shared/write-markdown-resource'
 import type { WriteWorkspaceGet, WriteWorkspaceSet, WriteWorkspaceState } from './write-workspace-store-types'
 import {
@@ -86,9 +86,9 @@ export function createWriteFileActions({
       const requestedRoot = normalizePath(path || workspaceRoot)
       const targetKey = path ? requestedRoot : '__root__'
       set((state) => ({ loadingDirs: { ...state.loadingDirs, [targetKey]: true } }))
-      let result: Awaited<ReturnType<typeof window.dsGui.listWorkspaceDirectory>>
+      let result: Awaited<ReturnType<typeof window.kunGui.listWorkspaceDirectory>>
       try {
-        result = await window.dsGui.listWorkspaceDirectory({ workspaceRoot, path })
+        result = await window.kunGui.listWorkspaceDirectory({ workspaceRoot, path })
       } catch (error) {
         set((state) => ({
           loadingDirs: withoutLoadingDirs(state.loadingDirs, [targetKey, requestedRoot]),
@@ -168,7 +168,7 @@ export function createWriteFileActions({
       set({ fileLoading: true, fileError: null })
       try {
         if (isWriteImageFilePath(path)) {
-          const result = await window.dsGui.readWorkspaceImage({ path, workspaceRoot })
+          const result = await window.kunGui.readWorkspaceImage({ path, workspaceRoot })
           if (!result.ok) {
             set({ fileLoading: false, fileError: result.message })
             return
@@ -181,6 +181,9 @@ export function createWriteFileActions({
             fileContent: '',
             imageDataUrl: result.dataUrl,
             imageMimeType: result.mimeType,
+            pdfDataBase64: '',
+            pdfMimeType: '',
+            pdfMtimeMs: 0,
             fileSize: result.size,
             fileTruncated: false,
             fileLoading: false,
@@ -192,7 +195,35 @@ export function createWriteFileActions({
           return
         }
 
-        const result = await window.dsGui.readWorkspaceFile({ path, workspaceRoot })
+        if (isWritePdfFilePath(path)) {
+          const result = await window.kunGui.readWorkspacePdf({ path, workspaceRoot })
+          if (!result.ok) {
+            set({ fileLoading: false, fileError: result.message })
+            return
+          }
+          setLastSavedContent('')
+          rememberActiveFile(workspaceRoot, result.path)
+          set({
+            activeFilePath: result.path,
+            activeFileKind: 'pdf',
+            fileContent: '',
+            imageDataUrl: '',
+            imageMimeType: '',
+            pdfDataBase64: result.dataBase64,
+            pdfMimeType: result.mimeType,
+            pdfMtimeMs: result.mtimeMs,
+            fileSize: result.size,
+            fileTruncated: false,
+            fileLoading: false,
+            fileError: null,
+            saveStatus: 'saved',
+            selection: emptySelection(),
+            quotedSelections: []
+          })
+          return
+        }
+
+        const result = await window.kunGui.readWorkspaceFile({ path, workspaceRoot })
         if (!result.ok) {
           set({ fileLoading: false, fileError: result.message })
           return
@@ -205,6 +236,9 @@ export function createWriteFileActions({
           fileContent: result.content,
           imageDataUrl: '',
           imageMimeType: '',
+          pdfDataBase64: '',
+          pdfMimeType: '',
+          pdfMtimeMs: 0,
           fileSize: result.size,
           fileTruncated: result.truncated,
           fileLoading: false,
@@ -223,6 +257,9 @@ export function createWriteFileActions({
             fileContent: '',
             imageDataUrl: writePathToFileUrl(path),
             imageMimeType: imageMimeTypeFromPath(path),
+            pdfDataBase64: '',
+            pdfMimeType: '',
+            pdfMtimeMs: 0,
             fileSize: 0,
             fileTruncated: false,
             fileLoading: false,
@@ -243,9 +280,9 @@ export function createWriteFileActions({
     },
 
     createFile: async (workspaceRoot, path, content = '') => {
-      let result: Awaited<ReturnType<typeof window.dsGui.createWorkspaceFile>>
+      let result: Awaited<ReturnType<typeof window.kunGui.createWorkspaceFile>>
       try {
-        result = await window.dsGui.createWorkspaceFile({ workspaceRoot, path, content })
+        result = await window.kunGui.createWorkspaceFile({ workspaceRoot, path, content })
       } catch (error) {
         set({ fileError: formatActionError(error) })
         return null
@@ -260,9 +297,9 @@ export function createWriteFileActions({
     },
 
     createDirectory: async (workspaceRoot, path) => {
-      let result: Awaited<ReturnType<typeof window.dsGui.createWorkspaceDirectory>>
+      let result: Awaited<ReturnType<typeof window.kunGui.createWorkspaceDirectory>>
       try {
-        result = await window.dsGui.createWorkspaceDirectory({ workspaceRoot, path })
+        result = await window.kunGui.createWorkspaceDirectory({ workspaceRoot, path })
       } catch (error) {
         set({ fileError: formatActionError(error) })
         return null
@@ -282,9 +319,9 @@ export function createWriteFileActions({
 
     renameEntry: async (workspaceRoot, path, newName) => {
       cancelExternalSyncAnimation()
-      let result: Awaited<ReturnType<typeof window.dsGui.renameWorkspaceEntry>>
+      let result: Awaited<ReturnType<typeof window.kunGui.renameWorkspaceEntry>>
       try {
-        result = await window.dsGui.renameWorkspaceEntry({ workspaceRoot, path, newName })
+        result = await window.kunGui.renameWorkspaceEntry({ workspaceRoot, path, newName })
       } catch (error) {
         set({ fileError: formatActionError(error) })
         return null
@@ -302,7 +339,7 @@ export function createWriteFileActions({
             : state.activeFilePath
         const keepActiveFile = nextActiveFilePath ? isWriteWorkspaceFilePath(nextActiveFilePath) : false
         const nextActiveFileKind = keepActiveFile && nextActiveFilePath
-          ? isWriteImageFilePath(nextActiveFilePath) ? 'image' : 'text'
+          ? isWriteImageFilePath(nextActiveFilePath) ? 'image' : isWritePdfFilePath(nextActiveFilePath) ? 'pdf' : 'text'
           : null
         const expandedDirs = new Set<string>()
         for (const dirPath of state.expandedDirs) {
@@ -320,11 +357,14 @@ export function createWriteFileActions({
           fileContent: nextActiveFileKind === 'text' ? state.fileContent : '',
           imageDataUrl: nextActiveFileKind === 'image' ? state.imageDataUrl : '',
           imageMimeType: nextActiveFileKind === 'image' ? state.imageMimeType : '',
+          pdfDataBase64: nextActiveFileKind === 'pdf' ? state.pdfDataBase64 : '',
+          pdfMimeType: nextActiveFileKind === 'pdf' ? state.pdfMimeType : '',
+          pdfMtimeMs: nextActiveFileKind === 'pdf' ? state.pdfMtimeMs : 0,
           fileSize: keepActiveFile ? state.fileSize : 0,
           fileTruncated: keepActiveFile ? state.fileTruncated : false,
           saveStatus: keepActiveFile ? state.saveStatus : 'saved',
-          selection: nextActiveFileKind === 'text' ? state.selection : emptySelection(),
-          quotedSelections: nextActiveFileKind === 'text' ? state.quotedSelections : [],
+          selection: nextActiveFileKind === 'text' || nextActiveFileKind === 'pdf' ? state.selection : emptySelection(),
+          quotedSelections: nextActiveFileKind === 'text' || nextActiveFileKind === 'pdf' ? state.quotedSelections : [],
           expandedDirs,
           entriesByDir: {},
           fileError: null
@@ -341,9 +381,9 @@ export function createWriteFileActions({
 
     deleteEntry: async (workspaceRoot, path) => {
       cancelExternalSyncAnimation()
-      let result: Awaited<ReturnType<typeof window.dsGui.deleteWorkspaceEntry>>
+      let result: Awaited<ReturnType<typeof window.kunGui.deleteWorkspaceEntry>>
       try {
-        result = await window.dsGui.deleteWorkspaceEntry({ workspaceRoot, path })
+        result = await window.kunGui.deleteWorkspaceEntry({ workspaceRoot, path })
       } catch (error) {
         set({ fileError: formatActionError(error) })
         return false

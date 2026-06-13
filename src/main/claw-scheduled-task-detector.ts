@@ -1,4 +1,10 @@
-import type { AppSettingsV1, ModelEndpointFormat, ScheduleRunMode, ScheduledTaskV1 } from '../shared/app-settings'
+import type {
+  AppSettingsV1,
+  ModelEndpointFormat,
+  ScheduleReasoningEffort,
+  ScheduleRunMode,
+  ScheduledTaskV1
+} from '../shared/app-settings'
 import {
   DEFAULT_SCHEDULE_MODEL,
   DEFAULT_SCHEDULE_REASONING_EFFORT,
@@ -316,7 +322,9 @@ export async function detectClawScheduledTaskRequest(
 export function buildScheduledTaskFromDetectedRequest(options: {
   request: ParsedClawScheduledTaskRequest
   workspaceRoot: string
+  providerId?: string
   model: string
+  reasoningEffort?: ScheduleReasoningEffort
   mode: ScheduleRunMode
   id: string
   now?: string
@@ -328,8 +336,10 @@ export function buildScheduledTaskFromDetectedRequest(options: {
     enabled: true,
     prompt: options.request.taskPrompt,
     workspaceRoot: options.workspaceRoot.trim(),
+    clawChannelId: '',
+    providerId: options.providerId?.trim() ?? '',
     model: options.model.trim() || DEFAULT_SCHEDULE_MODEL,
-    reasoningEffort: DEFAULT_SCHEDULE_REASONING_EFFORT,
+    reasoningEffort: options.reasoningEffort ?? DEFAULT_SCHEDULE_REASONING_EFFORT,
     mode: options.mode,
     schedule: {
       kind: 'at',

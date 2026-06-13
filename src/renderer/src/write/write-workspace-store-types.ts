@@ -1,18 +1,24 @@
-import type { WriteInlineCompletionSettingsV1 } from '@shared/app-settings'
+import type { WriteInlineCompletionSettingsV1, WriteSelectionAssistSettingsV1 } from '@shared/app-settings'
 import type { WorkspaceEntry } from '@shared/workspace-file'
 import type { WriteEditorSelectionState } from '../components/write/WriteMarkdownEditor'
 import type { WriteQuotedSelection } from './quoted-selection'
 import type { WriteRecentEdit } from './recent-edits'
 
-export type WritePreviewMode = 'source' | 'live' | 'split' | 'preview'
+export type WritePreviewMode = 'rich' | 'source' | 'live' | 'split' | 'preview'
 export type WriteSaveStatus = 'saved' | 'dirty' | 'saving' | 'error'
-export type WriteActiveFileKind = 'text' | 'image'
+export type WriteActiveFileKind = 'text' | 'image' | 'pdf'
 
 export type WriteWorkspaceState = {
   defaultWorkspaceRoot: string
   workspaceRoots: string[]
   inlineCompletion: WriteInlineCompletionSettingsV1
   inlineCompletionApiReady: boolean
+  /** Selection toolbar AI assists: quick action prompts + infographic prompt. */
+  selectionAssist: WriteSelectionAssistSettingsV1
+  /** True when the image generation provider is fully configured (enables 生成信息图). */
+  imageGenReady: boolean
+  /** True when the primary chat provider is configured (enables 生成交互原型). */
+  prototypeReady: boolean
   settingsLoading: boolean
   settingsError: string | null
   workspaceRoot: string
@@ -26,6 +32,9 @@ export type WriteWorkspaceState = {
   fileContent: string
   imageDataUrl: string
   imageMimeType: string
+  pdfDataBase64: string
+  pdfMimeType: string
+  pdfMtimeMs: number
   fileSize: number
   fileTruncated: boolean
   fileError: string | null
@@ -34,6 +43,7 @@ export type WriteWorkspaceState = {
   previewMode: WritePreviewMode
   assistantOpen: boolean
   assistantModel: string
+  assistantProviderId: string
   selection: WriteEditorSelectionState
   quotedSelections: WriteQuotedSelection[]
   recentEdits: WriteRecentEdit[]
@@ -68,7 +78,7 @@ export type WriteWorkspaceState = {
   setFileError: (message: string | null) => void
   setPreviewMode: (mode: WritePreviewMode) => void
   setAssistantOpen: (open: boolean) => void
-  setAssistantModel: (model: string) => void
+  setAssistantModel: (model: string, providerId?: string) => void
   setSelection: (selection: WriteEditorSelectionState) => void
   recordRecentEdits: (edits: WriteRecentEdit[]) => void
   quoteCurrentSelection: (workspaceRoot: string) => void

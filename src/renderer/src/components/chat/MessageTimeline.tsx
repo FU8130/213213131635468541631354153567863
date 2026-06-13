@@ -1,22 +1,30 @@
 import type { ReactElement, RefObject } from 'react'
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ChatBlock, RuntimeConnectionStatus } from '../../agent/types'
 import { useChatStore } from '../../store/chat-store'
+import { threadHasPendingRuntimeWork } from '../../store/chat-store-runtime-helpers'
 import { useTimelineStores } from './use-timeline-stores'
 import { useTimelineScroll } from './use-timeline-scroll'
 import { deriveTurnSections } from './derive-turn-sections'
 import { MessageTimelineEmptyHero, ThreadForkBanner, ThreadForkPoint } from './message-timeline-empty'
-import { MessageBubble } from './message-timeline-bubbles'
+import { GeneratedFilesPanel, MessageBubble } from './message-timeline-bubbles'
 import { ReviewPlanCard, ReviewSummaryCard, TurnChangeSummary, WorkMetaRow } from './message-timeline-cards'
 import { ProcessSectionRow, groupProcessSections } from './message-timeline-process'
-import { AnimatedWorkLogo } from './AnimatedWorkLogo'
+import {
+  AnimatedWorkLogo,
+  IKUN_WORK_LOGO_VARIANT_LABEL_KEYS,
+  WORK_LOGO_SWIM_MODE_LABEL_KEYS,
+  useIkunWorkLogoVariant,
+  useWorkLogoSwimMode
+} from './AnimatedWorkLogo'
+import type { UiPluginLabelKey } from '@shared/ui-plugin'
+import { useUiPluginWorkLabel } from '../../store/ui-plugin-store'
 import {
   groupTurns,
   sameTurnContent,
   splitThink,
   stableTurnKey,
-  turnHasPendingRuntimeWork,
   type Turn
 } from './message-timeline-turns'
 import { extractPlanMetadataFromBlock } from '../../plan/plan-tool'
@@ -34,6 +42,7 @@ type Props = {
   onRetryConnection: () => void
   onOpenSettings: () => void
   onSelectSuggestion?: (prompt: string) => void
+  focusModeEnabled?: boolean
   devPreviewCard?: ReactElement | null
   /** Disables the inline Review Plan card's Build action while a turn runs. */
   planActionsBusy?: boolean
@@ -45,6 +54,16 @@ type Props = {
 
 const TURN_PAGE_SIZE = 18
 const AUTO_COLLAPSE_THRESHOLD = 24
+
+export function goalTimelinePaddingClass(route: 'chat' | 'claw', hasActiveGoal: boolean): string {
+  return route === 'chat' && hasActiveGoal ? 'pb-32 md:pb-40' : 'pb-10'
+}
+
+export function liveTurnProgressClass(hasActiveGoal: boolean): string {
+  return hasActiveGoal
+    ? 'flex w-fit max-w-full items-center gap-2 py-0.5 text-[14px] font-medium text-ds-muted mb-16 md:mb-20'
+    : 'flex w-fit max-w-full items-center gap-2 py-0.5 text-[14px] font-medium text-ds-muted'
+}
 
 function blockScrollStamp(block: ChatBlock | undefined): string {
   if (!block) return ''
@@ -67,6 +86,24 @@ function blockScrollStamp(block: ChatBlock | undefined): string {
   }
 }
 
+function turnPreview(turn: Turn, fallback: string): string {
+  const text = turn.user?.text.trim() ?? ''
+  if (!text) return fallback
+  const oneLine = text.replace(/\s+/g, ' ')
+  return oneLine.length > 48 ? `${oneLine.slice(0, 47).trimEnd()}...` : oneLine
+}
+
+function processBlockHasError(block: ChatBlock): boolean {
+  return (
+    (block.kind === 'tool' && block.status === 'error') ||
+    (block.kind === 'compaction' && block.status === 'error') ||
+    (block.kind === 'review' && block.status === 'error') ||
+    (block.kind === 'approval' && block.status === 'error') ||
+    (block.kind === 'user_input' && block.status === 'error') ||
+    (block.kind === 'system' && block.severity === 'error')
+  )
+}
+
 export function MessageTimeline({
   blocks,
   liveReasoning,
@@ -77,6 +114,7 @@ export function MessageTimeline({
   onRetryConnection,
   onOpenSettings,
   onSelectSuggestion,
+  focusModeEnabled = false,
   devPreviewCard,
   planActionsBusy,
   onBuildPlan,
@@ -94,6 +132,7 @@ export function MessageTimeline({
     turnDurationByUserId,
     turnReasoningFirstAtByUserId,
     turnReasoningLastAtByUserId,
+    activeThreadGoal,
     activeThread
   } = useTimelineStores(activeThreadId)
 
@@ -101,6 +140,7 @@ export function MessageTimeline({
   const hasContent = blocks.length > 0 || live || liveReasoning
   const endRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const turnRefMap = useRef(new Map<string, HTMLDivElement>())
 
   const turns = useMemo(() => groupTurns(blocks), [blocks])
   const latestBlock = blocks[blocks.length - 1]
@@ -135,6 +175,29 @@ export function MessageTimeline({
     () => (hiddenTurnCount > 0 ? turns.slice(hiddenTurnCount) : turns),
     [hiddenTurnCount, turns]
   )
+  const visibleTurnAnchors = useMemo(
+    () => {
+      const anchors: { key: string; label: string; title: string }[] = []
+      let questionIndex = turns
+        .slice(0, hiddenTurnCount)
+        .filter((turn) => turn.user)
+        .length
+
+      visibleTurns.forEach((turn, index) => {
+        if (!turn.user) return
+        questionIndex += 1
+        const absoluteTurnIndex = hiddenTurnCount + index
+        const key = stableTurnKey(turn, absoluteTurnIndex)
+        anchors.push({
+          key,
+          label: String(questionIndex),
+          title: turnPreview(turn, t('timelineJumpTurn', { index: questionIndex }))
+        })
+      })
+      return anchors
+    },
+    [hiddenTurnCount, t, turns, visibleTurns]
+  )
   const forkedFromTitle = activeThread?.forkedFromTitle?.trim() ?? ''
   const forkBoundaryTurnCount =
     typeof activeThread?.forkedFromTurnCount === 'number'
@@ -150,9 +213,36 @@ export function MessageTimeline({
     return () => window.clearInterval(id)
   }, [busy, currentTurnUserId])
 
+  const jumpToTurn = (key: string): void => {
+    const target = turnRefMap.current.get(key)
+    if (!target) return
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   return (
-    <div ref={containerRef} className="ds-no-drag flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
-      <div className="ds-message-timeline-content ds-chat-column-inset mx-auto flex w-full min-w-0 max-w-4xl flex-col gap-8 pb-10 pt-8">
+    <div ref={containerRef} className="ds-no-drag relative flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
+      {visibleTurnAnchors.length > 2 ? (
+        <nav
+          aria-label={t('timelineJumpRailLabel')}
+          className="timeline-jump-rail"
+        >
+          {visibleTurnAnchors.map((anchor) => (
+            <button
+              key={anchor.key}
+              type="button"
+              className="timeline-jump-rail-button"
+              title={anchor.title}
+              aria-label={anchor.title}
+              onClick={() => jumpToTurn(anchor.key)}
+            >
+              {anchor.label}
+            </button>
+          ))}
+        </nav>
+      ) : null}
+      <div className={`ds-message-timeline-content ds-chat-column-inset mx-auto flex w-full min-w-0 max-w-4xl flex-col gap-8 pt-8 ${
+        goalTimelinePaddingClass(heroRoute, Boolean(activeThreadGoal))
+      }`}>
         {!hasContent || !activeThreadId ? (
           <MessageTimelineEmptyHero
             route={heroRoute}
@@ -164,6 +254,7 @@ export function MessageTimeline({
             onRetry={onRetryConnection}
             onOpenSettings={onOpenSettings}
             onSelectSuggestion={onSelectSuggestion}
+            focusModeEnabled={focusModeEnabled}
           />
         ) : null}
 
@@ -200,13 +291,24 @@ export function MessageTimeline({
             typeof reasoningFirst === 'number' && typeof reasoningLast === 'number'
               ? Math.max(0, reasoningLast - reasoningFirst)
               : undefined
-          const turnPending = turnHasPendingRuntimeWork(turn)
+          const turnPending = threadHasPendingRuntimeWork(turn.blocks)
           const isLatestTurn = index === visibleTurns.length - 1
           const hasLiveStream = isLatestTurn && !!(liveReasoning.trim() || live.trim())
           const showForkPoint =
             forkBoundaryTurnCount !== undefined && absoluteTurnIndex === forkBoundaryTurnCount
+          const turnKey = stableTurnKey(turn, absoluteTurnIndex)
           return (
-            <Fragment key={stableTurnKey(turn, absoluteTurnIndex)}>
+            <div
+              key={turnKey}
+              ref={(node) => {
+                if (node) {
+                  turnRefMap.current.set(turnKey, node)
+                } else {
+                  turnRefMap.current.delete(turnKey)
+                }
+              }}
+              className="scroll-mt-6"
+            >
               {showForkPoint ? <ThreadForkPoint parentTitle={forkedFromTitle} /> : null}
               <MemoMessageTurn
                 turn={turn}
@@ -221,7 +323,7 @@ export function MessageTimeline({
                 onOpenPlan={onOpenPlan}
                 viewportRef={containerRef}
               />
-            </Fragment>
+            </div>
           )
         })}
 
@@ -299,6 +401,7 @@ function MessageTurn({
   viewportRef: RefObject<HTMLDivElement | null>
 }): ReactElement {
   const workspaceRoot = useChatStore((s) => s.workspaceRoot)
+  const activeThreadGoal = useChatStore((s) => s.activeThreadGoal)
   // Inline Review Plan card: surfaced under a turn that produced a
   // successful `create_plan` result so the user can open/build the plan
   // without leaving the conversation.
@@ -315,9 +418,8 @@ function MessageTurn({
   const { think: liveThink, content: liveContent } = splitThink(live)
   const liveProcessText = [liveReasoning, liveThink].filter(Boolean).join('\n\n')
   const [workExpandedOverride, setWorkExpandedOverride] = useState<boolean | null>(null)
-  const workExpanded = workExpandedOverride ?? isProcessing
 
-  const { processBlocks, assistantContentBlocks, turnFileChanges } = useMemo(
+  const { processBlocks, assistantContentBlocks, generatedFileBlocks, turnFileChanges } = useMemo(
     () =>
       deriveTurnSections({
         turn,
@@ -328,6 +430,8 @@ function MessageTurn({
       }),
     [turn, isProcessing, liveProcessText, liveContent, workspaceRoot]
   )
+  const hasProcessError = processBlocks.some(processBlockHasError)
+  const workExpanded = hasProcessError || (workExpandedOverride ?? isProcessing)
   const reviewBlocks = useMemo(
     () => turn.blocks.filter((block) => block.kind === 'review'),
     [turn.blocks]
@@ -360,6 +464,7 @@ function MessageTurn({
             durationMs={durationMs}
             reasoningDurationMs={reasoningDurationMs}
             expanded={workExpanded}
+            collapsible={!hasProcessError}
             onToggle={() => setWorkExpandedOverride((value) => !(value ?? isProcessing))}
           />
           {workExpanded && processSections.length > 0 ? (
@@ -387,11 +492,13 @@ function MessageTurn({
         <MessageBubble block={{ kind: 'assistant', id: 'live-assistant', text: liveContent }} />
       ) : null}
 
+      <GeneratedFilesPanel blocks={generatedFileBlocks} />
+
       {reviewBlocks.map((review) => (
         <ReviewSummaryCard key={review.id} review={review} />
       ))}
 
-      {isProcessing ? <LiveTurnProgressRow /> : null}
+      {isProcessing ? <LiveTurnProgressRow hasActiveGoal={Boolean(activeThreadGoal)} /> : null}
 
       {!isProcessing && devPreviewCard ? devPreviewCard : null}
 
@@ -412,15 +519,32 @@ function MessageTurn({
   )
 }
 
-function LiveTurnProgressRow(): ReactElement {
-  const { t } = useTranslation('common')
+function LiveTurnProgressRow({ hasActiveGoal }: { hasActiveGoal: boolean }): ReactElement {
+  const { t, i18n } = useTranslation('common')
+  const swimMode = useWorkLogoSwimMode(true)
+  const ikunVariant = useIkunWorkLogoVariant(true)
+  // iKun 模式是全局 html 属性;进行行每个回合重新挂载,挂载时读取即可
+  const [ikunModeOn] = useState(
+    () =>
+      typeof document !== 'undefined' &&
+      document.documentElement.getAttribute('data-ikun-mode') === 'on'
+  )
+  const swimLabelKey = WORK_LOGO_SWIM_MODE_LABEL_KEYS[swimMode]
+  // UI 插件可声明自己的进行中文案(按泳姿键、按语言),未声明则用默认文案
+  const pluginLabel = useUiPluginWorkLabel(
+    swimLabelKey as UiPluginLabelKey,
+    i18n.language ?? 'zh'
+  )
+  const label = ikunModeOn
+    ? t(IKUN_WORK_LOGO_VARIANT_LABEL_KEYS[ikunVariant])
+    : pluginLabel ?? t(swimLabelKey)
 
   return (
-    <div className="flex w-fit max-w-full items-center gap-2 py-0.5 text-[14px] font-medium text-ds-muted">
+    <div className={liveTurnProgressClass(hasActiveGoal)}>
       <span className="ds-work-logo-slot ds-work-logo-slot-sm mr-0.5">
-        <AnimatedWorkLogo active phase="trail" size="sm" />
+        <AnimatedWorkLogo active ikunVariant={ikunVariant} mode={swimMode} phase="trail" size="sm" />
       </span>
-      <span className="ds-shiny-text">{t('working')}</span>
+      <span className="ds-shiny-text">{label}</span>
     </div>
   )
 }

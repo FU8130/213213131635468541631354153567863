@@ -1,19 +1,33 @@
 import { describe, expect, it } from 'vitest'
-import { shouldAnimateStreamingText } from './StreamdownAssistant'
+import { nextVisibleLength } from './StreamdownAssistant'
 
-describe('shouldAnimateStreamingText', () => {
-  it('keeps the lightweight reveal for short single-line text', () => {
-    expect(shouldAnimateStreamingText('正在检查配置。')).toBe(true)
-    expect(shouldAnimateStreamingText('Checking the CSS variables.')).toBe(true)
+describe('nextVisibleLength', () => {
+  it('stays put when caught up', () => {
+    expect(nextVisibleLength(120, 120)).toBe(120)
   })
 
-  it('lets multiline streaming render from the actual SSE sequence', () => {
-    expect(shouldAnimateStreamingText('First line\nSecond line')).toBe(false)
-    expect(shouldAnimateStreamingText('First paragraph\n\nSecond paragraph')).toBe(false)
+  it('snaps down instantly when the live text resets', () => {
+    expect(nextVisibleLength(120, 40)).toBe(40)
+    expect(nextVisibleLength(120, 0)).toBe(0)
   })
 
-  it('does not animate structured markdown while it is still streaming', () => {
-    expect(shouldAnimateStreamingText('- one\n- two')).toBe(false)
-    expect(shouldAnimateStreamingText('Use `npm test` next.')).toBe(false)
+  it('advances at least one char per frame on a small backlog', () => {
+    expect(nextVisibleLength(100, 101)).toBe(101)
+    expect(nextVisibleLength(100, 104)).toBe(101)
+  })
+
+  it('accelerates with backlog but caps the per-frame step so bursts stay readable', () => {
+    expect(nextVisibleLength(0, 80)).toBe(10)
+    expect(nextVisibleLength(0, 100_000)).toBe(32)
+  })
+
+  it('never overshoots the target', () => {
+    let current = 0
+    const target = 1234
+    for (let i = 0; i < 10_000 && current < target; i += 1) {
+      current = nextVisibleLength(current, target)
+      expect(current).toBeLessThanOrEqual(target)
+    }
+    expect(current).toBe(target)
   })
 })

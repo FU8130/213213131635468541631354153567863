@@ -6,9 +6,11 @@ import {
   DEFAULT_WRITE_INLINE_COMPLETION_MODEL,
   DEFAULT_WRITE_INLINE_LONG_COMPLETION_DEBOUNCE_MS,
   DEFAULT_WRITE_INLINE_LONG_COMPLETION_MAX_TOKENS,
-  DEFAULT_WRITE_INLINE_LONG_COMPLETION_MIN_ACCEPT_SCORE
+  DEFAULT_WRITE_INLINE_LONG_COMPLETION_MIN_ACCEPT_SCORE,
+  defaultWriteSelectionAssistSettings
 } from '@shared/app-settings'
 import { quotedSelectionFromEditor } from './quoted-selection'
+import { writeSelectionStatesEqual } from './write-selection'
 import { trimWriteRecentEdits } from './recent-edits'
 import type { WriteWorkspaceState } from './write-workspace-store-types'
 import { createWriteSettingsActions } from './write-workspace-settings-actions'
@@ -16,6 +18,7 @@ import { createWriteFileActions } from './write-workspace-file-actions'
 import { writeBrowserStorageItem } from '../lib/browser-storage'
 import {
   WRITE_ASSISTANT_MODEL_KEY,
+  WRITE_ASSISTANT_PROVIDER_KEY,
   WRITE_ASSISTANT_OPEN_KEY,
   WRITE_PREVIEW_MODE_KEY,
   commonPrefixLength,
@@ -23,9 +26,11 @@ import {
   formatWriteImageLoadError,
   initialState,
   isMissingImageIpc,
+  normalizeWriteAssistantModel,
   pathsEqual,
   readStoredAssistantModel,
   readStoredAssistantOpen,
+  readStoredAssistantProviderId,
   readStoredPreviewMode,
   writeBasenameFromPath,
   writeJoinPath,
@@ -56,6 +61,8 @@ export const useWriteWorkspaceStore = create<WriteWorkspaceState>((set, get) => 
     enabled: true,
     retrievalEnabled: true,
     longCompletionEnabled: true,
+    inheritProvider: true,
+    providerId: '',
     apiKey: '',
     baseUrl: '',
     inheritModel: true,
@@ -68,12 +75,16 @@ export const useWriteWorkspaceStore = create<WriteWorkspaceState>((set, get) => 
     longMaxTokens: DEFAULT_WRITE_INLINE_LONG_COMPLETION_MAX_TOKENS
   },
   inlineCompletionApiReady: false,
+  selectionAssist: defaultWriteSelectionAssistSettings(),
+  imageGenReady: false,
+  prototypeReady: false,
   settingsLoading: false,
   settingsError: null,
   ...initialState(),
   previewMode: readStoredPreviewMode(),
   assistantOpen: readStoredAssistantOpen(),
   assistantModel: readStoredAssistantModel(),
+  assistantProviderId: readStoredAssistantProviderId(),
 
   ...createWriteSettingsActions({ set, get }),
   ...createWriteFileActions({
@@ -111,9 +122,9 @@ export const useWriteWorkspaceStore = create<WriteWorkspaceState>((set, get) => 
     let size = options.size
     let truncated = options.truncated
     if (typeof content !== 'string') {
-      let result: Awaited<ReturnType<typeof window.dsGui.readWorkspaceFile>>
+      let result: Awaited<ReturnType<typeof window.kunGui.readWorkspaceFile>>
       try {
-        result = await window.dsGui.readWorkspaceFile({
+        result = await window.kunGui.readWorkspaceFile({
           path: snapshot.activeFilePath,
           workspaceRoot
         })
@@ -222,7 +233,7 @@ export const useWriteWorkspaceStore = create<WriteWorkspaceState>((set, get) => 
     if (path && !pathsEqual(path, snapshot.activeFilePath)) return false
 
     try {
-      const result = await window.dsGui.readWorkspaceImage({
+      const result = await window.kunGui.readWorkspaceImage({
         path: snapshot.activeFilePath,
         workspaceRoot
       })
@@ -273,7 +284,7 @@ export const useWriteWorkspaceStore = create<WriteWorkspaceState>((set, get) => 
     }
     set({ saveStatus: 'saving' })
     try {
-      const result = await window.dsGui.writeWorkspaceFile({
+      const result = await window.kunGui.writeWorkspaceFile({
         path: state.activeFilePath,
         workspaceRoot,
         content: state.fileContent
@@ -308,13 +319,18 @@ export const useWriteWorkspaceStore = create<WriteWorkspaceState>((set, get) => 
     set({ assistantOpen: open })
   },
 
-  setAssistantModel: (model) => {
-    const normalized = model.trim()
+  setAssistantModel: (model, providerId) => {
+    const normalized = normalizeWriteAssistantModel(model)
     writeBrowserStorageItem(WRITE_ASSISTANT_MODEL_KEY, normalized)
-    set({ assistantModel: normalized })
+    const normalizedProviderId = providerId?.trim() ?? ''
+    writeBrowserStorageItem(WRITE_ASSISTANT_PROVIDER_KEY, normalizedProviderId)
+    set({ assistantModel: normalized, assistantProviderId: normalizedProviderId })
   },
 
-  setSelection: (selection) => set({ selection }),
+  setSelection: (selection) => {
+    if (writeSelectionStatesEqual(get().selection, selection)) return
+    set({ selection })
+  },
 
   recordRecentEdits: (edits) => {
     if (edits.length === 0) return

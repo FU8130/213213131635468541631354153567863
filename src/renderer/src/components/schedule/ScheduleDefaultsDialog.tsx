@@ -2,10 +2,17 @@ import type { ReactElement } from 'react'
 import { useState } from 'react'
 import { X } from 'lucide-react'
 import {
+  DEFAULT_SCHEDULE_MODEL,
   SCHEDULE_MODEL_IDS,
   mergeScheduleSettings,
   type ScheduleSettingsV1
 } from '@shared/app-settings'
+
+type ScheduleModelProviderOption = {
+  providerId: string
+  label: string
+  modelIds: string[]
+}
 
 function splitLooseList(value: string): string[] {
   return value
@@ -14,13 +21,52 @@ function splitLooseList(value: string): string[] {
     .filter(Boolean)
 }
 
+function modelIdsEqual(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase()
+}
+
+function firstConcreteModel(modelIds: readonly string[], fallback = DEFAULT_SCHEDULE_MODEL): string {
+  return modelIds.find((model) => model.trim() && model.trim().toLowerCase() !== 'auto') ?? fallback
+}
+
+function resolveDefaultsModelSelection(
+  providers: readonly ScheduleModelProviderOption[],
+  providerId: string | undefined,
+  model: string | undefined
+): { providerId: string; model: string } {
+  const requestedProviderId = providerId?.trim() ?? ''
+  const requestedModel = model?.trim() ?? ''
+  const providerById = providers.find((provider) => provider.providerId === requestedProviderId)
+  const providerByModel = requestedModel && requestedModel.toLowerCase() !== 'auto'
+    ? providers.find((provider) => provider.modelIds.some((id) => modelIdsEqual(id, requestedModel)))
+    : undefined
+  const provider = providerById ?? providerByModel ?? providers[0]
+  if (!provider) {
+    return {
+      providerId: requestedProviderId,
+      model: requestedModel && requestedModel.toLowerCase() !== 'auto' ? requestedModel : DEFAULT_SCHEDULE_MODEL
+    }
+  }
+  return {
+    providerId: provider.providerId,
+    model:
+      requestedModel &&
+      requestedModel.toLowerCase() !== 'auto' &&
+      provider.modelIds.some((id) => modelIdsEqual(id, requestedModel))
+        ? requestedModel
+        : firstConcreteModel(provider.modelIds)
+  }
+}
+
 export function ScheduleDefaultsDialog({
   schedule,
+  modelProviders,
   onClose,
   onSave,
   t
 }: {
   schedule: ScheduleSettingsV1
+  modelProviders: ScheduleModelProviderOption[]
   onClose: () => void
   onSave: (patch: Parameters<typeof mergeScheduleSettings>[1]) => Promise<void>
   t: (key: string, values?: Record<string, unknown>) => string
@@ -28,6 +74,7 @@ export function ScheduleDefaultsDialog({
   const [draft, setDraft] = useState({
     enabled: schedule.enabled,
     defaultWorkspaceRoot: schedule.defaultWorkspaceRoot,
+    providerId: schedule.providerId ?? '',
     model: schedule.model,
     promptPrefix: schedule.promptPrefix,
     defaultNames: schedule.skills.defaultNames.join(', '),
@@ -39,10 +86,12 @@ export function ScheduleDefaultsDialog({
   }
 
   const save = async (): Promise<void> => {
+    const selection = resolveDefaultsModelSelection(modelProviders, draft.providerId, draft.model)
     await onSave({
       enabled: draft.enabled,
       defaultWorkspaceRoot: draft.defaultWorkspaceRoot,
-      model: draft.model,
+      providerId: selection.providerId,
+      model: selection.model,
       mode: 'agent',
       promptPrefix: draft.promptPrefix,
       skills: {
@@ -50,6 +99,24 @@ export function ScheduleDefaultsDialog({
         extraDirs: splitLooseList(draft.extraDirs)
       }
     })
+  }
+  const fallbackProviders = modelProviders.length > 0
+    ? modelProviders
+    : [{
+        providerId: draft.providerId,
+        label: draft.providerId || 'Default',
+        modelIds: [...SCHEDULE_MODEL_IDS]
+      }]
+  const selection = resolveDefaultsModelSelection(fallbackProviders, draft.providerId, draft.model)
+  const selectedProvider = fallbackProviders.find((provider) => provider.providerId === selection.providerId) ?? null
+  const selectedModelIds = selectedProvider?.modelIds ?? [selection.model]
+  const updateProvider = (providerId: string): void => {
+    const next = resolveDefaultsModelSelection(fallbackProviders, providerId, '')
+    update({ providerId: next.providerId, model: next.model })
+  }
+  const updateModel = (model: string): void => {
+    const next = resolveDefaultsModelSelection(fallbackProviders, selection.providerId, model)
+    update({ providerId: next.providerId, model: next.model })
   }
 
   return (
@@ -91,15 +158,29 @@ export function ScheduleDefaultsDialog({
           </label>
         </div>
 
-        <div className="mt-4 grid gap-4">
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <label className="flex flex-col gap-2 text-[13px] font-medium text-ds-ink">
+            {t('scheduleProvider')}
+            <select
+              value={selection.providerId}
+              onChange={(event) => updateProvider(event.target.value)}
+              className="w-full rounded-xl border border-ds-border bg-ds-main/60 px-3 py-2 text-[14px] text-ds-ink outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/25"
+            >
+              {fallbackProviders.map((provider) => (
+                <option key={provider.providerId || provider.label} value={provider.providerId}>
+                  {provider.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="flex flex-col gap-2 text-[13px] font-medium text-ds-ink">
             {t('scheduleModel')}
             <select
-              value={draft.model}
-              onChange={(event) => update({ model: event.target.value })}
+              value={selection.model}
+              onChange={(event) => updateModel(event.target.value)}
               className="w-full rounded-xl border border-ds-border bg-ds-main/60 px-3 py-2 text-[14px] text-ds-ink outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/25"
             >
-              {SCHEDULE_MODEL_IDS.map((model) => (
+              {selectedModelIds.map((model) => (
                 <option key={model} value={model}>{model}</option>
               ))}
             </select>

@@ -26,9 +26,11 @@ import {
   upsertUserBlock
 } from './chat-store-runtime-helpers'
 import {
-  isWriteThreadId
+  isWriteThreadId,
+  type WriteThreadRegistry
 } from '../write/write-thread-registry'
 import { isSddAssistantThread } from '../sdd/sdd-thread-registry'
+import { notifySddChatTranscriptMirror } from '../sdd/sdd-chat-transcript'
 import { useWriteWorkspaceStore } from '../write/write-workspace-store'
 import {
   armBusyWatchdog as armBusyWatchdogImpl,
@@ -253,29 +255,29 @@ export function clearWatchedCompletionNotification(threadId: string): void {
 }
 
 function notifyTurnComplete(threadId: string | null, state: ChatState, dedupeKey: string): void {
-  if (!threadId || typeof window.dsGui?.showTurnCompleteNotification !== 'function') return
+  if (!threadId || typeof window.kunGui?.showTurnCompleteNotification !== 'function') return
   if (!rememberCompletionNotificationKey(dedupeKey)) return
 
   const threadTitle =
     state.threads.find((thread) => thread.id === threadId)?.title?.trim() ||
     i18n.t('common:untitledThread')
 
-  void window.dsGui
+  void window.kunGui
     .showTurnCompleteNotification({
       threadId,
       title: i18n.t('common:turnCompleteNotificationTitle'),
       body: i18n.t('common:turnCompleteNotificationBody', { title: threadTitle })
     })
     .then((result) => {
-      if (result.ok || typeof window.dsGui?.logError !== 'function') return
-      void window.dsGui.logError('notification', 'Turn completion notification failed', {
+      if (result.ok || typeof window.kunGui?.logError !== 'function') return
+      void window.kunGui.logError('notification', 'Turn completion notification failed', {
         message: result.message,
         threadId
       }).catch(() => undefined)
     })
     .catch((error: unknown) => {
-      if (typeof window.dsGui?.logError !== 'function') return
-      void window.dsGui.logError('notification', 'Turn completion notification failed', {
+      if (typeof window.kunGui?.logError !== 'function') return
+      void window.kunGui.logError('notification', 'Turn completion notification failed', {
         message: error instanceof Error ? error.message : String(error),
         threadId
       }).catch(() => undefined)
@@ -359,7 +361,8 @@ export function looksLikeActiveTurnError(error: unknown): boolean {
 
 export function isCodeThread(
   thread: NormalizedThread,
-  clawChannels: ClawImChannelV1[] = []
+  clawChannels: ClawImChannelV1[] = [],
+  writeRegistry?: WriteThreadRegistry
 ): boolean {
   const workspace = normalizeWorkspaceRoot(thread.workspace)
   return Boolean(workspace) &&
@@ -367,7 +370,7 @@ export function isCodeThread(
     !isInternalTemporaryWorkspace(thread.workspace) &&
     !isClawWorkspacePath(thread.workspace) &&
     !isClawThread(thread, clawChannels) &&
-    !isWriteThreadId(thread.id) &&
+    !isWriteThreadId(thread.id, writeRegistry) &&
     !isSddAssistantThread(thread)
 }
 
@@ -451,9 +454,47 @@ function runtimeErrorPayloadToError(event: {
   }))
 }
 
+function normalizeRuntimeErrorText(value: string | undefined): string {
+  return (value ?? '').replace(/\s+/g, ' ').trim()
+}
+
+function sameRuntimeErrorContent(
+  left: Extract<ChatBlock, { kind: 'system' }>,
+  right: Extract<ChatBlock, { kind: 'system' }>
+): boolean {
+  return (
+    left.severity === right.severity &&
+    left.code === right.code &&
+    normalizeRuntimeErrorText(left.text) === normalizeRuntimeErrorText(right.text) &&
+    normalizeRuntimeErrorText(left.detail) === normalizeRuntimeErrorText(right.detail)
+  )
+}
+
+function findSameTurnRuntimeErrorIndex(
+  blocks: ChatBlock[],
+  block: Extract<ChatBlock, { kind: 'system' }>
+): number {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const candidate = blocks[index]
+    if (candidate.kind === 'user') break
+    if (candidate.kind === 'system' && sameRuntimeErrorContent(candidate, block)) return index
+  }
+  return -1
+}
+
 function upsertRuntimeErrorBlock(blocks: ChatBlock[], block: Extract<ChatBlock, { kind: 'system' }>): ChatBlock[] {
   const index = blocks.findIndex((candidate) => candidate.kind === 'system' && candidate.id === block.id)
-  if (index < 0) return [...blocks, block]
+  if (index < 0) {
+    const duplicateIndex = findSameTurnRuntimeErrorIndex(blocks, block)
+    if (duplicateIndex < 0) return [...blocks, block]
+    const next = [...blocks]
+    const existing = next[duplicateIndex]
+    next[duplicateIndex] = {
+      ...block,
+      createdAt: existing?.createdAt ?? block.createdAt
+    }
+    return next
+  }
   const next = [...blocks]
   next[index] = block
   return next
@@ -467,7 +508,16 @@ export function armBusyWatchdog(
     timeoutMs: BUSY_WATCHDOG_MS,
     maxAttempts: MAX_BUSY_RECOVERY_ATTEMPTS,
     finalizeBusyState: finalizeTurnTiming,
-    flushLiveBlocks,
+    // Settle stuck running/pending blocks alongside the live flush: a
+    // timed-out turn that leaves a tool block "running" keeps
+    // hasPendingRuntimeWork true, which queues every later message
+    // forever ("queued, sends after current reply") with nothing to
+    // drain it.
+    flushLiveBlocks: (state, base) => {
+      const flushed = flushLiveBlocks(state, base)
+      const blocks = settlePendingRuntimeWorkAfterInterrupt(flushed.blocks ?? state.blocks)
+      return { ...flushed, blocks }
+    },
     busyTimeoutMessage: () => i18n.t('common:busyTimeout', { minutes: Math.round((BUSY_WATCHDOG_MS * MAX_BUSY_RECOVERY_ATTEMPTS) / 60_000) })
   })
 }
@@ -508,6 +558,14 @@ export function syncTurnCompletionPoll(
 export type ThreadEventSinkBinding = {
   threadId?: string
   signal?: AbortSignal
+  /**
+   * Seq the subscription replays from. Deltas at or below this floor are
+   * duplicates of text already in the timeline (a replayed backlog or a
+   * re-delivered live event) and are dropped instead of appended, so a
+   * stale cursor can no longer re-stream the whole conversation into the
+   * live bubble.
+   */
+  sinceSeq?: number
 }
 
 export function buildThreadEventSink(
@@ -516,6 +574,7 @@ export function buildThreadEventSink(
   binding: ThreadEventSinkBinding = {}
 ): ThreadEventSink {
   const boundThreadId = binding.threadId?.trim() ?? ''
+  let appliedDeltaSeqFloor = binding.sinceSeq ?? 0
   const isCurrentStream = (): boolean => {
     if (binding.signal?.aborted) return false
     return !boundThreadId || get().activeThreadId === boundThreadId
@@ -525,8 +584,11 @@ export function buildThreadEventSink(
     onSeq: (seq) => {
       if (!isCurrentStream()) return
       resetBusyRecoveryAttempts()
+      // Monotonic: heartbeats and replays must never rewind the cursor —
+      // a rewound lastSeq becomes the next subscription's since_seq and
+      // replays history.
       set((s) => ({
-        lastSeq: seq,
+        lastSeq: Math.max(s.lastSeq, seq),
         error: clearRuntimeStreamRecoveringError(s.error)
       }))
     },
@@ -565,10 +627,18 @@ export function buildThreadEventSink(
           error: clearRuntimeStreamRecoveringError(s.error)
         }
       }),
-    onDeltas: (deltas) =>
+    onDeltas: (rawDeltas) => {
+      if (!isCurrentStream()) return
+      const deltas: typeof rawDeltas = []
+      for (const delta of rawDeltas) {
+        if (typeof delta.seq === 'number') {
+          if (delta.seq <= appliedDeltaSeqFloor) continue
+          appliedDeltaSeqFloor = delta.seq
+        }
+        deltas.push(delta)
+      }
+      if (deltas.length === 0) return
       set((s) => {
-        if (!isCurrentStream()) return {}
-        if (deltas.length === 0) return {}
         resetBusyRecoveryAttempts()
         const nextError = clearRuntimeStreamRecoveringError(s.error)
         const seqs = deltas
@@ -591,25 +661,22 @@ export function buildThreadEventSink(
         let nextReasoningFirstAtByUserId = s.turnReasoningFirstAtByUserId
         let nextReasoningLastAtByUserId = s.turnReasoningLastAtByUserId
         const userId = s.currentTurnUserId
+        let sawReasoning = false
         for (const delta of deltas) {
           if (delta.kind === 'agent_reasoning') {
             liveReasoning += delta.text
-            if (userId) {
-              const now = Date.now()
-              if (typeof nextReasoningFirstAtByUserId[userId] !== 'number') {
-                nextReasoningFirstAtByUserId =
-                  nextReasoningFirstAtByUserId === s.turnReasoningFirstAtByUserId
-                    ? { ...s.turnReasoningFirstAtByUserId, [userId]: now }
-                    : { ...nextReasoningFirstAtByUserId, [userId]: now }
-              }
-              nextReasoningLastAtByUserId =
-                nextReasoningLastAtByUserId === s.turnReasoningLastAtByUserId
-                  ? { ...s.turnReasoningLastAtByUserId, [userId]: now }
-                  : { ...nextReasoningLastAtByUserId, [userId]: now }
-            }
+            sawReasoning = true
             continue
           }
           liveAssistant += delta.text
+        }
+        // Stamp reasoning timings once per batch instead of per delta.
+        if (sawReasoning && userId) {
+          const now = Date.now()
+          if (typeof nextReasoningFirstAtByUserId[userId] !== 'number') {
+            nextReasoningFirstAtByUserId = { ...s.turnReasoningFirstAtByUserId, [userId]: now }
+          }
+          nextReasoningLastAtByUserId = { ...s.turnReasoningLastAtByUserId, [userId]: now }
         }
         return {
           ...base,
@@ -622,7 +689,8 @@ export function buildThreadEventSink(
             ? { turnReasoningLastAtByUserId: nextReasoningLastAtByUserId }
             : {})
         }
-      }),
+      })
+    },
     onTool: (ev) => {
       if (!isCurrentStream()) return
       notifyWriteWorkspaceFileRefresh(get, ev)
@@ -1010,8 +1078,8 @@ export function buildThreadEventSink(
         }
         return base
       })
-      if (pendingMirror && assistantMirrorText && typeof window.dsGui?.mirrorClawChannelMessage === 'function') {
-        void window.dsGui.mirrorClawChannelMessage(
+      if (pendingMirror && assistantMirrorText && typeof window.kunGui?.mirrorClawChannelMessage === 'function') {
+        void window.kunGui.mirrorClawChannelMessage(
           pendingMirror.threadId,
           assistantMirrorText,
           'assistant'
@@ -1019,21 +1087,24 @@ export function buildThreadEventSink(
       }
       notifyTurnComplete(completedThreadId, completedState, completedKey)
       notifyWriteWorkspaceFileRefresh(get)
+      notifySddChatTranscriptMirror(get)
       syncTurnCompletionPoll(set, get)
       void get().refreshThreads()
       void get().drainQueuedMessages()
     },
-    onError: (err) => {
+    onError: (err, options) => {
       if (!isCurrentStream()) return
       resetBusyRecoveryAttempts()
       clearBusyWatchdog()
       const state = get()
       const message = formatRuntimeError(err)
       const detail = runtimeErrorDetail(err)
+      const terminal = options?.terminal === true
       const interrupted = isInterruptSettledError(err, message)
       takePendingClawFeishuMirror(state.currentTurnId)
       set((s) => {
         const wasBusy = s.busy
+        const shouldSettleTurn = terminal || !wasBusy || interrupted
         const out = flushLiveBlocks(s, {
           ...finalizeTurnTiming(s),
           error: interrupted ? null : message,
@@ -1043,14 +1114,29 @@ export function buildThreadEventSink(
         // should stay visible so the user can interrupt a stuck turn. The
         // watchdog (re-armed below) will eventually time out if the turn
         // never recovers.
-        if (!wasBusy || interrupted) {
+        if (shouldSettleTurn) {
           out.busy = false
           out.currentTurnId = null
           out.currentTurnUserId = null
           out.blocks = settlePendingRuntimeWorkAfterInterrupt(out.blocks ?? s.blocks)
+          if (terminal && s.activeThreadId) {
+            const w = { ...s.watchTurnCompletion }
+            delete w[s.activeThreadId]
+            clearWatchedCompletionNotification(s.activeThreadId)
+            out.watchTurnCompletion = w
+            const u = { ...s.unreadThreadIds }
+            delete u[s.activeThreadId]
+            out.unreadThreadIds = u
+          }
         }
         return out
       })
+      if (terminal) {
+        syncTurnCompletionPoll(set, get)
+        void get().refreshThreads?.()
+        void get().drainQueuedMessages?.()
+        return
+      }
       // Re-arm the watchdog so a stuck SSE stream doesn't leave the UI
       // permanently in the busy state.
       if (get().busy) armBusyWatchdog(set, get)

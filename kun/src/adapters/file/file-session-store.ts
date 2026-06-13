@@ -12,6 +12,13 @@ const DEFAULT_USAGE_EVENT_RETENTION_DAYS = 365
 const MS_PER_DAY = 86_400_000
 
 /**
+ * The agent loop reloads the full item history on every model step, so
+ * keep the deduped array for recently touched threads in memory instead
+ * of re-reading and re-parsing messages.jsonl each time.
+ */
+const ITEMS_CACHE_MAX_THREADS = 4
+
+/**
  * File-backed session store. Appends events and items to per-thread
  * JSONL files and keeps the canonical session snapshot in a small
  * JSON file. Replay reads the JSONL files end-to-end.
@@ -23,6 +30,8 @@ export class FileSessionStore implements SessionStore {
     retentionDays: number
     nowIso: () => string
   }
+  private readonly itemsCache = new Map<string, TurnItem[]>()
+  private readonly itemsCacheVersion = new Map<string, number>()
 
   constructor(options: {
     dataDir: string
@@ -61,12 +70,16 @@ export class FileSessionStore implements SessionStore {
     await this.ensureDir(this.threadDir(threadId))
     const path = this.messagesPath(threadId)
     await appendFile(path, `${JSON.stringify(item)}\n`, 'utf-8')
+    this.bumpItemsVersion(threadId)
+    this.applyItemToCache(threadId, item)
   }
 
   async rewriteItems(threadId: string, items: TurnItem[]): Promise<void> {
     await this.ensureDir(this.threadDir(threadId))
     const contents = items.map((item) => JSON.stringify(item)).join('\n')
     await this.atomicWrite(this.messagesPath(threadId), contents ? `${contents}\n` : '')
+    this.bumpItemsVersion(threadId)
+    this.cacheItems(threadId, [...items])
   }
 
   async updateItem(threadId: string, itemId: string, patch: Partial<TurnItem>): Promise<TurnItem | null> {
@@ -76,6 +89,8 @@ export class FileSessionStore implements SessionStore {
     const updated = { ...current, ...patch } as TurnItem
     await this.ensureDir(this.threadDir(threadId))
     await appendFile(this.messagesPath(threadId), `${JSON.stringify(updated)}\n`, 'utf-8')
+    this.bumpItemsVersion(threadId)
+    this.applyItemToCache(threadId, updated)
     return updated
   }
 
@@ -87,6 +102,12 @@ export class FileSessionStore implements SessionStore {
   }
 
   async loadItems(threadId: string): Promise<TurnItem[]> {
+    const cached = this.itemsCache.get(threadId)
+    if (cached) {
+      this.cacheItems(threadId, cached)
+      return [...cached]
+    }
+    const version = this.itemsVersionOf(threadId)
     const raw = await readJsonl<TurnItem>(this.messagesPath(threadId))
     const latestById = new Map<string, TurnItem>()
     for (const item of raw) {
@@ -99,6 +120,11 @@ export class FileSessionStore implements SessionStore {
       if (seen.has(item.id)) continue
       seen.add(item.id)
       ordered.unshift(latestById.get(item.id)!)
+    }
+    // A write that landed while we were reading invalidates this snapshot.
+    if (this.itemsVersionOf(threadId) === version) {
+      this.cacheItems(threadId, ordered)
+      return [...ordered]
     }
     return ordered
   }
@@ -123,7 +149,34 @@ export class FileSessionStore implements SessionStore {
   }
 
   async resetMemory(): Promise<void> {
-    // File-backed store has no in-memory state to reset.
+    this.itemsCache.clear()
+    this.itemsCacheVersion.clear()
+  }
+
+  private itemsVersionOf(threadId: string): number {
+    return this.itemsCacheVersion.get(threadId) ?? 0
+  }
+
+  private bumpItemsVersion(threadId: string): void {
+    this.itemsCacheVersion.set(threadId, this.itemsVersionOf(threadId) + 1)
+  }
+
+  private cacheItems(threadId: string, items: TurnItem[]): void {
+    this.itemsCache.delete(threadId)
+    this.itemsCache.set(threadId, items)
+    while (this.itemsCache.size > ITEMS_CACHE_MAX_THREADS) {
+      const oldest = this.itemsCache.keys().next().value
+      if (oldest === undefined) break
+      this.itemsCache.delete(oldest)
+    }
+  }
+
+  private applyItemToCache(threadId: string, item: TurnItem): void {
+    const cached = this.itemsCache.get(threadId)
+    if (!cached) return
+    const index = cached.findIndex((existing) => existing.id === item.id)
+    if (index >= 0) cached[index] = item
+    else cached.push(item)
   }
 
   private threadDir(threadId: string): string {

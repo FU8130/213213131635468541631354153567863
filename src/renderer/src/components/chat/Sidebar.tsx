@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import {
   Clock3,
   FileQuestion,
+  Focus,
   LayoutGrid,
   Plus,
   Settings,
@@ -11,6 +12,7 @@ import {
 } from 'lucide-react'
 import type { NormalizedThread } from '../../agent/types'
 import { useChatStore, type SettingsRouteSection } from '../../store/chat-store'
+import type { SddDraft } from '../../sdd/sdd-draft-store'
 import type {
   ClawImChannelV1,
 } from '@shared/app-settings'
@@ -19,6 +21,7 @@ import {
 } from './SidebarClaw'
 import type { ClawImDialogMode } from './SidebarClawDialogHelpers'
 import { ClawAddImDialog } from './SidebarClawDialog'
+import { SidebarMascot } from './AnimatedWorkLogo'
 import { ConnectPhoneSidebarPanel } from './ConnectPhoneView'
 import { SidebarProjectsSection } from './SidebarProjectsSection'
 import { WorkspaceModeTabs } from './WorkspaceModeTabs'
@@ -46,8 +49,11 @@ type Props = {
   onNewChat: () => void
   onNewChatInWorkspace: (workspaceRoot: string) => void
   onNewRequirement: () => void
+  onOpenRequirementDraft: (draft: SddDraft) => void
   onOpenSettings: (section?: SettingsRouteSection) => void
   onOpenPlugins: () => void
+  focusModeEnabled: boolean
+  onFocusModeChange: (enabled: boolean) => void
   onToggleConnectPhone: () => void
   onCodeOpen: () => void
   onWriteOpen: () => void
@@ -74,8 +80,11 @@ export function Sidebar({
   onNewChat,
   onNewChatInWorkspace,
   onNewRequirement,
+  onOpenRequirementDraft,
   onOpenSettings,
   onOpenPlugins,
+  focusModeEnabled,
+  onFocusModeChange,
   onToggleConnectPhone,
   onCodeOpen,
   onWriteOpen,
@@ -111,6 +120,21 @@ export function Sidebar({
       onCollapse={onToggleSidebar}
       footer={
         <div className="space-y-1">
+          <div className="flex min-h-[42px] items-center justify-center gap-2.5 pb-1">
+            {!focusModeEnabled ? (
+              <span className="flex h-[46px] w-[56px] shrink-0 items-center justify-center">
+                <SidebarMascot />
+              </span>
+            ) : null}
+            <FocusModeToggle
+              enabled={focusModeEnabled}
+              onToggle={() => onFocusModeChange(!focusModeEnabled)}
+              label={t('focusMode')}
+              status={focusModeEnabled ? t('switchOn') : t('switchOff')}
+              title={t('focusModeToggleTitle')}
+              ariaLabel={t('focusModeToggleLabel')}
+            />
+          </div>
           <SidebarCommandRow
             icon={<Smartphone className="h-4 w-4" strokeWidth={1.75} />}
             label={t('claw')}
@@ -209,6 +233,7 @@ export function Sidebar({
           onPickWorkspace={() => void chooseWorkspace()}
           onRemoveWorkspace={deleteWorkspace}
           onCreateThreadInWorkspace={onNewChatInWorkspace}
+          onOpenRequirementDraft={onOpenRequirementDraft}
           onSelectThread={onSelectThread}
           onRenameThread={onRenameThread}
           onArchiveThread={onArchiveThread}
@@ -235,6 +260,7 @@ export function Sidebar({
         onPickWorkspace={() => void chooseWorkspace()}
         onRemoveWorkspace={deleteWorkspace}
         onCreateThreadInWorkspace={onNewChatInWorkspace}
+        onOpenRequirementDraft={onOpenRequirementDraft}
         onSelectThread={onSelectThread}
         onRenameThread={onRenameThread}
         onArchiveThread={onArchiveThread}
@@ -263,5 +289,56 @@ export function Sidebar({
       />
     ) : null}
     </>
+  )
+}
+
+function FocusModeToggle({
+  enabled,
+  onToggle,
+  label,
+  status,
+  title,
+  ariaLabel
+}: {
+  enabled: boolean
+  onToggle: () => void
+  label: string
+  status: string
+  title: string
+  ariaLabel: string
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label={ariaLabel}
+      title={`${title} · ${status}`}
+      onClick={onToggle}
+      className={`group inline-flex h-8 w-[112px] shrink-0 items-center justify-between overflow-hidden rounded-[10px] border px-2.5 text-[12px] font-medium outline-none transition focus-visible:ring-2 focus-visible:ring-accent/25 ${
+        enabled
+          ? 'border-accent/35 bg-[var(--ds-sidebar-row-active)] text-[#1f1f1f] shadow-[0_1px_3px_rgba(20,47,95,0.07),inset_0_0_0_1px_var(--ds-sidebar-row-ring),inset_0_1px_0_rgba(255,255,255,0.72)] dark:text-white'
+          : 'border-[var(--ds-sidebar-divider)] bg-[var(--ds-sidebar-field-bg)] text-[#5c6675] shadow-[inset_0_1px_0_rgba(255,255,255,0.46)] hover:bg-[var(--ds-sidebar-row-hover)] hover:text-[#1f2733] dark:text-white/62 dark:shadow-none dark:hover:text-white'
+      }`}
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Focus className="h-3.5 w-3.5 shrink-0" strokeWidth={1.8} aria-hidden="true" />
+        <span className="min-w-0 truncate">{label}</span>
+      </span>
+      <span
+        className={`relative h-4 w-7 shrink-0 rounded-full transition ${
+          enabled
+            ? 'bg-accent/80 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.08)]'
+            : 'bg-slate-300/75 shadow-[inset_0_0_0_1px_rgba(100,116,139,0.16)] dark:bg-white/[0.14] dark:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]'
+        }`}
+        aria-hidden="true"
+      >
+        <span
+          className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-[0_1px_3px_rgba(20,47,95,0.24)] transition-transform ${
+            enabled ? 'translate-x-3' : 'translate-x-0'
+          }`}
+        />
+      </span>
+    </button>
   )
 }

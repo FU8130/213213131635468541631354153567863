@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { parseUsageResponse } from './usage-response'
+import { parseUsageResponse, withUsageRequestTimeout } from './usage-response'
 
 export const DEFAULT_USAGE_HEATMAP_DAYS = 90
 
@@ -13,11 +13,7 @@ export type DailyUsageBucket = {
   totalTokens: number
   costUsd: number
   costCny: number | null
-  cacheSavingsUsd: number
-  cacheSavingsCny: number | null
   tokenEconomySavingsTokens: number
-  tokenEconomySavingsUsd: number
-  tokenEconomySavingsCny: number | null
   turns: number
   threadCount: number
   cacheHitRate: number | null
@@ -54,11 +50,7 @@ type RawDailyUsageBucket = {
   total_tokens?: unknown
   cost_usd?: unknown
   cost_cny?: unknown
-  cache_savings_usd?: unknown
-  cache_savings_cny?: unknown
   token_economy_savings_tokens?: unknown
-  token_economy_savings_usd?: unknown
-  token_economy_savings_cny?: unknown
   turns?: unknown
   thread_count?: unknown
   cache_hit_rate?: unknown
@@ -154,11 +146,7 @@ function normalizeBucket(raw: RawDailyUsageBucket): DailyUsageBucket {
     totalTokens,
     costUsd: usageNumber(raw.cost_usd),
     costCny: usageOptionalNumber(raw.cost_cny),
-    cacheSavingsUsd: usageNumber(raw.cache_savings_usd),
-    cacheSavingsCny: usageOptionalNumber(raw.cache_savings_cny),
     tokenEconomySavingsTokens: usageNumber(raw.token_economy_savings_tokens),
-    tokenEconomySavingsUsd: usageNumber(raw.token_economy_savings_usd),
-    tokenEconomySavingsCny: usageOptionalNumber(raw.token_economy_savings_cny),
     turns: usageNumber(raw.turns),
     threadCount: usageNumber(raw.thread_count),
     cacheHitRate: usageRate(raw.cache_hit_rate)
@@ -176,11 +164,7 @@ function normalizeTotals(raw: RawDailyUsageBucket & { days?: unknown; active_day
     totalTokens: bucket.totalTokens,
     costUsd: bucket.costUsd,
     costCny: bucket.costCny,
-    cacheSavingsUsd: bucket.cacheSavingsUsd,
-    cacheSavingsCny: bucket.cacheSavingsCny,
     tokenEconomySavingsTokens: bucket.tokenEconomySavingsTokens,
-    tokenEconomySavingsUsd: bucket.tokenEconomySavingsUsd,
-    tokenEconomySavingsCny: bucket.tokenEconomySavingsCny,
     turns: bucket.turns,
     threadCount: bucket.threadCount,
     cacheHitRate: bucket.cacheHitRate,
@@ -206,8 +190,11 @@ export function normalizeDailyUsageResponse(raw: RawDailyUsageResponse): DailyUs
 }
 
 export async function loadDailyUsage(range: DailyUsageRange): Promise<DailyUsageSummary | null> {
-  if (typeof window.dsGui?.runtimeRequest !== 'function') return null
-  const response = await window.dsGui.runtimeRequest(buildDailyUsagePath(range), 'GET')
+  if (typeof window.kunGui?.runtimeRequest !== 'function') return null
+  const response = await withUsageRequestTimeout(
+    window.kunGui.runtimeRequest(buildDailyUsagePath(range), 'GET'),
+    'daily usage'
+  )
   if (!response.ok || !response.body.trim()) {
     throw new Error(`daily usage request failed: ${response.status}`)
   }

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { CapabilityRegistry } from '../src/adapters/tool/capability-registry.js'
 import { LocalToolHost } from '../src/adapters/tool/local-tool-host.js'
 import {
+  buildMcpStdioEnvironment,
   buildMcpToolProviders,
+  formatMcpConnectionError,
   isMcpServerTrusted,
   normalizeMcpToolName,
   type McpClientLike
@@ -56,6 +58,65 @@ function fakeClient(): McpClientLike {
 describe('MCP tool provider', () => {
   it('normalizes stable MCP tool names', () => {
     expect(normalizeMcpToolName('GitHub Server', 'Search Issues')).toBe('mcp_github_server_search_issues')
+  })
+
+  it('adds common GUI app command paths to stdio MCP environments', () => {
+    const env = buildMcpStdioEnvironment({ NODE_ENV: 'test' }, {
+      platform: 'darwin',
+      baseEnv: {
+        PATH: '/usr/bin:/opt/homebrew/bin',
+        HOME: '/Users/alice'
+      }
+    })
+
+    expect(env.NODE_ENV).toBe('test')
+    expect(env.PATH?.split(':')).toEqual([
+      '/usr/bin',
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      '/opt/local/bin',
+      '/Users/alice/.volta/bin',
+      '/Users/alice/.local/bin',
+      '/Users/alice/.bun/bin'
+    ])
+  })
+
+  it('keeps explicitly configured stdio MCP PATH values ahead of common paths', () => {
+    const env = buildMcpStdioEnvironment({ Path: 'C:\\Tools' }, {
+      platform: 'win32',
+      baseEnv: {
+        APPDATA: 'C:\\Users\\alice\\AppData\\Roaming',
+        ProgramFiles: 'C:\\Program Files',
+        PATH: 'C:\\Windows\\System32'
+      }
+    })
+
+    expect(env.Path?.split(';')).toEqual([
+      'C:\\Tools',
+      'C:\\Users\\alice\\AppData\\Roaming\\npm',
+      'C:\\Program Files\\nodejs'
+    ])
+  })
+
+  it('formats missing stdio MCP commands with an actionable PATH hint', () => {
+    const server = KunCapabilitiesConfig.parse({
+      mcp: {
+        enabled: true,
+        servers: {
+          filesystem: {
+            transport: 'stdio',
+            command: 'npx',
+            trustScope: 'user'
+          }
+        }
+      }
+    }).mcp.servers.filesystem
+    const error = Object.assign(new Error('spawn npx ENOENT'), {
+      code: 'ENOENT',
+      path: 'npx'
+    })
+
+    expect(formatMcpConnectionError(error, server)).toContain('Could not find "npx" on PATH')
   })
 
   it('evaluates workspace trust scopes', () => {
@@ -289,6 +350,36 @@ describe('MCP tool provider', () => {
     })
   })
 
+  it('records actionable diagnostics when stdio MCP commands are missing', async () => {
+    const config = KunCapabilitiesConfig.parse({
+      mcp: {
+        enabled: true,
+        servers: {
+          filesystem: {
+            transport: 'stdio',
+            command: 'npx',
+            trustScope: 'user'
+          }
+        }
+      }
+    })
+    const built = await buildMcpToolProviders(config.mcp, {
+      clientFactory: async () => {
+        throw Object.assign(new Error('spawn npx ENOENT'), {
+          code: 'ENOENT',
+          path: 'npx'
+        })
+      }
+    })
+
+    expect(built.providers).toEqual([])
+    expect(built.diagnostics[0]).toMatchObject({
+      id: 'filesystem',
+      status: 'error'
+    })
+    expect(built.diagnostics[0]?.lastError).toContain('Could not find "npx" on PATH')
+  })
+
   it('passes MCP timeouts and abort signals to discovery and execution', async () => {
     const listOptions: Array<{ signal?: AbortSignal; timeout?: number } | undefined> = []
     const callOptions: Array<{ signal?: AbortSignal; timeout?: number } | undefined> = []
@@ -398,6 +489,60 @@ describe('MCP tool provider', () => {
     expect(closes).toBe(1)
     expect(result.item.kind === 'tool_result' ? result.item.output : {}).toMatchObject({
       result: { ok: true, instance: 2 }
+    })
+  })
+
+  it('surfaces deterministic MCP protocol errors as tool results without reconnecting', async () => {
+    let factories = 0
+    const config = KunCapabilitiesConfig.parse({
+      mcp: {
+        enabled: true,
+        servers: {
+          github: {
+            transport: 'stdio',
+            command: 'node',
+            trustScope: 'workspace',
+            trustedWorkspaceRoots: ['/tmp/project']
+          }
+        }
+      }
+    })
+    const built = await buildMcpToolProviders(config.mcp, {
+      clientFactory: async () => {
+        factories += 1
+        return {
+          async listTools() {
+            return {
+              tools: [
+                {
+                  name: 'search',
+                  inputSchema: { type: 'object' },
+                  annotations: { readOnlyHint: true }
+                }
+              ]
+            }
+          },
+          async callTool() {
+            throw new Error('MCP error -32603: Validation Error: Validation Failed')
+          },
+          async close() {}
+        }
+      }
+    })
+    const host = new LocalToolHost({ registry: new CapabilityRegistry(built.providers) })
+    const result = await host.execute({
+      callId: 'call_1',
+      toolName: 'mcp_github_search',
+      arguments: {}
+    }, buildContext('/tmp/project'))
+
+    expect(factories).toBe(1)
+    expect(result.item.kind).toBe('tool_result')
+    if (result.item.kind !== 'tool_result') throw new Error('expected tool_result')
+    expect(result.item.isError).toBe(true)
+    expect(result.item.output).toMatchObject({
+      code: 'tool_execution_failed',
+      error: expect.stringContaining('-32603')
     })
   })
 

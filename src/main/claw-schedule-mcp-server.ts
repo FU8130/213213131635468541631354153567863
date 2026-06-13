@@ -71,15 +71,15 @@ export async function runClawScheduleMcpServerFromArgv(argv: string[]): Promise<
   if (!options) return false
 
   const server = new McpServer(
-    { name: 'deepseek-gui-schedule', version: '0.1.0' },
+    { name: 'kun-schedule', version: '0.1.0' },
     { capabilities: { logging: {} } }
   )
 
   const registerListTool = (name: string): void => {
     server.registerTool(name, {
       description: name.startsWith('claw_')
-        ? 'Legacy alias. List scheduled tasks managed by the currently running DeepSeek GUI app.'
-        : 'List scheduled tasks managed by the currently running DeepSeek GUI app.'
+        ? 'Legacy alias. List scheduled tasks managed by the currently running Kun app.'
+        : 'List scheduled tasks managed by the currently running Kun app.'
     }, async () => {
       try {
         const result = await postJson(options, '/schedule/internal/list', {})
@@ -101,8 +101,8 @@ export async function runClawScheduleMcpServerFromArgv(argv: string[]): Promise<
   const registerCreateTool = (name: string): void => {
     server.registerTool(name, {
       description: name.startsWith('claw_')
-        ? 'Legacy alias. Create a scheduled task in DeepSeek GUI. Supports one-time (`at`), daily, or interval schedules.'
-        : 'Create a scheduled task in DeepSeek GUI. Supports one-time (`at`), daily, or interval schedules.',
+        ? 'Legacy alias. Create a scheduled task in Kun. Supports one-time (`at`), daily, or interval schedules.'
+        : 'Create a scheduled task in Kun. Supports one-time (`at`), daily, or interval schedules. When creating from an existing conversation, pass that conversation\'s provider_id, model, and reasoning_effort so the scheduled task keeps the same execution settings.',
       inputSchema: {
         title: z.string().min(1).describe('Short task title shown in the GUI'),
         prompt: z.string().min(1).describe('The prompt/instruction the agent should run at schedule time'),
@@ -111,8 +111,10 @@ export async function runClawScheduleMcpServerFromArgv(argv: string[]): Promise<
         time_of_day: z.string().optional().describe('24h time like 09:00, required when schedule_kind is `daily`'),
         every_minutes: z.number().int().min(1).max(10080).optional().describe('Interval in minutes, required when schedule_kind is `interval`'),
         workspace_root: z.string().optional().describe('Optional workspace directory override'),
-        model: z.string().optional().describe('Optional model id, e.g. auto / deepseek-v4-pro / deepseek-v4-flash'),
-        reasoning_effort: z.enum(['off', 'low', 'medium', 'high', 'max']).optional().describe('Optional reasoning strength'),
+        claw_channel_id: z.string().optional().describe('Optional Claw IM channel id whose persona should run this task'),
+        provider_id: z.string().optional().describe('Optional model provider id configured in Kun settings'),
+        model: z.string().optional().describe('Optional model id, e.g. deepseek-v4-pro / deepseek-v4-flash'),
+        reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high', 'max']).optional().describe('Optional reasoning strength'),
         mode: z.enum(['agent', 'plan']).optional().describe('Execution mode'),
         enabled: z.boolean().optional().describe('Whether the task should be enabled immediately')
       }
@@ -123,6 +125,8 @@ export async function runClawScheduleMcpServerFromArgv(argv: string[]): Promise<
             title: args.title,
             prompt: args.prompt,
             workspaceRoot: args.workspace_root,
+            clawChannelId: args.claw_channel_id,
+            providerId: args.provider_id,
             model: args.model,
             reasoningEffort: args.reasoning_effort,
             mode: args.mode,
@@ -151,16 +155,18 @@ export async function runClawScheduleMcpServerFromArgv(argv: string[]): Promise<
   const registerUpdateTool = (name: string): void => {
     server.registerTool(name, {
       description: name.startsWith('claw_')
-        ? 'Legacy alias. Update an existing DeepSeek GUI scheduled task.'
-        : 'Update an existing DeepSeek GUI scheduled task.',
+        ? 'Legacy alias. Update an existing Kun scheduled task.'
+        : 'Update an existing Kun scheduled task.',
       inputSchema: {
         task_id: z.string().min(1).describe('Task id returned by gui_schedule_list or gui_schedule_create'),
         title: z.string().optional(),
         prompt: z.string().optional(),
         enabled: z.boolean().optional(),
         workspace_root: z.string().optional(),
+        claw_channel_id: z.string().optional(),
+        provider_id: z.string().optional(),
         model: z.string().optional(),
-        reasoning_effort: z.enum(['off', 'low', 'medium', 'high', 'max']).optional(),
+        reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high', 'max']).optional(),
         mode: z.enum(['agent', 'plan']).optional(),
         schedule_kind: z.enum(['manual', 'at', 'daily', 'interval']).optional(),
         at_time: z.string().optional(),
@@ -174,6 +180,8 @@ export async function runClawScheduleMcpServerFromArgv(argv: string[]): Promise<
         if (args.prompt !== undefined) patch.prompt = args.prompt
         if (args.enabled !== undefined) patch.enabled = args.enabled
         if (args.workspace_root !== undefined) patch.workspaceRoot = args.workspace_root
+        if (args.claw_channel_id !== undefined) patch.clawChannelId = args.claw_channel_id
+        if (args.provider_id !== undefined) patch.providerId = args.provider_id
         if (args.model !== undefined) patch.model = args.model
         if (args.reasoning_effort !== undefined) patch.reasoningEffort = args.reasoning_effort
         if (args.mode !== undefined) patch.mode = args.mode
@@ -210,8 +218,8 @@ export async function runClawScheduleMcpServerFromArgv(argv: string[]): Promise<
   const registerDeleteTool = (name: string): void => {
     server.registerTool(name, {
       description: name.startsWith('claw_')
-        ? 'Legacy alias. Delete a scheduled task from DeepSeek GUI.'
-        : 'Delete a scheduled task from DeepSeek GUI.',
+        ? 'Legacy alias. Delete a scheduled task from Kun.'
+        : 'Delete a scheduled task from Kun.',
       inputSchema: {
         task_id: z.string().min(1).describe('Task id returned by gui_schedule_list or gui_schedule_create')
       }

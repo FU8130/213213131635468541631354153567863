@@ -55,12 +55,6 @@ function clipTail(text = '', maxChars = 0): string {
   return source.slice(source.length - maxChars)
 }
 
-function clipHead(text = '', maxChars = 0): string {
-  const source = String(text || '')
-  if (!maxChars || source.length <= maxChars) return source
-  return source.slice(0, maxChars)
-}
-
 function buildEditCandidate(
   state: EditorState,
   lineNumber: number,
@@ -117,8 +111,17 @@ export function buildInlineCompletionRequestContext(
 ): InlineCompletionRequestContext {
   const head = state.selection.main.head
   const line = state.doc.lineAt(head)
-  const prefix = state.sliceDoc(0, head)
-  const suffix = state.sliceDoc(head, state.doc.length)
+  // Slice the windows directly instead of materialising the full document
+  // prefix/suffix: on large documents those copies dominated the cost of
+  // every completion trigger while only the windows are ever consumed.
+  const prefixWindow = state.sliceDoc(
+    Math.max(0, head - INLINE_COMPLETION_PREFIX_WINDOW_CHARS),
+    head
+  )
+  const suffixWindow = state.sliceDoc(
+    head,
+    Math.min(state.doc.length, head + INLINE_COMPLETION_SUFFIX_WINDOW_CHARS)
+  )
   const currentLinePrefix = state.sliceDoc(line.from, head)
   const currentLineSuffix = state.sliceDoc(head, line.to)
   const previousLineText = line.number > 1 ? state.doc.line(line.number - 1).text : ''
@@ -127,7 +130,7 @@ export function buildInlineCompletionRequestContext(
   const indentation = (currentLinePrefix.match(/^\s*/) || [''])[0]
   const trimmedLinePrefix = currentLinePrefix.trim()
   const trimmedLineSuffix = currentLineSuffix.trim()
-  const docPreview = clipTail(prefix, 280)
+  const docPreview = clipTail(prefixWindow, 280)
   const previousStructuredLine = previousNonEmptyLineText || previousLineText
   const isAtLineEnd = currentLineSuffix.length === 0
   const previousLineTrimmed = previousStructuredLine.trimEnd()
@@ -155,10 +158,10 @@ export function buildInlineCompletionRequestContext(
     lineNumber: line.number,
     column: head - line.from,
     docLength: state.doc.length,
-    prefix,
-    suffix,
-    prefixWindow: clipTail(prefix, INLINE_COMPLETION_PREFIX_WINDOW_CHARS),
-    suffixWindow: clipHead(suffix, INLINE_COMPLETION_SUFFIX_WINDOW_CHARS),
+    prefix: prefixWindow,
+    suffix: suffixWindow,
+    prefixWindow,
+    suffixWindow,
     currentLinePrefix,
     currentLineSuffix,
     currentLineText: line.text,
@@ -171,7 +174,8 @@ export function buildInlineCompletionRequestContext(
     currentLineSuffixTrimmed: trimmedLineSuffix,
     docPreview,
     isBlankLine: !trimmedLinePrefix && !trimmedLineSuffix,
-    hasMeaningfulPrefix: normalizeWhitespace(prefix).length >= 1,
+    hasMeaningfulPrefix:
+      normalizeWhitespace(prefixWindow).length >= 1 || head > prefixWindow.length,
     hasStructuralContext:
       hasMarkdownStructure(trimmedLinePrefix) || hasMarkdownStructure(previousStructuredLine),
     hasListContext,

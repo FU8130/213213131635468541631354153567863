@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { TurnItem } from './items.js'
 import { isGuiPlanRelativePath } from '../shared/gui-plan.js'
-import { ApprovalPolicySchema } from './policy.js'
+import { ApprovalPolicySchema, SandboxModeSchema } from './policy.js'
 
 /**
  * Mode enum, inlined here (instead of importing `ThreadMode` from
@@ -77,6 +77,12 @@ export const TurnSchema = z.object({
    * otherwise agent thread, or a Build turn that runs as agent).
    */
   mode: TurnModeSchema.optional(),
+  /**
+   * True when no interactive user is attached to this turn (IM bridges,
+   * headless runs). Kun hides `user_input`/`request_user_input` and
+   * rejects calls to them instead of blocking on a GUI answer.
+   */
+  disableUserInput: z.boolean().optional(),
   error: z.string().optional()
 })
 export type Turn = z.infer<typeof TurnSchema>
@@ -87,6 +93,7 @@ export const StartTurnRequest = z.object({
   model: z.string().optional(),
   reasoningEffort: TurnReasoningEffortSchema.optional(),
   approvalPolicy: ApprovalPolicySchema.optional(),
+  sandboxMode: SandboxModeSchema.optional(),
   /**
    * Optional per-turn mode. Overrides the thread mode for this turn so
    * the GUI can toggle Plan/agent without recreating the thread. In Plan
@@ -107,7 +114,13 @@ export const StartTurnRequest = z.object({
    * `create_plan` tool for the turn and writes only to the reserved
    * path advertised in the context.
    */
-  guiPlan: GuiPlanContextSchema.optional()
+  guiPlan: GuiPlanContextSchema.optional(),
+  /**
+   * True when the caller cannot relay structured input prompts to a
+   * user (IM bridges such as WeChat/Feishu, headless runs). The turn
+   * runs without the `user_input`/`request_user_input` tools.
+   */
+  disableUserInput: z.boolean().optional()
 })
 export type StartTurnRequest = z.input<typeof StartTurnRequest>
 

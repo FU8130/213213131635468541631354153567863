@@ -1,7 +1,8 @@
 {
   "name": "kun",
   "version": "0.1.0",
-  "description": "Kun local HTTP/SSE agent runtime for DeepSeek-GUI",
+  "description": "Kun local HTTP/SSE agent runtime",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "private": true,
   "main": "./dist/index.js",
@@ -45,6 +46,10 @@
     "./services": {
       "types": "./dist/services/index.d.ts",
       "import": "./dist/services/index.js"
+    },
+    "./hooks": {
+      "types": "./dist/hooks/index.d.ts",
+      "import": "./dist/hooks/index.js"
     }
   },
   "bin": {

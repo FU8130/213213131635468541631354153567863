@@ -21,9 +21,13 @@ import { harden } from 'rehype-harden'
 import type { PluggableList } from 'unified'
 import { useTranslation } from 'react-i18next'
 import {
-  resolveWriteMarkdownResource,
-  resolveWriteMarkdownResourcePath
-} from '@shared/write-markdown-resource'
+  initialWriteMarkdownImageSrc,
+  loadWriteMarkdownImage
+} from '../../write/markdown-image'
+import { parsePendingInfographicId } from '../../write/infographic-pending'
+import { createInfographicPendingElement } from '../../write/infographic-pending-dom'
+import { createHtmlEmbedElement } from '../../write/html-embed-dom'
+import { isHtmlEmbedSrc } from '@shared/write-prototype'
 import {
   highlightCodeHtml,
   renderFallbackCodeHtml
@@ -39,7 +43,19 @@ type Props = {
   content: string
   isMarkdown: boolean
   filePath?: string | null
+  workspaceRoot?: string | null
   previewErrorMessage?: string
+}
+
+type MarkdownAstNode = {
+  type?: string
+  url?: unknown
+  identifier?: unknown
+  children?: MarkdownAstNode[]
+  data?: {
+    hProperties?: Record<string, unknown>
+    [key: string]: unknown
+  }
 }
 
 type CodeProps = DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement> & {
@@ -47,7 +63,7 @@ type CodeProps = DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement> & {
 }
 
 export const writeMarkdownHardenOptions = {
-  defaultOrigin: 'https://deepseek-gui.local',
+  defaultOrigin: 'https://kun.local',
   allowedLinkPrefixes: ['*'],
   allowedImagePrefixes: ['*']
 }
@@ -57,6 +73,49 @@ const rehypePlugins = [
     harden,
     writeMarkdownHardenOptions
   ]
+] as unknown as PluggableList
+
+function visitMarkdownAst(node: MarkdownAstNode, visitor: (node: MarkdownAstNode) => void): void {
+  visitor(node)
+  for (const child of node.children ?? []) {
+    visitMarkdownAst(child, visitor)
+  }
+}
+
+function setRawImageSource(node: MarkdownAstNode, rawSrc: string): void {
+  node.data = {
+    ...node.data,
+    hProperties: {
+      ...node.data?.hProperties,
+      'data-raw-src': rawSrc
+    }
+  }
+}
+
+export function preserveRawMarkdownImageSrc() {
+  return (tree: MarkdownAstNode): void => {
+    const definitions = new Map<string, string>()
+    visitMarkdownAst(tree, (node) => {
+      if (node.type === 'definition' && typeof node.identifier === 'string' && typeof node.url === 'string') {
+        definitions.set(node.identifier.toLowerCase(), node.url)
+      }
+    })
+    visitMarkdownAst(tree, (node) => {
+      if (node.type === 'image' && typeof node.url === 'string') {
+        setRawImageSource(node, node.url)
+        return
+      }
+      if (node.type === 'imageReference' && typeof node.identifier === 'string') {
+        const rawSrc = definitions.get(node.identifier.toLowerCase())
+        if (rawSrc) setRawImageSource(node, rawSrc)
+      }
+    })
+  }
+}
+
+const remarkPlugins = [
+  remarkGfm,
+  preserveRawMarkdownImageSrc
 ] as unknown as PluggableList
 
 const LANGUAGE_REGEX = /language-([^\s]+)/
@@ -70,12 +129,6 @@ function plainTextFallback(content: string): ReactElement {
       {content}
     </pre>
   )
-}
-
-function isMissingImageIpc(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return message.includes('No handler registered for') ||
-    message.includes('readWorkspaceImage is not a function')
 }
 
 function extractText(node: ReactNode): string {
@@ -260,48 +313,114 @@ type ResolvedMarkdownImageProps = {
   src?: string
   alt?: string | null
   filePath?: string | null
+  workspaceRoot?: string | null
+  'data-raw-src'?: string
 } & Omit<ComponentPropsWithoutRef<'img'>, 'src' | 'alt'>
+
+function PendingInfographicFigure({ id }: { id: string }): ReactElement {
+  const hostRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    host.replaceChildren(createInfographicPendingElement(id))
+    return () => host.replaceChildren()
+  }, [id])
+
+  return <span ref={hostRef} className="block" />
+}
+
+function HtmlEmbedFigure({
+  rawSrc,
+  alt,
+  filePath,
+  workspaceRoot
+}: {
+  rawSrc: string
+  alt: string
+  filePath: string | null
+  workspaceRoot: string | null
+}): ReactElement {
+  const hostRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    host.replaceChildren(createHtmlEmbedElement({ rawSrc, alt, filePath, workspaceRoot }))
+    return () => host.replaceChildren()
+  }, [rawSrc, alt, filePath, workspaceRoot])
+
+  return <span ref={hostRef} className="block" />
+}
 
 function ResolvedMarkdownImage({
   src,
   alt,
   filePath,
+  workspaceRoot,
+  'data-raw-src': rawSrc,
   ...props
 }: ResolvedMarkdownImageProps): ReactElement {
-  const [resolvedSrc, setResolvedSrc] = useState(() => resolveWriteMarkdownResource(src, filePath))
-  const [loadFailed, setLoadFailed] = useState(false)
+  const imageSrc = rawSrc ?? src
+  const pendingId = parsePendingInfographicId(imageSrc)
+  const htmlEmbed = pendingId === null && isHtmlEmbedSrc(imageSrc)
+  const [resolvedSrc, setResolvedSrc] = useState(() => initialWriteMarkdownImageSrc(imageSrc, filePath))
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (pendingId !== null || htmlEmbed) return undefined
     let cancelled = false
-    setLoadFailed(false)
-    const localPath = resolveWriteMarkdownResourcePath(src, filePath)
-    const fallback = resolveWriteMarkdownResource(src, filePath)
-    setResolvedSrc(fallback)
+    setLoadError(null)
+    setResolvedSrc(initialWriteMarkdownImageSrc(imageSrc, filePath))
 
-    if (!localPath || typeof window.dsGui?.readWorkspaceImage !== 'function') return
-
-    void window.dsGui.readWorkspaceImage({ path: localPath })
+    void loadWriteMarkdownImage(imageSrc, filePath)
       .then((result) => {
         if (cancelled) return
         if (result.ok) {
-          setResolvedSrc(result.dataUrl)
+          setResolvedSrc(result.src)
         } else {
-          setLoadFailed(true)
+          setLoadError(result.message)
         }
-      })
-      .catch((error) => {
-        if (!cancelled && !isMissingImageIpc(error)) setLoadFailed(true)
       })
 
     return () => {
       cancelled = true
     }
-  }, [src, filePath])
+  }, [imageSrc, filePath, pendingId, htmlEmbed])
 
-  if (loadFailed) {
+  if (pendingId !== null) {
+    return <PendingInfographicFigure id={pendingId} />
+  }
+
+  if (htmlEmbed && imageSrc) {
     return (
-      <span className="inline-flex max-w-full items-center rounded-lg border border-red-200/70 bg-red-50/80 px-2 py-1 text-[12px] text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-        {alt || src || 'Image could not be loaded'}
+      <HtmlEmbedFigure
+        rawSrc={imageSrc}
+        alt={alt ?? ''}
+        filePath={filePath ?? null}
+        workspaceRoot={workspaceRoot ?? null}
+      />
+    )
+  }
+
+  if (loadError) {
+    return (
+      <span
+        className="inline-flex max-w-full items-center rounded-lg border border-red-200/70 bg-red-50/80 px-2 py-1 text-[12px] text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+        title={loadError}
+      >
+        {alt || imageSrc || 'Image could not be loaded'}
+      </span>
+    )
+  }
+
+  if (!resolvedSrc) {
+    return (
+      <span
+        className="inline-flex max-w-full items-center rounded-lg border border-ds-border px-2 py-1 text-[12px] text-ds-muted"
+        title={imageSrc}
+      >
+        {alt || imageSrc || 'Image'}
       </span>
     )
   }
@@ -355,13 +474,13 @@ class PreviewErrorBoundary extends Component<PreviewBoundaryProps, PreviewBounda
   }
 }
 
-function WriteMarkdownPreviewContent({ content, isMarkdown, filePath }: Props): ReactElement {
+function WriteMarkdownPreviewContent({ content, isMarkdown, filePath, workspaceRoot }: Props): ReactElement {
   if (!isMarkdown) return plainTextFallback(content)
 
   return (
     <div className="ds-markdown write-markdown-preview min-h-full text-ds-ink">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={{
           a: ({ href, children, ...props }): ReactNode => (
@@ -371,7 +490,7 @@ function WriteMarkdownPreviewContent({ content, isMarkdown, filePath }: Props): 
               onClick={(event) => {
                 if (!href) return
                 event.preventDefault()
-                void window.dsGui?.openExternal?.(href)?.catch(() => undefined)
+                void window.kunGui?.openExternal?.(href)?.catch(() => undefined)
               }}
             >
               {children}
@@ -383,6 +502,7 @@ function WriteMarkdownPreviewContent({ content, isMarkdown, filePath }: Props): 
               src={src}
               alt={alt}
               filePath={filePath}
+              workspaceRoot={workspaceRoot}
             />
           ),
           code: ({ className, children, node, ...props }): ReactNode => (

@@ -109,7 +109,7 @@ describe('Web tool provider', () => {
     }
   })
 
-  it('rejects fetch responses when content-length exceeds max_bytes', async () => {
+  it('truncates instead of failing when content-length exceeds max_bytes', async () => {
     vi.stubGlobal('fetch', async () => new Response('abcdefghijklmnopqrstuvwxyz', {
       headers: {
         'content-length': '26',
@@ -120,7 +120,8 @@ describe('Web tool provider', () => {
       web: {
         enabled: true,
         fetchEnabled: true,
-        allowDomains: ['docs.example.test']
+        allowDomains: ['docs.example.test'],
+        maxFetchBytes: 10
       }
     })
     const host = new LocalToolHost({
@@ -133,17 +134,12 @@ describe('Web tool provider', () => {
       arguments: { url: 'https://docs.example.test/large', max_bytes: 10 }
     }, buildContext())
 
-    expect(result.item).toMatchObject({ kind: 'tool_result', isError: true })
+    expect(result.item).toMatchObject({ kind: 'tool_result', isError: false })
     if (result.item.kind === 'tool_result') {
       expect(result.item.output).toMatchObject({
-        error: {
-          code: 'fetch_failed',
-          message: expect.stringContaining('content exceeds')
-        },
-        telemetry: {
-          policy: 'allowed',
-          provider: 'fetch'
-        }
+        text: 'abcdefghij',
+        byteCount: 10,
+        truncated: true
       })
     }
   })
@@ -158,7 +154,8 @@ describe('Web tool provider', () => {
       web: {
         enabled: true,
         fetchEnabled: true,
-        allowDomains: ['docs.example.test']
+        allowDomains: ['docs.example.test'],
+        maxFetchBytes: 10
       }
     })
     const host = new LocalToolHost({
@@ -182,6 +179,39 @@ describe('Web tool provider', () => {
           provider: 'fetch',
           byteCount: 10
         }
+      })
+    }
+  })
+
+  it('raises tiny model-passed max_bytes budgets to a usable floor', async () => {
+    vi.stubGlobal('fetch', async () => new Response('x'.repeat(3000), {
+      headers: {
+        'content-length': '3000',
+        'content-type': 'text/plain'
+      }
+    }))
+    const config = KunCapabilitiesConfig.parse({
+      web: {
+        enabled: true,
+        fetchEnabled: true,
+        allowDomains: ['docs.example.test']
+      }
+    })
+    const host = new LocalToolHost({
+      registry: new CapabilityRegistry(buildWebToolProviders(config.web).providers)
+    })
+
+    const result = await host.execute({
+      callId: 'call_1',
+      toolName: 'web_fetch',
+      arguments: { url: 'https://docs.example.test/page', max_bytes: 2000 }
+    }, buildContext())
+
+    expect(result.item).toMatchObject({ kind: 'tool_result', isError: false })
+    if (result.item.kind === 'tool_result') {
+      expect(result.item.output).toMatchObject({
+        byteCount: 3000,
+        truncated: false
       })
     }
   })

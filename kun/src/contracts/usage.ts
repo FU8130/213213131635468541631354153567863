@@ -19,6 +19,12 @@ export const UsageSnapshotSchema = z.object({
   turns: z.number().int().nonnegative(),
   costUsd: z.number().nonnegative().optional(),
   costCny: z.number().nonnegative().optional(),
+  /**
+   * @deprecated Savings are reported in tokens only (cache hits via
+   * `cacheHitTokens`, compression via `tokenEconomySavingsTokens`).
+   * The money fields remain parseable for persisted threads recorded
+   * by older runtimes but are no longer populated.
+   */
   cacheSavingsUsd: z.number().nonnegative().optional(),
   cacheSavingsCny: z.number().nonnegative().optional(),
   tokenEconomySavingsTokens: z.number().int().nonnegative().optional(),
@@ -121,9 +127,5 @@ export const emptyUsageSnapshot = (): UsageSnapshot => ({
   cacheMissTokens: 0,
   cacheHitRate: null,
   turns: 0,
-  cacheSavingsUsd: 0,
-  cacheSavingsCny: 0,
-  tokenEconomySavingsTokens: 0,
-  tokenEconomySavingsUsd: 0,
-  tokenEconomySavingsCny: 0
+  tokenEconomySavingsTokens: 0
 })

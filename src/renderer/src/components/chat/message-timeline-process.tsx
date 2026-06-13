@@ -98,6 +98,14 @@ function sectionHasRequestUserInput(section: ProcessSection): boolean {
   return section.blocks.some(isRequestUserInputTool)
 }
 
+function isPendingApproval(block: ChatBlock): boolean {
+  return block.kind === 'approval' && block.status === 'pending'
+}
+
+function sectionHasPendingApproval(section: ProcessSection): boolean {
+  return section.blocks.some(isPendingApproval)
+}
+
 export function ProcessSectionRow({
   section,
   processing,
@@ -130,16 +138,18 @@ export function ProcessSectionRow({
   )
   const defaultExpanded =
     hasError ||
+    sectionHasPendingApproval(section) ||
     (active && section.kind === 'reasoning') ||
     (processing && section.kind === 'execution' && sectionHasRequestUserInput(section))
-  const expanded = hasDetails && (userExpanded ?? defaultExpanded)
+  const forceExpanded = hasError || sectionHasPendingApproval(section)
+  const expanded = hasDetails && (forceExpanded || (userExpanded ?? defaultExpanded))
   const title = describeProcessSection(section, t, {
     processing,
     reasoningDurationMs,
     singleReasoningSection
   })
   const reasoningText = section.kind === 'reasoning' ? getReasoningSectionText(section) : ''
-  const canToggleSection = hasDetails
+  const canToggleSection = hasDetails && !forceExpanded
   const showActiveError = active && hasError
   const { ref: deferredDetailRef, shouldRender: shouldRenderDetail } = useDeferredRender<HTMLDivElement>({
     enabled: expanded,
@@ -280,10 +290,12 @@ function ProcessStackRows({
         const isRunningTool = processBlockIsRunningTool(block, processing)
         const canExpand = detail.kind !== 'none'
         const autoOpenRequestInput = processing && isRequestUserInputTool(block)
-        const open = canExpand && (processBlockHasError(block) || autoOpenRequestInput || openBlockId === block.id)
-        const rowActive = processBlockIsActive(block, processing)
+        const autoOpenPending = processBlockIsAutoOpenPending(block, processing) || isPendingApproval(block)
         const isError = processBlockHasError(block)
-        const canToggle = canExpand && !autoOpenRequestInput
+        const forceOpen = isError || autoOpenPending || autoOpenRequestInput
+        const open = canExpand && (forceOpen || openBlockId === block.id)
+        const rowActive = processBlockIsActive(block, processing)
+        const canToggle = canExpand && !forceOpen
         const handleToggle = (): void => {
           if (!canToggle) return
           setOpenBlockId((id) => (id === block.id ? null : block.id))
@@ -352,7 +364,7 @@ function ProcessEntryRow({
   const canExpand = detail.kind !== 'none'
   const isAssistantProcessText = block.kind === 'assistant'
   const isRunningTool = processBlockIsRunningTool(block, processing)
-  const isAutoOpenPending = processBlockIsAutoOpenPending(block, processing)
+  const isAutoOpenPending = processBlockIsAutoOpenPending(block, processing) || isPendingApproval(block)
   const isStreamingAssistant = processing && block.kind === 'assistant' && block.id === 'live-assistant'
   const isError = processBlockHasError(block)
   const open =
@@ -362,7 +374,7 @@ function ProcessEntryRow({
   const { verb, rest } = splitVerb(summary)
   const rowActive = isRunningTool || isAutoOpenPending || isStreamingAssistant
   const wrapSummary = (block.kind === 'system' && !canExpand) || isAssistantProcessText
-  const canToggle = canExpand && !isAutoOpenPending && !isAssistantProcessText
+  const canToggle = canExpand && !isAutoOpenPending && !isAssistantProcessText && !isError
   const handleToggle = (): void => {
     if (!canToggle) return
     setUserOpen((v) => !v)
@@ -563,7 +575,7 @@ function ProcessFileReference({
     event.stopPropagation()
     void openWorkspacePathInEditor({ path }, workspaceRoot).then((result) => {
       if (!result.ok) {
-        void window.dsGui?.logError?.('editor-open', 'Failed to open process file reference', {
+        void window.kunGui?.logError?.('editor-open', 'Failed to open process file reference', {
           message: result.message,
           target: { path, workspaceRoot }
         })?.catch(() => undefined)

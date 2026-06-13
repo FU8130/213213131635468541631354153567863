@@ -10,9 +10,20 @@ import { FileThreadStore, FileSessionStore } from '../src/adapters/file/index.js
 import { RuntimeEventRecorder } from '../src/services/runtime-event-recorder.js'
 import { ContextCompactor } from '../src/loop/context-compactor.js'
 import { resolveModelContextProfile } from '../src/loop/model-context-profile.js'
-import { makeAssistantTextItem, makeToolCallItem, makeUserItem } from '../src/domain/item.js'
+import {
+  makeApprovalItem,
+  makeAssistantTextItem,
+  makeToolCallItem,
+  makeToolResultItem,
+  makeUserInputItem,
+  makeUserItem
+} from '../src/domain/item.js'
 import { createThreadRecord } from '../src/domain/thread.js'
 import { createImmutablePrefix, setSystemPrompt } from '../src/cache/immutable-prefix.js'
+import { InflightTracker } from '../src/loop/inflight-tracker.js'
+import { SteeringQueue } from '../src/loop/steering-queue.js'
+import { SequentialIdGenerator } from '../src/ports/id-generator.js'
+import { TurnService } from '../src/services/turn-service.js'
 import type { TurnItem } from '../src/contracts/items.js'
 import type { ModelRequest, ModelStreamChunk } from '../src/ports/model-client.js'
 import {
@@ -99,8 +110,9 @@ describe('AgentLoop', () => {
     expect(status).toBe('failed')
     expect(failed).toMatchObject({
       kind: 'turn_failed',
-      message: 'model stream exploded'
+      message: expect.stringContaining('model stream exploded')
     })
+    expect(failed?.kind === 'turn_failed' ? failed.message : '').toContain('[Kun turn failed]')
   })
 
   it('fails the turn when the model stream yields an error chunk', async () => {
@@ -122,7 +134,13 @@ describe('AgentLoop', () => {
       event.message === 'model request failed with status 400' &&
       event.code === 'http_400'
     )).toBe(true)
-    expect(events.some((event) => event.kind === 'turn_failed')).toBe(true)
+    const failed = events.find((event) => event.kind === 'turn_failed')
+    expect(failed).toMatchObject({
+      kind: 'turn_failed',
+      message: 'model request failed with status 400',
+      code: 'http_400',
+      severity: 'error'
+    })
   })
 
   it('emits named pipeline lifecycle stages for a model request', async () => {
@@ -148,6 +166,54 @@ describe('AgentLoop', () => {
       'post_send',
       'response_received'
     ])
+  })
+
+  it('records provider endpoint diagnostics for model send stages', async () => {
+    const model = {
+      provider: 'deepseek-compat',
+      model: 'MiniMax-M2',
+      config: {
+        baseUrl: 'https://user:secret@api.minimaxi.com/anthropic?token=hidden#debug',
+        endpointFormat: 'messages',
+        model: 'MiniMax-M2'
+      },
+      async *stream(): AsyncIterable<ModelStreamChunk> {
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+    }
+    const h = makeHarness(model)
+    await bootstrapThread(h, {
+      request: { prompt: 'hello', model: 'mimo-v2.5-pro-ultraspeed' }
+    })
+
+    await h.loop.runTurn(h.threadId, h.turnId)
+    const events = await h.sessionStore.loadEventsSince(h.threadId, 0)
+    const preSend = events.find((event) =>
+      event.kind === 'pipeline_stage' && event.stage === 'pre_send'
+    )
+    const postSend = events.find((event) =>
+      event.kind === 'pipeline_stage' && event.stage === 'post_send'
+    )
+
+    expect(preSend).toMatchObject({
+      kind: 'pipeline_stage',
+      stage: 'pre_send',
+      details: {
+        model: 'mimo-v2.5-pro-ultraspeed',
+        provider: 'deepseek-compat',
+        providerBaseUrl: 'https://api.minimaxi.com/anthropic',
+        endpointFormat: 'messages',
+        configuredModel: 'MiniMax-M2'
+      }
+    })
+    expect(postSend).toMatchObject({
+      kind: 'pipeline_stage',
+      stage: 'post_send',
+      details: {
+        model: 'mimo-v2.5-pro-ultraspeed',
+        providerBaseUrl: 'https://api.minimaxi.com/anthropic'
+      }
+    })
   })
 
   it('aborts the turn when the abort signal fires', async () => {
@@ -870,28 +936,46 @@ describe('AgentLoop', () => {
         return { output: { done: true } }
       }
     })
-    const h = makeHarness(makeFakeModel([
-      {
-        kind: 'tool_call_complete',
-        callId: 'call_streamer',
-        toolName: 'streamer',
-        arguments: {}
-      },
-      { kind: 'completed', stopReason: 'tool_calls' },
-      { kind: 'completed', stopReason: 'stop' }
-    ]), { tools: [streamingTool] })
+    let calls = 0
+    const h = makeHarness({
+      provider: 'streaming-tool',
+      model: 'streaming-tool',
+      async *stream(): AsyncIterable<ModelStreamChunk> {
+        calls += 1
+        if (calls === 1) {
+          yield {
+            kind: 'tool_call_complete',
+            callId: 'call_streamer',
+            toolName: 'streamer',
+            arguments: {}
+          }
+          yield { kind: 'completed', stopReason: 'tool_calls' }
+          return
+        }
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+    }, { tools: [streamingTool] })
     await bootstrapThread(h)
     const status = await h.loop.runTurn(h.threadId, h.turnId)
     expect(status).toBe('completed')
     const events = await h.sessionStore.loadEventsSince(h.threadId, 0)
-    expect(events.some((event) => event.kind === 'item_updated')).toBe(true)
     const partialUpdate = events.find(
       (event) =>
-        event.kind === 'item_updated' &&
+        (event.kind === 'item_created' || event.kind === 'item_updated') &&
         event.item.kind === 'tool_result' &&
+        event.item.status === 'running' &&
         (event.item.output as { partial?: string }).partial === 'hello'
     )
     expect(partialUpdate).toBeDefined()
+    const thread = await h.threadStore.get(h.threadId)
+    const finalResult = thread?.turns
+      .flatMap((turn) => turn.items)
+      .find((item) => item.kind === 'tool_result' && item.callId === 'call_streamer')
+    expect(finalResult).toMatchObject({
+      kind: 'tool_result',
+      status: 'completed',
+      output: { done: true }
+    })
   })
 
   it('waits for GUI user input tool responses and resumes the turn', async () => {
@@ -1433,6 +1517,120 @@ describe('AgentLoop', () => {
       ).toBe('.kunsdd/plan/plan-sidebar-footer-polish.md')
       await expect(readFile(join(workspace, '.kunsdd/plan/plan-sidebar-footer-polish.md'), 'utf8')).resolves.toBe(
         '## Plan\nPolish the sidebar footer.'
+      )
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects forged write calls during plan mode without touching workspace files', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'kun-loop-plan-forged-write-'))
+    const observedToolLists: string[][] = []
+    let calls = 0
+    try {
+      const h = makeHarness(
+        {
+          provider: 'planner',
+          model: 'planner',
+          async *stream(request: ModelRequest): AsyncIterable<ModelStreamChunk> {
+            observedToolLists.push(request.tools.map((tool) => tool.name))
+            calls += 1
+            if (calls === 1) {
+              yield {
+                kind: 'tool_call_complete',
+                callId: 'call_write',
+                toolName: 'write',
+                arguments: {
+                  path: 'forbidden.txt',
+                  content: 'should not exist'
+                }
+              }
+              yield { kind: 'completed', stopReason: 'tool_calls' }
+              return
+            }
+            yield { kind: 'assistant_text_delta', text: '## Plan\nStay read-only until build mode.\n' }
+            yield { kind: 'completed', stopReason: 'stop' }
+          }
+        },
+        { tools: buildDefaultLocalTools() }
+      )
+      await bootstrapThread(h, {
+        workspace,
+        request: {
+          prompt: 'Plan a safe change',
+          mode: 'plan'
+        }
+      })
+
+      const status = await h.loop.runTurn(h.threadId, h.turnId)
+      const items = await h.sessionStore.loadItems(h.threadId)
+      const writeCall = items.find((item) => item.kind === 'tool_call' && item.toolName === 'write')
+      const writeResult = items.find((item) => item.kind === 'tool_result' && item.toolName === 'write')
+
+      expect(status).toBe('completed')
+      expect(observedToolLists[0]).not.toEqual(expect.arrayContaining(['write', 'edit', 'bash']))
+      expect(writeCall).toMatchObject({ kind: 'tool_call', status: 'failed' })
+      expect(writeResult).toMatchObject({ kind: 'tool_result', isError: true })
+      expect(writeResult?.kind === 'tool_result' ? JSON.stringify(writeResult.output) : '')
+        .toContain('not advertised by active tool policy')
+      await expect(readFile(join(workspace, 'forbidden.txt'), 'utf8')).rejects.toThrow()
+      await expect(readFile(join(workspace, '.kunsdd/plan/plan-a-safe-change.md'), 'utf8')).resolves.toBe(
+        '## Plan\nStay read-only until build mode.'
+      )
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects forged bash calls during plan mode without running mutating commands', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'kun-loop-plan-forged-bash-'))
+    let calls = 0
+    try {
+      const h = makeHarness(
+        {
+          provider: 'planner',
+          model: 'planner',
+          async *stream(): AsyncIterable<ModelStreamChunk> {
+            calls += 1
+            if (calls === 1) {
+              yield {
+                kind: 'tool_call_complete',
+                callId: 'call_bash',
+                toolName: 'bash',
+                arguments: {
+                  command: 'touch forbidden.txt'
+                }
+              }
+              yield { kind: 'completed', stopReason: 'tool_calls' }
+              return
+            }
+            yield { kind: 'assistant_text_delta', text: '## Plan\nUse read-only inspection only.\n' }
+            yield { kind: 'completed', stopReason: 'stop' }
+          }
+        },
+        { tools: buildDefaultLocalTools() }
+      )
+      await bootstrapThread(h, {
+        workspace,
+        request: {
+          prompt: 'Plan without shell mutations',
+          mode: 'plan'
+        }
+      })
+
+      const status = await h.loop.runTurn(h.threadId, h.turnId)
+      const items = await h.sessionStore.loadItems(h.threadId)
+      const bashCall = items.find((item) => item.kind === 'tool_call' && item.toolName === 'bash')
+      const bashResult = items.find((item) => item.kind === 'tool_result' && item.toolName === 'bash')
+
+      expect(status).toBe('completed')
+      expect(bashCall).toMatchObject({ kind: 'tool_call', status: 'failed' })
+      expect(bashResult).toMatchObject({ kind: 'tool_result', isError: true })
+      expect(bashResult?.kind === 'tool_result' ? JSON.stringify(bashResult.output) : '')
+        .toContain('not advertised by active tool policy')
+      await expect(readFile(join(workspace, 'forbidden.txt'), 'utf8')).rejects.toThrow()
+      await expect(readFile(join(workspace, '.kunsdd/plan/plan-without-shell-mutations.md'), 'utf8')).resolves.toBe(
+        '## Plan\nUse read-only inspection only.'
       )
     } finally {
       await rm(workspace, { recursive: true, force: true })
@@ -2310,6 +2508,111 @@ describe('FileSessionStore', () => {
     })
     const event = await recorder.record({ kind: 'heartbeat', threadId: 'thr_seq' })
     expect(event.seq).toBe(8)
+  })
+
+  it.each([
+    ['aborted', 'aborted'],
+    ['failed', 'failed']
+  ] as const)('finalizes open turn items in messages.jsonl when a turn is %s', async (finalStatus, expectedToolStatus) => {
+    const nowIso = () => '2026-06-05T00:00:00.000Z'
+    const threadId = `thr_finalize_${finalStatus}`
+    const threadStore = new FileThreadStore({ dataDir, now: () => new Date(nowIso()) })
+    const sessionStore = new FileSessionStore({ dataDir })
+    const bus = new InMemoryEventBus()
+    const turns = new TurnService({
+      threadStore,
+      sessionStore,
+      events: new RuntimeEventRecorder({
+        eventBus: bus,
+        sessionStore,
+        allocateSeq: (id) => bus.allocateSeq(id),
+        nowIso
+      }),
+      inflight: new InflightTracker(),
+      steering: new SteeringQueue(),
+      compactor: new ContextCompactor({ softThreshold: 64, hardThreshold: 128 }),
+      ids: new SequentialIdGenerator(),
+      nowIso
+    })
+
+    await threadStore.upsert(
+      createThreadRecord({ id: threadId, title: 'demo', workspace: '/tmp', model: 'm' })
+    )
+    const { turnId } = await turns.startTurn({
+      threadId,
+      request: { prompt: 'run a tool' }
+    })
+    await turns.applyItem(
+      threadId,
+      makeToolCallItem({
+        id: 'item_tool_open',
+        turnId,
+        threadId,
+        callId: 'call_open',
+        toolName: 'echo',
+        arguments: { text: 'hi' }
+      })
+    )
+    await turns.applyItem(
+      threadId,
+      makeToolResultItem({
+        id: 'item_result_open',
+        turnId,
+        threadId,
+        callId: 'call_open',
+        toolName: 'echo',
+        output: { partial: true },
+        status: 'running'
+      })
+    )
+    await turns.applyItem(
+      threadId,
+      makeApprovalItem({
+        id: 'item_approval_open',
+        turnId,
+        threadId,
+        approvalId: 'approval_open',
+        toolName: 'echo',
+        summary: 'Approve echo'
+      })
+    )
+    await turns.applyItem(
+      threadId,
+      makeUserInputItem({
+        id: 'item_input_open',
+        turnId,
+        threadId,
+        inputId: 'input_open',
+        prompt: 'Need input'
+      })
+    )
+
+    if (finalStatus === 'aborted') {
+      await turns.interruptTurn({ threadId, turnId })
+    } else {
+      await turns.finishTurn({ threadId, turnId, status: 'failed', error: 'boom' })
+    }
+
+    const latestById = new Map((await sessionStore.loadItems(threadId)).map((item) => [item.id, item]))
+    expect(latestById.get('item_tool_open')?.status).toBe(expectedToolStatus)
+    expect(latestById.get('item_result_open')?.status).toBe(expectedToolStatus)
+    expect(latestById.get('item_approval_open')?.status).toBe('expired')
+    expect(latestById.get('item_input_open')?.status).toBe('cancelled')
+    expect(
+      [...latestById.values()].some((item) =>
+        item.turnId === turnId && (item.status === 'pending' || item.status === 'running')
+      )
+    ).toBe(false)
+
+    const rawMessages = await readFile(join(dataDir, 'threads', threadId, 'messages.jsonl'), 'utf-8')
+    const messageLines = rawMessages
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as TurnItem)
+    expect(messageLines.filter((item) => item.id === 'item_tool_open').map((item) => item.status))
+      .toEqual(['pending', expectedToolStatus])
+    expect(messageLines.filter((item) => item.id === 'item_result_open').map((item) => item.status))
+      .toEqual(['running', expectedToolStatus])
   })
 
   it('survives a malformed JSONL line', async () => {

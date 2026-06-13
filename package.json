@@ -1,6 +1,6 @@
 {
-  "name": "deepseek-gui",
-  "productName": "DeepSeek GUI",
+  "name": "kun-gui",
+  "productName": "Kun",
   "version": "0.1.0",
   "description": "Electron workbench for the Kun runtime (HTTP/SSE)",
   "main": "./out/main/index.js",
@@ -13,8 +13,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "dist": "npm run build && npx --yes electron-builder@26.8.1 --config electron-builder.config.cjs --publish never",
-    "dist:mac": "rm -f dist/DeepSeek-GUI-*-mac-* dist/latest-mac.yml && npm run build && npm run dist:mac:x64:dmg && npm run dist:mac:x64:zip && npm run dist:mac:arm64:dmg && npm run dist:mac:arm64:zip && node ./scripts/generate-mac-latest.cjs dist",
-    "dist:mac:signed": "rm -f dist/DeepSeek-GUI-*-mac-* dist/latest-mac.yml && MAC_SIGN=1 npm run dist:mac:x64 && MAC_SIGN=1 npm run dist:mac:arm64 && node ./scripts/generate-mac-latest.cjs dist",
+    "dist:mac": "rm -f dist/Kun-*-mac-* dist/DeepSeek-GUI-*-mac-* dist/latest-mac.yml && npm run build && npm run dist:mac:x64:dmg && npm run dist:mac:x64:zip && npm run dist:mac:arm64:dmg && npm run dist:mac:arm64:zip && node ./scripts/generate-mac-latest.cjs dist",
+    "dist:mac:signed": "rm -f dist/Kun-*-mac-* dist/DeepSeek-GUI-*-mac-* dist/latest-mac.yml && MAC_SIGN=1 npm run dist:mac:x64 && MAC_SIGN=1 npm run dist:mac:arm64 && node ./scripts/generate-mac-latest.cjs dist",
     "dist:mac:arm64": "npm run build && npm run dist:mac:arm64:dmg && npm run dist:mac:arm64:zip",
     "dist:mac:x64": "npm run build && npm run dist:mac:x64:dmg && npm run dist:mac:x64:zip",
     "dist:mac:arm64:dmg": "npx --yes electron-builder@26.8.1 --config electron-builder.config.cjs --publish never --mac dmg --arm64",
@@ -45,6 +45,14 @@
     "@larksuiteoapi/node-sdk": "^1.64.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@tencent-weixin/openclaw-weixin": "2.4.3",
+    "@tiptap/core": "^3.26.0",
+    "@tiptap/extension-image": "^3.26.0",
+    "@tiptap/extension-list": "^3.26.0",
+    "@tiptap/extension-table": "^3.26.0",
+    "@tiptap/markdown": "^3.26.0",
+    "@tiptap/pm": "^3.26.0",
+    "@tiptap/react": "^3.26.0",
+    "@tiptap/starter-kit": "^3.26.0",
     "better-sqlite3": "^12.10.0",
     "electron-store": "^10.1.0",
     "electron-updater": "^6.8.3",
@@ -52,6 +60,7 @@
     "i18next": "^25.4.2",
     "lucide-react": "^0.544.0",
     "openclaw": "file:vendor/openclaw-shim",
+    "pdfjs-dist": "^5.4.394",
     "qrcode.react": "^4.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -84,10 +93,11 @@
     "vite": "^6.2.0",
     "vitest": "^4.1.7"
   },
-  "author": "DeepSeek GUI Contributors",
-  "homepage": "https://deepseek-gui.com",
+  "author": "Kun Contributors",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "homepage": "https://github.com/KunAgent/Kun",
   "repository": {
     "type": "git",
-    "url": "https://github.com/XingYu-Zhong/DeepSeek-GUI.git"
+    "url": "https://github.com/KunAgent/Kun.git"
   }
 }

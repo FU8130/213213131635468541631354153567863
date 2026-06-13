@@ -3,7 +3,10 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { ChatBlock } from '../agent/types'
 import { useChatStore } from '../store/chat-store'
 import type { ChatState } from '../store/chat-store-types'
-import { buildPlanBuildPrompt } from '../plan/plan-prompts'
+import { buildPlanBuildPrompt, buildRefinePlanPrompt } from '../plan/plan-prompts'
+import { buildSddVerifyPrompt } from '../sdd/sdd-verify-prompt'
+import { sddDraftRelativePathForPlanPath, sddDraftTraceRelativePath } from '@shared/sdd'
+import { buildSddTraceSnapshot, parseSddRequirementBlocks } from '@shared/sdd-trace'
 import {
   CODE_PANEL_PREFERRED
 } from './workbench-layout'
@@ -150,7 +153,7 @@ export function useWorkbenchPlanController({
     const planStore = useGuiPlanStore.getState()
     planStore.setSaveStatus('saving')
     try {
-      const result = await window.dsGui.writeWorkspaceFile({
+      const result = await window.kunGui.writeWorkspaceFile({
         workspaceRoot: plan.workspaceRoot,
         path: plan.relativePath,
         content: contentToSave
@@ -173,19 +176,11 @@ export function useWorkbenchPlanController({
     }
   }
 
-  const planTurnOverrides = (
-    targetWorkspaceRoot: string,
-    targetThreadId: string | null
-  ): { guiPlan?: GuiPlanMessageContext } | undefined => {
-    const plan = useGuiPlanStore.getState().activePlan
-    return buildGuiPlanTurnOverrides(plan, targetWorkspaceRoot, targetThreadId)
-  }
-
   const readExistingPlanRelativePaths = async (
     targetWorkspaceRoot: string
   ): Promise<string[]> => {
     try {
-      const result = await window.dsGui.listWorkspaceDirectory({
+      const result = await window.kunGui.listWorkspaceDirectory({
         workspaceRoot: targetWorkspaceRoot,
         path: GUI_PLAN_RELATIVE_DIR
       })
@@ -215,9 +210,12 @@ export function useWorkbenchPlanController({
       return false
     }
     planTurnInFlightRef.current = true
-    const planOverrides = planTurnOverrides(targetWorkspaceRoot, currentChatState.activeThreadId)
     const { workspaceRoot: _workspaceRoot, ...messageOverrides } = overrides ?? {}
-    const guiPlan = messageOverrides.guiPlan ?? planOverrides?.guiPlan ?? buildDraftGuiPlanTurnOverrides({
+    // Default to draft: an explicit guiPlan override (e.g. from SDD upgrade)
+    // takes priority; otherwise we always start a fresh plan. Previously the
+    // active plan was auto-detected as operation: 'refine', which caused new
+    // composer requests to be treated as refinements of an old plan.
+    const guiPlan = messageOverrides.guiPlan ?? buildDraftGuiPlanTurnOverrides({
       request: text,
       workspaceRoot: targetWorkspaceRoot,
       activeThreadId: currentChatState.activeThreadId,
@@ -235,7 +233,7 @@ export function useWorkbenchPlanController({
     meta: PlanResultMatch['meta'],
     shouldOpen: boolean
   ): Promise<void> => {
-    const result = await window.dsGui.readWorkspaceFile({
+    const result = await window.kunGui.readWorkspaceFile({
       workspaceRoot: meta.workspaceRoot,
       path: meta.relativePath
     })
@@ -282,6 +280,103 @@ export function useWorkbenchPlanController({
     }
   }
 
+  // SDD acceptance turn: the agent verifies every requirement block's
+  // acceptance criteria and updates requirement.md in place.
+  const verifyGuiPlan = async (): Promise<void> => {
+    const plan = useGuiPlanStore.getState().activePlan
+    if (!plan) return
+    const draftRelativePath = sddDraftRelativePathForPlanPath(plan.relativePath)
+    if (!draftRelativePath) return
+    if (useChatStore.getState().busy) {
+      setError(t('composerQueuePlaceholder'))
+      return
+    }
+    setMode('agent')
+    await sendMessage(
+      buildSddVerifyPrompt({
+        workspaceRoot: plan.workspaceRoot,
+        draftRelativePath,
+        planRelativePath: plan.relativePath
+      }),
+      'agent',
+      { displayText: `${t('planVerify')}: ${draftRelativePath}` }
+    )
+  }
+
+  // SDD incremental replan: feed only the changed requirement blocks back
+  // into a refine turn, then re-baseline the trace snapshot.
+  const replanChangedRequirements = async (changedIds: string[]): Promise<void> => {
+    const snapshot = useGuiPlanStore.getState()
+    const plan = snapshot.activePlan
+    if (!plan || changedIds.length === 0) return
+    const draftRelativePath = sddDraftRelativePathForPlanPath(plan.relativePath)
+    if (!draftRelativePath) return
+    if (useChatStore.getState().busy) {
+      setError(t('composerQueuePlaceholder'))
+      return
+    }
+
+    const requirement = await window.kunGui.readWorkspaceFile({
+      workspaceRoot: plan.workspaceRoot,
+      path: draftRelativePath
+    })
+    if (!requirement.ok) {
+      setError(requirement.message)
+      return
+    }
+    const lines = requirement.content.split(/\r?\n/)
+    const changedBlocks = parseSddRequirementBlocks(requirement.content)
+      .filter((block) => changedIds.includes(block.id))
+      .map((block) => lines.slice(block.headingLineIndex, block.endLineIndex).join('\n'))
+    const feedback = [
+      `Requirements ${changedIds.join(', ')} changed after this plan was generated.`,
+      'Update only the steps affected by these requirements. Keep all other steps and their covers tags unchanged, and keep every step linked with a covers tag.',
+      '',
+      'Latest requirement blocks:',
+      '```markdown',
+      changedBlocks.join('\n\n'),
+      '```'
+    ].join('\n')
+
+    setMode('plan')
+    const sent = await sendPlanTurn(
+      buildRefinePlanPrompt({
+        feedback,
+        currentPlan: snapshot.content,
+        workspaceRoot: plan.workspaceRoot,
+        planRelativePath: plan.relativePath
+      }),
+      {
+        displayText: t('sddReplanButton'),
+        workspaceRoot: plan.workspaceRoot,
+        guiPlan: {
+          operation: 'refine',
+          workspaceRoot: plan.workspaceRoot,
+          relativePath: plan.relativePath,
+          planId: plan.id,
+          sourceRequest: plan.sourceRequest,
+          title: plan.featureName
+        }
+      }
+    )
+    if (sent) {
+      const tracePath = sddDraftTraceRelativePath(draftRelativePath)
+      if (tracePath) {
+        await window.kunGui
+          .writeWorkspaceFile({
+            workspaceRoot: plan.workspaceRoot,
+            path: tracePath,
+            content: JSON.stringify(
+              buildSddTraceSnapshot(requirement.content, plan.relativePath),
+              null,
+              2
+            )
+          })
+          .catch(() => undefined)
+      }
+    }
+  }
+
   useEffect(() => {
     if (route !== 'chat' && mode === 'plan') {
       setMode('agent')
@@ -292,7 +387,9 @@ export function useWorkbenchPlanController({
     if (latestPlanBlock && lastLoadedPlanBlockIdRef.current === latestPlanBlock.blockId) return
     if (!latestPlanBlock) return
     lastLoadedPlanBlockIdRef.current = latestPlanBlock.blockId
-    const shouldOpen = planTurnInFlightRef.current || mode === 'plan'
+    // Keep generated plans inline until the user explicitly opens the preview.
+    // This avoids squeezing the chat on portrait/narrow screens after a plan turn.
+    const shouldOpen = false
     planTurnInFlightRef.current = false
     void loadPlanFromMeta(latestPlanBlock.meta, shouldOpen).catch((error) => {
       useGuiPlanStore.getState().setOperationStatus(
@@ -300,7 +397,7 @@ export function useWorkbenchPlanController({
         error instanceof Error ? error.message : String(error)
       )
     })
-  }, [latestPlanBlock, loadPlanFromMeta, mode])
+  }, [latestPlanBlock, loadPlanFromMeta])
 
   useEffect(() => {
     if (!busy) planTurnInFlightRef.current = false
@@ -311,6 +408,8 @@ export function useWorkbenchPlanController({
     buildGuiPlan,
     handleGuiPlanCommand,
     openGuiPlanPanel,
-    sendPlanTurn
+    replanChangedRequirements,
+    sendPlanTurn,
+    verifyGuiPlan
   }
 }

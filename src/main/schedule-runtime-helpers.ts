@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {
   AppSettingsV1,
+  ClawImChannelV1,
   ScheduleReasoningEffort,
   ScheduleRunMode,
   ScheduledTaskV1
@@ -63,6 +64,7 @@ export type RunPromptOptions = {
   model: string
   reasoningEffort: ScheduleReasoningEffort
   mode: ScheduleRunMode
+  clawChannel?: ClawImChannelV1 | null
   waitForResult: boolean
   responseTimeoutMs: number
 }
@@ -138,7 +140,7 @@ export function sleep(ms: number): Promise<void> {
 
 export function normalizeTaskModel(model: string): string | undefined {
   const trimmed = model.trim()
-  return trimmed || undefined
+  return trimmed && trimmed.toLowerCase() !== 'auto' ? trimmed : undefined
 }
 
 export function summarizeTaskResult(text: string): string {

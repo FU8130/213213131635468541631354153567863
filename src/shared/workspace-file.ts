@@ -23,6 +23,25 @@ export type WorkspaceFileWritePayload = {
   content: string
 }
 
+export type WorkspaceFileSaveAsPayload = {
+  suggestedName?: string
+  sourcePath?: string
+  workspaceRoot?: string
+  dataBase64?: string
+  mimeType?: string
+}
+
+export type WorkspaceFileSaveAsResult =
+  | {
+      ok: true
+      path: string
+    }
+  | {
+      ok: false
+      canceled?: boolean
+      message: string
+    }
+
 export type WorkspaceFileCreatePayload = {
   path: string
   workspaceRoot: string
@@ -60,6 +79,7 @@ export type ClipboardImageReadResult =
   | {
       ok: true
       name: string
+      localFilePath: string
       mimeType: string
       dataBase64: string
       byteSize: number
@@ -87,6 +107,17 @@ export type WorkspaceImageReadResult =
       dataUrl: string
       mimeType: string
       size: number
+    }
+  | { ok: false; message: string }
+
+export type WorkspacePdfReadResult =
+  | {
+      ok: true
+      path: string
+      dataBase64: string
+      mimeType: 'application/pdf'
+      size: number
+      mtimeMs: number
     }
   | { ok: false; message: string }
 

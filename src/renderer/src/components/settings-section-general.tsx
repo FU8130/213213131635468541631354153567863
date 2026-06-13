@@ -9,13 +9,10 @@ import {
   WRITE_INLINE_COMPLETION_MODEL_IDS,
   isKunRuntimeInsecure
 } from '@shared/app-settings'
-import type { GuiUpdateChannel } from '@shared/gui-update'
 import type { SkillRootId } from '../lib/skill-root-preference'
 import { FolderOpen, Loader2, PencilLine, RefreshCw, Settings } from 'lucide-react'
-import { GuiUpdateControl } from './settings-gui-update'
 import {
   InlineNoticeView,
-  SecretInput,
   SectionJumpButton,
   SettingsCard,
   SettingRow,
@@ -28,14 +25,8 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
     tCommon,
     form,
     kun,
-    activeApiKey,
     update,
     updateKun,
-    updateSharedCredential,
-    sharedApiKey,
-    sharedBaseUrl,
-    showApiKey,
-    setShowApiKey,
     showRuntimeToken,
     setShowRuntimeToken,
     portError,
@@ -44,16 +35,6 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
     pickWorkspace,
     resetWorkspaceToDefault,
     workspacePickerError,
-    guiUpdateInfo,
-    checkingGuiUpdate,
-    downloadingGuiUpdate,
-    installingGuiUpdate,
-    guiUpdateDownloaded,
-    guiUpdateProgress,
-    guiUpdateError,
-    checkGuiUpdate,
-    downloadGuiUpdate,
-    installGuiUpdate,
     logPath,
     logDirOpenError,
     setLogDirOpenError,
@@ -94,44 +75,23 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
     splitSettingsList,
     listSettingsText
   } = ctx
-  const platform = typeof window !== 'undefined' ? window.dsGui?.platform ?? '' : ''
+  const platform = typeof window !== 'undefined' ? window.kunGui?.platform ?? '' : ''
   const openAtLoginSupported = platform === 'win32' || platform === 'darwin'
   const startMinimizedSupported = platform === 'win32'
   const desktopBehavior = form.appBehavior
+  const fontScaleOptions: AppSettingsV1['uiFontScale'][] = ['small', 'medium', 'large']
+  const selectedFontScaleIndex = fontScaleOptions.indexOf(form.uiFontScale)
+  const fontScaleIndex = selectedFontScaleIndex >= 0 ? selectedFontScaleIndex : 0
+  const currentFontScale = fontScaleOptions[fontScaleIndex]
+  const fontScaleLabel = (scale: AppSettingsV1['uiFontScale']): string => {
+    if (scale === 'large') return t('fontScaleLarge')
+    if (scale === 'medium') return t('fontScaleMedium')
+    return t('fontScaleSmall')
+  }
 
   return (
             <>
               <SettingsCard title={t('sectionGeneral')}>
-                <SettingRow
-                  title={t('apiKey')}
-                  description={t('apiKeySharedDesc')}
-                  control={
-                    <SecretInput
-                      value={sharedApiKey}
-                      onChange={(value) => updateSharedCredential({ apiKey: value })}
-                      visible={showApiKey}
-                      onToggleVisibility={() => setShowApiKey((value: boolean) => !value)}
-                      placeholder="sk-..."
-                      autoComplete="off"
-                      invalid={!activeApiKey.trim()}
-                      showLabel={t('showSecret')}
-                      hideLabel={t('hideSecret')}
-                      className="md:max-w-md"
-                    />
-                  }
-                />
-                <SettingRow
-                  title={t('baseUrl')}
-                  description={t('baseUrlSharedDesc')}
-                  control={
-                    <input
-                      className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30 md:max-w-md"
-                      placeholder={t('baseUrlPlaceholder')}
-                      value={sharedBaseUrl}
-                      onChange={(e) => updateSharedCredential({ baseUrl: e.target.value })}
-                    />
-                  }
-                />
                 <SettingRow
                   title={t('language')}
                   description={t('languageDesc')}
@@ -162,45 +122,32 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
                   }
                 />
                 <SettingRow
-                  title={t('onboardingPreview')}
-                  description={t('onboardingPreviewDesc')}
-                  control={
-                    <button
-                      type="button"
-                      onClick={openOnboardingPreview}
-                      className="w-full rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover"
-                    >
-                      {t('onboardingPreviewOpen')}
-                    </button>
-                  }
-                />
-                <SettingRow
                   title={t('fontScale')}
                   description={t('fontScaleDesc')}
                   control={
-                    <select
-                      className={selectControlClass}
-                      value={form.uiFontScale}
-                      onChange={(e) =>
-                        update({
-                          uiFontScale: e.target.value as AppSettingsV1['uiFontScale']
-                        })
-                      }
-                    >
-                      <option value="small">{t('fontScaleSmall')}</option>
-                      <option value="medium">{t('fontScaleMedium')}</option>
-                      <option value="large">{t('fontScaleLarge')}</option>
-                    </select>
-                  }
-                />
-                <SettingRow
-                  title={t('turnCompleteNotification')}
-                  description={t('turnCompleteNotificationDesc')}
-                  control={
-                    <Toggle
-                      checked={form.notifications.turnComplete}
-                      onChange={(v) => update({ notifications: { turnComplete: v } })}
-                    />
+                    <div className="w-full min-w-0 md:max-w-md">
+                      <div className="flex items-center justify-between text-[12px] font-medium text-ds-faint">
+                        {fontScaleOptions.map((scale) => (
+                          <span key={scale}>{fontScaleLabel(scale)}</span>
+                        ))}
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={fontScaleOptions.length - 1}
+                        step={1}
+                        value={fontScaleIndex}
+                        aria-label={t('fontScale')}
+                        className="mt-2 w-full accent-accent"
+                        onChange={(e) => {
+                          const nextScale = fontScaleOptions[Number(e.target.value)] ?? 'medium'
+                          update({ uiFontScale: nextScale })
+                        }}
+                      />
+                      <div className="mt-1.5 text-[13px] font-medium text-ds-muted">
+                        {t('fontScaleCurrent', { value: fontScaleLabel(currentFontScale) })}
+                      </div>
+                    </div>
                   }
                 />
                 <SettingRow
@@ -288,44 +235,30 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
                     />
                   }
                 />
-              </SettingsCard>
-
-              <SettingsCard title={t('guiUpdate')} className="mt-6">
                 <SettingRow
-                  title={t('guiUpdateChannel')}
-                  description={t('guiUpdateChannelDesc')}
+                  title={t('turnCompleteNotification')}
+                  description={t('turnCompleteNotificationDesc')}
                   control={
-                    <select
-                      className={selectControlClass}
-                      value={form.guiUpdate.channel}
-                      onChange={(e) =>
-                        update({
-                          guiUpdate: { channel: e.target.value as GuiUpdateChannel }
-                        })
-                      }
-                    >
-                      <option value="frontier">{t('guiUpdateChannelFrontier')}</option>
-                      <option value="stable">{t('guiUpdateChannelStable')}</option>
-                    </select>
+                    <Toggle
+                      checked={form.notifications.turnComplete}
+                      onChange={(v) => update({ notifications: { turnComplete: v } })}
+                    />
                   }
                 />
+              </SettingsCard>
+
+              <SettingsCard title={t('onboardingPreview')} className="mt-6">
                 <SettingRow
-                  title={t('guiUpdate')}
-                  description={t('guiUpdateDesc')}
+                  title={t('onboardingPreview')}
+                  description={t('onboardingPreviewDesc')}
                   control={
-                    <GuiUpdateControl
-                      info={guiUpdateInfo}
-                      checking={checkingGuiUpdate}
-                      downloading={downloadingGuiUpdate}
-                      installing={installingGuiUpdate}
-                      downloaded={guiUpdateDownloaded}
-                      progress={guiUpdateProgress}
-                      error={guiUpdateError}
-                      onCheck={checkGuiUpdate}
-                      onDownload={downloadGuiUpdate}
-                      onInstall={installGuiUpdate}
-                      t={t}
-                    />
+                    <button
+                      type="button"
+                      onClick={openOnboardingPreview}
+                      className="w-full rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover"
+                    >
+                      {t('onboardingPreviewOpen')}
+                    </button>
                   }
                 />
               </SettingsCard>
@@ -376,12 +309,12 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
                       <button
                         type="button"
                         className="inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-1.5 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover disabled:opacity-50"
-                        disabled={typeof window.dsGui?.openLogDir !== 'function'}
+                        disabled={typeof window.kunGui?.openLogDir !== 'function'}
                         onClick={async () => {
-                          if (typeof window.dsGui?.openLogDir !== 'function') return
+                          if (typeof window.kunGui?.openLogDir !== 'function') return
                           setLogDirOpenError(null)
                           try {
-                            const result = await window.dsGui.openLogDir()
+                            const result = await window.kunGui.openLogDir()
                             if (!result.ok) setLogDirOpenError(result.message ?? 'Unknown error')
                           } catch (e) {
                             setLogDirOpenError(e instanceof Error ? e.message : String(e))

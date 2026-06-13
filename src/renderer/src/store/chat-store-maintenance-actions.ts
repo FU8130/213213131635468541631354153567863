@@ -40,7 +40,6 @@ import {
   collectAssistantTextForTurn,
   findLatestUserBlockId,
   findReusableEmptyThreadId,
-  hasPendingRuntimeWork,
   reconcileOptimisticUserBlock,
   settlePendingRuntimeWorkAfterInterrupt,
   threadSnapshotLooksRunning,
@@ -664,7 +663,7 @@ export function createMaintenanceActions(
       }))
     } catch (e) {
       const msg = formatRuntimeError(e)
-      void window.dsGui.logError('approval', 'Failed to submit approval decision', {
+      void window.kunGui.logError('approval', 'Failed to submit approval decision', {
         message: msg,
         blockId
       }).catch(() => undefined)
@@ -751,7 +750,7 @@ export function createMaintenanceActions(
       }))
     } catch (e) {
       const msg = formatRuntimeError(e)
-      void window.dsGui.logError('user-input', 'Failed to resolve user input', {
+      void window.kunGui.logError('user-input', 'Failed to resolve user input', {
         message: msg,
         blockId
       }).catch(() => undefined)
@@ -773,20 +772,32 @@ export function createMaintenanceActions(
     const { activeThreadId, currentTurnId } = get()
     if (!activeThreadId || !currentTurnId) return
     const p = getProvider()
+    // Settle the UI before notifying the runtime: a slow or hung
+    // interruptTurn must not keep the stop button unresponsive. The event
+    // stream is aborted first because onDeltas/onTool flip `busy` back on
+    // while the backend turn is still streaming.
+    sseAbortRef.current?.abort()
+    sseAbortRef.current = null
+    settleInterruptedTurn(set, get)
     try {
       await p.interruptTurn(activeThreadId, currentTurnId, { discard: options?.discard === true })
-      settleInterruptedTurn(set, get)
-      void get().refreshThreads()
-      void get().drainQueuedMessages()
     } catch (e) {
       const msg = formatRuntimeError(e)
-      void window.dsGui.logError('interrupt', 'Failed to interrupt turn', { message: msg }).catch(() => undefined)
+      void window.kunGui.logError('interrupt', 'Failed to interrupt turn', { message: msg }).catch(() => undefined)
       set({
         error: msg,
         ...(shouldOpenSettingsForError(e)
           ? { route: 'settings' as const, settingsSection: 'agents' as const }
           : {})
       })
+    }
+    void get().refreshThreads()
+    // Re-sync from the runtime snapshot and re-subscribe the event stream
+    // aborted above; recoverActiveTurn also drains queued messages once the
+    // thread is idle. Skip when the user already moved on to another thread
+    // or a newer stream owns the subscription.
+    if (get().activeThreadId === activeThreadId && sseAbortRef.current === null) {
+      await get().recoverActiveTurn()
     }
   }
   }

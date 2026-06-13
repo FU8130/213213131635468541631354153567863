@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { buildSddDraftRelativePath, normalizeSddRelativePath } from '@shared/sdd'
+import { buildSddDraftRelativePath, isSddDraftRelativePath, normalizeSddRelativePath } from '@shared/sdd'
 import { browserStorage } from '../lib/browser-storage'
 
 export type SddDraftSaveStatus = 'saved' | 'dirty' | 'saving' | 'error'
@@ -50,7 +50,7 @@ export type SddDraftState = {
   clearActiveDraft: () => void
 }
 
-const SDD_DRAFT_REGISTRY_STORAGE_KEY = 'deepseekgui.sdd.draft.registry.v1'
+const SDD_DRAFT_REGISTRY_STORAGE_KEY = 'kun.sdd.draft.registry.v1'
 
 function normalizeWorkspaceRoot(value: string | undefined | null): string {
   return (value ?? '').trim().replaceAll('\\', '/').replace(/\/+$/, '')
@@ -64,7 +64,7 @@ function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-function draftId(workspaceRoot: string, relativePath: string): string {
+export function buildSddDraftId(workspaceRoot: string, relativePath: string): string {
   return `${normalizeWorkspaceRoot(workspaceRoot)}:${normalizeSddRelativePath(relativePath)}`
 }
 
@@ -87,6 +87,10 @@ function normalizeDraft(raw: unknown, fallbackId = ''): SddDraft | null {
   const workspaceRoot = normalizeWorkspaceRoot(normalizeText(raw.workspaceRoot))
   const relativePath = normalizeSddRelativePath(normalizeText(raw.relativePath))
   if (!id || !workspaceRoot || !relativePath) return null
+  // Pre-unit-layout registry entries (.kunsdd/draft/...) are retired here in
+  // one place: dropping the draft also drops its activeByWorkspace pointer
+  // and content snapshot downstream.
+  if (!isSddDraftRelativePath(relativePath)) return null
   const absolutePath = normalizeText(raw.absolutePath)
   const createdAt = normalizeText(raw.createdAt) || new Date(0).toISOString()
   const updatedAt = normalizeText(raw.updatedAt) || createdAt
@@ -163,7 +167,7 @@ export function createSddDraft(options: {
   const workspaceRoot = normalizeWorkspaceRoot(options.workspaceRoot)
   const relativePath = buildSddDraftRelativePath(options.id)
   return {
-    id: draftId(workspaceRoot, relativePath),
+    id: buildSddDraftId(workspaceRoot, relativePath),
     workspaceRoot,
     relativePath,
     ...(options.absolutePath ? { absolutePath: options.absolutePath } : {}),
@@ -206,6 +210,14 @@ export function readRememberedSddDraft(workspaceRoot: string): SddDraft | null {
   const id = registry.activeByWorkspace[workspace]
   const draft = registry.drafts[id ?? ''] ?? null
   return draft && normalizeWorkspaceRoot(draft.workspaceRoot) === workspace ? draft : null
+}
+
+export function readRememberedSddDrafts(workspaceRoot?: string): SddDraft[] {
+  const registry = readRegistry()
+  const workspace = workspaceRoot ? normalizeWorkspaceRoot(workspaceRoot) : ''
+  return Object.values(registry.drafts)
+    .filter((draft) => !workspace || normalizeWorkspaceRoot(draft.workspaceRoot) === workspace)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
 }
 
 export function readRememberedSddDraftContent(

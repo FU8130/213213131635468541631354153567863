@@ -1,4 +1,8 @@
-import { resolveWriteInlineCompletionApiKey } from '@shared/app-settings'
+import {
+  resolveKunImageGenerationSettings,
+  resolveKunRuntimeSettings,
+  resolveWriteInlineCompletionApiKey
+} from '@shared/app-settings'
 import { rendererRuntimeClient } from '../agent/runtime-client'
 import type { WriteWorkspaceGet, WriteWorkspaceSet, WriteWorkspaceState } from './write-workspace-store-types'
 import {
@@ -23,11 +27,22 @@ function applyWriteSettingsState(
   settings: Awaited<ReturnType<typeof rendererRuntimeClient.getSettings>>
 ): ReturnType<typeof withResolvedInlineCompletionSettings> {
   const write = withResolvedInlineCompletionSettings(normalizeWriteSettings(settings.write), settings)
+  const imageGeneration = resolveKunImageGenerationSettings(settings)
+  const runtime = resolveKunRuntimeSettings(settings)
   set({
     defaultWorkspaceRoot: write.defaultWorkspaceRoot,
     workspaceRoots: write.workspaces,
     inlineCompletion: write.inlineCompletion,
+    selectionAssist: write.selectionAssist,
     inlineCompletionApiReady: Boolean(resolveWriteInlineCompletionApiKey(settings).trim()),
+    imageGenReady: Boolean(
+      imageGeneration?.enabled &&
+      imageGeneration.baseUrl.trim() &&
+      imageGeneration.apiKey.trim() &&
+      imageGeneration.model.trim()
+    ),
+    // Prototype generation rides the primary chat provider, not the image one.
+    prototypeReady: Boolean(runtime.apiKey.trim() && runtime.model.trim()),
     settingsError: null
   })
   return write

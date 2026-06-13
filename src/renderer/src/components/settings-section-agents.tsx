@@ -1,16 +1,12 @@
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import type {
   ApprovalPolicy,
-  AppSettingsPatch,
   AppSettingsV1,
-  ModelEndpointFormat,
   ModelProviderProfileV1,
-  ModelProviderSettingsV1,
   SandboxMode
 } from '@shared/app-settings'
 import {
   DEFAULT_MODEL_PROVIDER_ID,
-  MODEL_ENDPOINT_FORMATS,
   DEFAULT_WRITE_INLINE_COMPLETION_BASE_URL,
   DEFAULT_WRITE_INLINE_COMPLETION_MAX_TOKENS,
   DEFAULT_WRITE_INLINE_COMPLETION_MODEL,
@@ -18,23 +14,26 @@ import {
   DEFAULT_KUN_DATA_DIR,
   WRITE_INLINE_COMPLETION_MODEL_IDS,
   defaultModelProviderSettings,
-  isKunRuntimeInsecure,
-  normalizeModelProviderId
+  isKunRuntimeInsecure
 } from '@shared/app-settings'
 import type { GuiUpdateChannel } from '@shared/gui-update'
 import type { SkillRootId } from '../lib/skill-root-preference'
-import { Ban, ChevronDown, FolderOpen, Loader2, Plus, RefreshCw, Settings, Trash2 } from 'lucide-react'
+import { Ban, FolderOpen, Loader2, RefreshCw, Settings, Trash2 } from 'lucide-react'
 import { GuiUpdateControl } from './settings-gui-update'
 import {
+  AdvancedSettingsDisclosure,
   InlineNoticeView,
+  ModelSelect,
   SecretInput,
   SectionJumpButton,
   SettingsCard,
   SettingRow,
   Toggle
 } from './settings-controls'
-import { formatCompactNumber, formatCost } from '../hooks/use-thread-usage'
+import { formatCompactNumber } from '../hooks/use-thread-usage'
 import { parseUsageResponse } from '../hooks/usage-response'
+
+export { modelProvidersSettingsPatch } from './settings-section-providers'
 
 function statusPill(status: string | undefined): string {
   if (status === 'available') return 'border-emerald-400/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200'
@@ -52,8 +51,6 @@ function compactList(values: unknown, empty: string): string {
 
 type TokenEconomySavingsSummary = {
   tokens: number
-  costUsd: number
-  costCny: number | null
 }
 
 type TokenEconomySavingsState = {
@@ -66,28 +63,6 @@ const EMPTY_TOKEN_ECONOMY_SAVINGS_STATE: TokenEconomySavingsState = {
   loading: false,
   loaded: false,
   summary: null
-}
-
-const MODEL_ENDPOINT_FORMAT_LABEL_KEYS: Record<ModelEndpointFormat, string> = {
-  chat_completions: 'modelEndpointChatCompletions',
-  responses: 'modelEndpointResponses',
-  messages: 'modelEndpointMessages'
-}
-
-export function modelProvidersSettingsPatch(input: {
-  provider: ModelProviderSettingsV1
-  providers: ModelProviderProfileV1[]
-  kun?: Partial<AppSettingsV1['agents']['kun']>
-}): AppSettingsPatch {
-  const defaultProvider = input.providers.find((item) => item.id === DEFAULT_MODEL_PROVIDER_ID)
-  return {
-    provider: {
-      apiKey: defaultProvider?.apiKey ?? input.provider.apiKey,
-      baseUrl: defaultProvider?.baseUrl ?? input.provider.baseUrl,
-      providers: input.providers
-    },
-    ...(input.kun ? { agents: { kun: input.kun } } : {})
-  }
 }
 
 type ModelContextProfileSummary = {
@@ -151,44 +126,14 @@ function usageNumber(value: unknown): number {
 }
 
 async function loadTokenEconomySavingsSummary(): Promise<TokenEconomySavingsSummary | null> {
-  if (typeof window === 'undefined' || typeof window.dsGui?.runtimeRequest !== 'function') return null
-  const response = await window.dsGui.runtimeRequest('/v1/usage?group_by=thread', 'GET')
+  if (typeof window === 'undefined' || typeof window.kunGui?.runtimeRequest !== 'function') return null
+  const response = await window.kunGui.runtimeRequest('/v1/usage?group_by=thread', 'GET')
   if (!response.ok || !response.body.trim()) return null
   const parsed = parseUsageResponse<{ totals?: Record<string, unknown> }>(response.body, 'token economy usage')
   const totals = parsed.totals ?? {}
   const tokens = usageNumber(totals.token_economy_savings_tokens)
-  const costUsd = usageNumber(totals.token_economy_savings_usd)
-  const costCny =
-    typeof totals.token_economy_savings_cny === 'number' && Number.isFinite(totals.token_economy_savings_cny)
-      ? totals.token_economy_savings_cny
-    : null
-  if (tokens <= 0 && costUsd <= 0 && (costCny ?? 0) <= 0) return null
-  return { tokens, costUsd, costCny }
-}
-
-function AdvancedSettingsDisclosure({
-  title,
-  description,
-  children
-}: {
-  title: string
-  description?: string
-  children: ReactNode
-}): ReactElement {
-  return (
-    <details className="group overflow-hidden rounded-xl border border-ds-border-muted bg-ds-main/35">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-ds-hover/70 [&::-webkit-details-marker]:hidden">
-        <span className="min-w-0">
-          <span className="block text-[13px] font-semibold text-ds-ink">{title}</span>
-          {description ? (
-            <span className="mt-1 block text-[12.5px] leading-5 text-ds-faint">{description}</span>
-          ) : null}
-        </span>
-        <ChevronDown className="h-4 w-4 shrink-0 text-ds-faint transition group-open:rotate-180" strokeWidth={1.9} />
-      </summary>
-      <div className="border-t border-ds-border-muted bg-ds-card/45">{children}</div>
-    </details>
-  )
+  if (tokens <= 0) return null
+  return { tokens }
 }
 
 export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): ReactElement {
@@ -196,16 +141,9 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
     t,
     tCommon,
     form,
-    provider: providerFromContext,
     kun,
-    activeApiKey,
     update,
     updateKun,
-    updateSharedCredential,
-    sharedApiKey,
-    sharedBaseUrl,
-    showApiKey,
-    setShowApiKey,
     showRuntimeToken,
     setShowRuntimeToken,
     portError,
@@ -324,7 +262,6 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
     }
   }, [tokenEconomy.enabled])
   const tokenEconomySavings = tokenEconomySavingsState.summary
-  const settingsLocale = typeof form?.locale === 'string' ? form.locale : undefined
   const storage = kun.storage ?? {
     backend: 'hybrid',
     sqlitePath: ''
@@ -419,61 +356,18 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
       }
     })
   }
-  const provider = providerFromContext ?? form.provider ?? defaultModelProviderSettings()
+  const provider = form.provider ?? defaultModelProviderSettings()
   const modelProviders = provider.providers as ModelProviderProfileV1[]
   const activeProviderId = kun.providerId?.trim() || DEFAULT_MODEL_PROVIDER_ID
   const activeProvider = modelProviders.find((item) => item.id === activeProviderId) ?? modelProviders[0]
-  const updateModelProviders = (
-    providers: ModelProviderProfileV1[],
-    kunPatch?: Partial<AppSettingsV1['agents']['kun']>
-  ): void => {
-    update(modelProvidersSettingsPatch({
-      provider,
-      providers,
-      kun: kunPatch
-    }))
+  const activeProviderModels = activeProvider?.models ?? []
+  const selectKunProvider = (providerId: string): void => {
+    const nextProvider = modelProviders.find((item) => item.id === providerId) ?? activeProvider
+    const nextModel = nextProvider?.models.includes(kun.model)
+      ? kun.model
+      : nextProvider?.models[0] ?? kun.model
+    updateKun({ providerId, model: nextModel, apiKey: '', baseUrl: '' })
   }
-  const updateModelProvider = (id: string, patch: Partial<ModelProviderProfileV1>): void => {
-    updateModelProviders(modelProviders.map((item) => item.id === id ? { ...item, ...patch } : item))
-  }
-  const updateModelProviderId = (id: string, value: string): void => {
-    if (id === DEFAULT_MODEL_PROVIDER_ID) return
-    const nextId = normalizeModelProviderId(value)
-    if (!nextId || nextId === id) return
-    if (modelProviders.some((item) => item.id === nextId && item.id !== id)) return
-    updateModelProviders(
-      modelProviders.map((item) => item.id === id ? { ...item, id: nextId } : item),
-      activeProviderId === id ? { providerId: nextId } : undefined
-    )
-  }
-  const addModelProvider = (): void => {
-    const baseId = 'custom-provider'
-    let index = modelProviders.length + 1
-    let id = `${baseId}-${index}`
-    const used = new Set(modelProviders.map((item) => item.id))
-    while (used.has(id)) {
-      index += 1
-      id = `${baseId}-${index}`
-    }
-    const nextProvider: ModelProviderProfileV1 = {
-      id,
-      name: t('modelProviderNewName', { index }),
-      apiKey: '',
-      baseUrl: 'https://api.example.com/v1',
-      endpointFormat: 'chat_completions',
-      models: []
-    }
-    updateModelProviders([...modelProviders, nextProvider], { providerId: id })
-  }
-  const removeModelProvider = (id: string): void => {
-    if (id === DEFAULT_MODEL_PROVIDER_ID) return
-    const nextProviders = modelProviders.filter((item) => item.id !== id)
-    updateModelProviders(
-      nextProviders,
-      activeProviderId === id ? { providerId: DEFAULT_MODEL_PROVIDER_ID } : undefined
-    )
-  }
-  const canEditActiveProviderId = Boolean(activeProvider && activeProvider.id !== DEFAULT_MODEL_PROVIDER_ID)
 
   return (
             <>
@@ -500,6 +394,43 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                     }
                   />
                   <SettingRow
+                    title={t('kunProvider')}
+                    description={t('kunProviderSelectDesc')}
+                    control={
+                      <select
+                        className={selectControlClass}
+                        value={activeProvider?.id ?? DEFAULT_MODEL_PROVIDER_ID}
+                        onChange={(e) => selectKunProvider(e.target.value)}
+                      >
+                        {modelProviders.map((item) => (
+                          <option key={item.id} value={item.id}>{item.name}</option>
+                        ))}
+                      </select>
+                    }
+                  />
+                  <SettingRow
+                    title={t('kunModel')}
+                    description={t('kunModelDesc')}
+                    control={
+                      <ModelSelect
+                        value={kun.model}
+                        options={activeProviderModels}
+                        optionLabel={(model) =>
+                          model === activeProviderModels[0]
+                            ? t('modelSelectDefaultSuffix', { model })
+                            : model}
+                        allowCustom
+                        customLabel={t('modelSelectCustomOption')}
+                        customPlaceholder={t('modelSelectCustomPlaceholder')}
+                        selectClassName={selectControlClass}
+                        onChange={(model) => {
+                          const next = model.trim()
+                          updateKun({ model: next || (activeProviderModels[0] ?? kun.model) })
+                        }}
+                      />
+                    }
+                  />
+                  <SettingRow
                     title={t('codePromptPrefix')}
                     description={t('codePromptPrefixDesc')}
                     wideControl
@@ -518,165 +449,6 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                       description={t('kunAssistantAdvancedDesc')}
                     >
                       <div className="divide-y divide-ds-border-muted">
-                  <SettingRow
-                    title={t('kunProvider')}
-                    description={t('kunProviderDesc')}
-                    wideControl
-                    control={
-                      <div className="grid gap-3 lg:grid-cols-[260px_minmax(0,1fr)]">
-                        <div className="space-y-2">
-                          <select
-                            className={selectControlClass}
-                            value={activeProvider?.id ?? DEFAULT_MODEL_PROVIDER_ID}
-                            onChange={(e) => updateKun({ providerId: e.target.value })}
-                          >
-                            {modelProviders.map((item) => (
-                              <option key={item.id} value={item.id}>{item.name}</option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            onClick={addModelProvider}
-                            className="inline-flex h-9 items-center gap-2 rounded-full border border-ds-border bg-ds-card px-3 text-[12.5px] font-medium text-ds-muted shadow-sm transition hover:bg-ds-hover hover:text-ds-ink"
-                          >
-                            <Plus className="h-3.5 w-3.5" strokeWidth={1.9} />
-                            {t('modelProviderAdd')}
-                          </button>
-                        </div>
-                        {activeProvider ? (
-                          <div className="grid gap-3 rounded-xl border border-ds-border-muted bg-ds-main/35 p-3">
-                            <div className="grid gap-3 md:grid-cols-2">
-                              <label className="grid gap-1.5 text-[12px] font-semibold text-ds-muted">
-                                {t('modelProviderName')}
-                                <input
-                                  className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] font-normal text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                                  value={activeProvider.name}
-                                  onChange={(e) => updateModelProvider(activeProvider.id, { name: e.target.value })}
-                                />
-                              </label>
-                              <label className="grid gap-1.5 text-[12px] font-semibold text-ds-muted">
-                                {t('modelProviderId')}
-                                <input
-                                  className={`w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 font-mono text-[13px] font-normal shadow-sm ${
-                                    canEditActiveProviderId
-                                      ? 'text-ds-ink focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30'
-                                      : 'text-ds-faint'
-                                  }`}
-                                  value={activeProvider.id}
-                                  readOnly={!canEditActiveProviderId}
-                                  spellCheck={false}
-                                  onChange={(e) => updateModelProviderId(activeProvider.id, e.target.value)}
-                                />
-                              </label>
-                            </div>
-                            <label className="grid gap-1.5 text-[12px] font-semibold text-ds-muted">
-                              {t('modelProviderApiKey')}
-                              <SecretInput
-                                value={activeProvider.apiKey}
-                                onChange={(value) => updateModelProvider(activeProvider.id, { apiKey: value })}
-                                visible={showApiKey}
-                                onToggleVisibility={() => setShowApiKey((value: boolean) => !value)}
-                                placeholder={t('kunApiKeyPlaceholder')}
-                                autoComplete="off"
-                                showLabel={t('showSecret')}
-                                hideLabel={t('hideSecret')}
-                              />
-                            </label>
-                            <label className="grid gap-1.5 text-[12px] font-semibold text-ds-muted">
-                              {t('modelProviderBaseUrl')}
-                              <input
-                                className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] font-normal text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                                value={activeProvider.baseUrl}
-                                placeholder={t('baseUrlPlaceholder')}
-                                onChange={(e) => updateModelProvider(activeProvider.id, { baseUrl: e.target.value })}
-                              />
-                            </label>
-                            <label className="grid gap-1.5 text-[12px] font-semibold text-ds-muted">
-                              {t('modelProviderEndpointFormat')}
-                              <select
-                                className={selectControlClass}
-                                value={activeProvider.endpointFormat}
-                                onChange={(e) => updateModelProvider(activeProvider.id, {
-                                  endpointFormat: e.target.value as ModelEndpointFormat
-                                })}
-                              >
-                                {MODEL_ENDPOINT_FORMATS.map((format) => (
-                                  <option key={format} value={format}>
-                                    {t(MODEL_ENDPOINT_FORMAT_LABEL_KEYS[format])}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="grid gap-1.5 text-[12px] font-semibold text-ds-muted">
-                              {t('modelProviderModels')}
-                              <textarea
-                                className="min-h-24 w-full min-w-0 resize-y rounded-xl border border-ds-border bg-ds-card px-3 py-2 font-mono text-[12.5px] font-normal text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                                value={activeProvider.models.join('\n')}
-                                placeholder="deepseek-v4-pro&#10;deepseek-v4-flash"
-                                onChange={(e) => updateModelProvider(activeProvider.id, {
-                                  models: e.target.value.split('\n').map((item) => item.trim()).filter(Boolean)
-                                })}
-                              />
-                            </label>
-                            {activeProvider.id !== DEFAULT_MODEL_PROVIDER_ID ? (
-                              <button
-                                type="button"
-                                onClick={() => removeModelProvider(activeProvider.id)}
-                                className="inline-flex h-9 w-fit items-center gap-2 rounded-full border border-red-200/70 bg-red-50 px-3 text-[12.5px] font-medium text-red-700 transition hover:bg-red-100 dark:border-red-900/70 dark:bg-red-950/25 dark:text-red-200 dark:hover:bg-red-950/40"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" strokeWidth={1.9} />
-                                {t('modelProviderRemove')}
-                              </button>
-                            ) : null}
-                          </div>
-                        ) : null}
-                      </div>
-                    }
-                  />
-                  <SettingRow
-                    title={t('kunApiKey')}
-                    description={t('kunApiKeyDesc')}
-                    control={
-                      <div className="w-full min-w-0 md:max-w-md">
-                        <SecretInput
-                          value={kun.apiKey}
-                          onChange={(value) => updateKun({ apiKey: value })}
-                          visible={showApiKey}
-                          onToggleVisibility={() => setShowApiKey((value: boolean) => !value)}
-                          placeholder={t('kunApiKeyPlaceholder')}
-                          autoComplete="off"
-                          showLabel={t('showSecret')}
-                          hideLabel={t('hideSecret')}
-                        />
-                        <p className="mt-2 text-[12px] text-ds-muted">
-                          {kun.apiKey.trim()
-                            ? t('kunApiKeyOverride')
-                            : sharedApiKey.trim()
-                              ? t('kunApiKeyInherited')
-                              : t('kunApiKeyMissing')}
-                        </p>
-                      </div>
-                    }
-                  />
-                  <SettingRow
-                    title={t('kunBaseUrl')}
-                    description={t('kunBaseUrlDesc')}
-                    control={
-                      <div className="w-full min-w-0 md:max-w-md">
-                        <input
-                          className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                          value={kun.baseUrl}
-                          placeholder={t('kunBaseUrlPlaceholder')}
-                          onChange={(e) => updateKun({ baseUrl: e.target.value })}
-                        />
-                        <p className="mt-2 text-[12px] text-ds-muted">
-                          {kun.baseUrl.trim()
-                            ? t('kunBaseUrlOverride', { value: kun.baseUrl.trim() })
-                            : t('kunBaseUrlInherited', { value: sharedBaseUrl.trim() || t('kunBaseUrlOfficial') })}
-                        </p>
-                      </div>
-                    }
-                  />
                   <SettingRow
                     title={t('port')}
                     description={t('portDesc')}
@@ -725,13 +497,32 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                     }
                   />
                   <SettingRow
-                    title={t('kunModel')}
-                    description={t('kunModelDesc')}
+                    title={t('runtimeToken')}
+                    description={t('runtimeTokenDesc')}
                     control={
-                      <input
-                        className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30 md:max-w-md"
-                        value={kun.model}
-                        onChange={(e) => updateKun({ model: e.target.value })}
+                      <SecretInput
+                        value={kun.runtimeToken}
+                        onChange={(value) => updateKun({ runtimeToken: value })}
+                        visible={showRuntimeToken}
+                        onToggleVisibility={() => setShowRuntimeToken((value: boolean) => !value)}
+                        showLabel={t('showSecret')}
+                        hideLabel={t('hideSecret')}
+                        className="md:max-w-md"
+                      />
+                    }
+                  />
+                  <SettingRow
+                    title={t('kunInsecure')}
+                    description={
+                      kun.runtimeToken.trim()
+                        ? t('kunInsecureDesc')
+                        : t('kunInsecureForcedDesc')
+                    }
+                    control={
+                      <Toggle
+                        checked={isKunRuntimeInsecure(kun)}
+                        disabled={!kun.runtimeToken.trim()}
+                        onChange={(v) => updateKun({ insecure: v })}
                       />
                     }
                   />
@@ -752,12 +543,7 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                             {tokenEconomySavings ? (
                               <span>
                                 {t('kunTokenEconomySavings', {
-                                  tokens: formatCompactNumber(tokenEconomySavings.tokens),
-                                  cost: formatCost(
-                                    tokenEconomySavings.costUsd,
-                                    settingsLocale,
-                                    tokenEconomySavings.costCny
-                                  )
+                                  tokens: formatCompactNumber(tokenEconomySavings.tokens)
                                 })}
                               </span>
                             ) : tokenEconomySavingsState.loading ? (
@@ -770,10 +556,324 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                       </div>
                     }
                   />
+                </SettingsCard>
+              </div>
+
+              <div className="mt-6" ref={permissionsSectionRef}>
+                <SettingsCard title={t('permissions')}>
+                  <div className="px-3 py-4">
+                    <InlineNoticeView notice={{ tone: 'info', message: t('permissionsBehaviorHint') }} />
+                  </div>
+                  <SettingRow
+                    title={t('approvalPolicy')}
+                    description={t('approvalPolicyDesc')}
+                    control={
+                      <select
+                        className={selectControlClass}
+                        value={kun.approvalPolicy}
+                        onChange={(e) => updateKun({ approvalPolicy: e.target.value as ApprovalPolicy })}
+                      >
+                        <option value="auto">{t('approvalAuto')}</option>
+                        <option value="on-request">{t('approvalOnRequest')}</option>
+                        <option value="untrusted">{t('approvalUntrusted')}</option>
+                        <option value="suggest">{t('approvalSuggest')}</option>
+                        <option value="never">{t('approvalNever')}</option>
+                      </select>
+                    }
+                  />
+                  <SettingRow
+                    title={t('sandboxMode')}
+                    description={t('sandboxModeDesc')}
+                    control={
+                      <select
+                        className={selectControlClass}
+                        value={kun.sandboxMode}
+                        onChange={(e) => updateKun({ sandboxMode: e.target.value as SandboxMode })}
+                      >
+                        <option value="workspace-write">{t('sandboxWorkspaceWrite')}</option>
+                        <option value="read-only">{t('sandboxReadOnly')}</option>
+                        <option value="danger-full-access">{t('sandboxFullAccess')}</option>
+                        <option value="external-sandbox">{t('sandboxExternal')}</option>
+                      </select>
+                    }
+                  />
+                </SettingsCard>
+              </div>
+
+
+              <div ref={skillSectionRef} className="mt-6">
+                <SettingsCard title={t('skill')}>
+                  <SettingRow
+                    title={t('skillsLocation')}
+                    description={t('skillsLocationDesc')}
+                    control={
+                      <select
+                        className={selectControlClass}
+                        value={selectedSkillRoot?.id ?? skillRootId}
+                        onChange={(event) => setSkillRootId(event.target.value as SkillRootId)}
+                      >
+                        {skillRootOptions.map((option: any) => (
+                          <option key={option.id} value={option.id} disabled={!option.available}>
+                            {option.available ? option.label : `${option.label} · ${tCommon('pluginSkillRootNeedsWorkspace')}`}
+                          </option>
+                        ))}
+                      </select>
+                    }
+                  />
+                  <SettingRow
+                    title={t('skillsPath')}
+                    description={t('skillsPathDesc')}
+                    control={
+                      <div className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] text-ds-muted shadow-sm">
+                        <code className="block break-all rounded-lg bg-ds-main/70 px-2 py-1 font-mono text-[12px] text-ds-ink">
+                          {selectedSkillRoot?.path || t('skillsRootUnavailable')}
+                        </code>
+                      </div>
+                    }
+                  />
+                  <SettingRow
+                    title={t('skillsScanDirs')}
+                    description={t('skillsScanDirsDesc')}
+                    wideControl
+                    control={
+                      <textarea
+                        value={listSettingsText(form.claw.skills.extraDirs)}
+                        onChange={(event) =>
+                          update({
+                            claw: {
+                              skills: {
+                                extraDirs: splitSettingsList(event.target.value)
+                              }
+                            }
+                          })
+                        }
+                        spellCheck={false}
+                        placeholder={selectedSkillRoot?.path || '~/.agents/skills'}
+                        className="min-h-24 w-full rounded-2xl border border-ds-border bg-ds-card px-4 py-3 font-mono text-[13px] leading-6 text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
+                      />
+                    }
+                  />
+                  <SettingRow
+                    title={t('skillsActions')}
+                    description={t('skillsActionsDesc')}
+                    wideControl
+                    control={
+                      <div className="flex w-full flex-col gap-3">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void openSkillRoot()}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover"
+                          >
+                            <FolderOpen className="h-4 w-4" />
+                            {t('skillsOpenRoot')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openPlugins()}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-ds-userbubble px-3 py-2 text-[13px] font-medium text-ds-userbubbleFg shadow-sm transition hover:opacity-90"
+                          >
+                            <Settings className="h-4 w-4" />
+                            {t('skillsOpenPlugins')}
+                          </button>
+                        </div>
+                        {skillNotice ? <InlineNoticeView notice={skillNotice} /> : null}
+                      </div>
+                    }
+                  />
+                </SettingsCard>
+              </div>
+
+              <div ref={mcpSectionRef} className="mt-6">
+                <SettingsCard title={t('mcp')}>
+                  <SettingRow
+                    title={t('mcpSearchEnabled')}
+                    description={t('mcpSearchEnabledDesc')}
+                    control={
+                      <Toggle
+                        checked={mcpSearch.enabled}
+                        onChange={(v) => updateMcpSearch({ enabled: v })}
+                      />
+                    }
+                  />
                   <div className="px-3 py-4">
                     <AdvancedSettingsDisclosure
-                      title={t('kunTokenEconomyAdvanced')}
-                      description={t('kunTokenEconomyAdvancedDesc')}
+                      title={t('mcpAdvanced')}
+                      description={t('mcpAdvancedDesc')}
+                    >
+                      <div className="divide-y divide-ds-border-muted">
+                  <SettingRow
+                    title={t('mcpSearchMode')}
+                    description={t('mcpSearchModeDesc')}
+                    control={
+                      <select
+                        className={selectControlClass}
+                        value={mcpSearch.mode}
+                        disabled={!mcpSearch.enabled}
+                        onChange={(e) => updateMcpSearch({ mode: e.target.value })}
+                      >
+                        <option value="auto">{t('mcpSearchModeAuto')}</option>
+                        <option value="search">{t('mcpSearchModeSearch')}</option>
+                        <option value="direct">{t('mcpSearchModeDirect')}</option>
+                      </select>
+                    }
+                  />
+                  <SettingRow
+                    title={t('mcpSearchLimits')}
+                    description={t('mcpSearchLimitsDesc')}
+                    wideControl
+                    control={
+                      <div className="grid gap-3 sm:grid-cols-4">
+                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
+                          {t('mcpSearchAutoThreshold')}
+                          <input
+                            type="number"
+                            min={1}
+                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
+                            value={mcpSearch.autoThresholdToolCount}
+                            disabled={!mcpSearch.enabled}
+                            onChange={(e) => updateMcpSearch({ autoThresholdToolCount: Number(e.target.value) })}
+                          />
+                        </label>
+                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
+                          {t('mcpSearchTopKDefault')}
+                          <input
+                            type="number"
+                            min={1}
+                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
+                            value={mcpSearch.topKDefault}
+                            disabled={!mcpSearch.enabled}
+                            onChange={(e) => updateMcpSearch({ topKDefault: Number(e.target.value) })}
+                          />
+                        </label>
+                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
+                          {t('mcpSearchTopKMax')}
+                          <input
+                            type="number"
+                            min={1}
+                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
+                            value={mcpSearch.topKMax}
+                            disabled={!mcpSearch.enabled}
+                            onChange={(e) => updateMcpSearch({ topKMax: Number(e.target.value) })}
+                          />
+                        </label>
+                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
+                          {t('mcpSearchMinScore')}
+                          <input
+                            type="number"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
+                            value={mcpSearch.minScore}
+                            disabled={!mcpSearch.enabled}
+                            onChange={(e) => updateMcpSearch({ minScore: Number(e.target.value) })}
+                          />
+                        </label>
+                      </div>
+                    }
+                  />
+                  <SettingRow
+                    title={t('mcpSearchDiagnostics')}
+                    description={t('mcpSearchDiagnosticsDesc')}
+                    wideControl
+                    control={
+                      <div className="grid gap-2 text-[12.5px] text-ds-muted sm:grid-cols-3">
+                        <div className="rounded-xl border border-ds-border-muted bg-ds-main/40 px-3 py-2">
+                          {t('mcpSearchStatus')}: <span className="font-mono text-ds-ink">{toolDiagnostics?.mcpSearch?.active ? t('mcpSearchActive') : t('mcpSearchInactive')}</span>
+                        </div>
+                        <div className="rounded-xl border border-ds-border-muted bg-ds-main/40 px-3 py-2">
+                          {t('mcpSearchIndexed')}: <span className="font-mono text-ds-ink">{toolDiagnostics?.mcpSearch?.indexedToolCount ?? runtimeInfo?.capabilities?.mcp?.search?.indexedToolCount ?? 0}</span>
+                        </div>
+                        <div className="rounded-xl border border-ds-border-muted bg-ds-main/40 px-3 py-2">
+                          {t('mcpSearchAdvertised')}: <span className="font-mono text-ds-ink">{toolDiagnostics?.mcpSearch?.advertisedToolCount ?? runtimeInfo?.capabilities?.mcp?.search?.advertisedToolCount ?? 0}</span>
+                        </div>
+                      </div>
+                    }
+                  />
+                  <SettingRow
+                    title={t('configFilePath')}
+                    description={t('mcpPathDesc')}
+                    control={
+                      <div className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] text-ds-muted shadow-sm">
+                        <code className="block break-all rounded-lg bg-ds-main/70 px-2 py-1 font-mono text-[12px] text-ds-ink">
+                          {mcpConfigPath}
+                        </code>
+                      </div>
+                    }
+                  />
+                  <SettingRow
+                    title={t('mcpEditor')}
+                    description={t('mcpEditorDesc')}
+                    wideControl
+                    control={
+                      <div className="flex w-full flex-col gap-3">
+                        <div className="rounded-xl border border-ds-border bg-ds-main/50 px-3 py-2 text-[12px] leading-5 text-ds-muted">
+                          {mcpConfigExists ? t('mcpFileStatusReady') : t('mcpFileStatusMissing')}
+                        </div>
+                        <textarea
+                          value={mcpConfigText}
+                          onChange={(e) => setMcpConfigText(e.target.value)}
+                          spellCheck={false}
+                          placeholder={mcpLoading ? t('loading') : ''}
+                          className="min-h-[320px] w-full rounded-2xl border border-ds-border bg-ds-card px-4 py-3 font-mono text-[13px] leading-6 text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
+                        />
+                      </div>
+                    }
+                  />
+                  <SettingRow
+                    title={t('mcpActions')}
+                    description={t('mcpRuntimeHint')}
+                    wideControl
+                    control={
+                      <div className="flex w-full flex-col gap-3">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void saveMcpConfig()}
+                            disabled={mcpBusy || mcpLoading}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-ds-userbubble px-3 py-2 text-[13px] font-medium text-ds-userbubbleFg shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
+                          >
+                            {mcpBusy ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                            ) : null}
+                            {t('mcpSave')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void loadMcpConfig()}
+                            disabled={mcpBusy || mcpLoading}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover disabled:cursor-not-allowed disabled:opacity-55"
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${mcpLoading ? 'animate-spin' : ''}`} strokeWidth={1.75} />
+                            {t('mcpReload')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void openMcpConfigDir()}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover"
+                          >
+                            <FolderOpen className="h-4 w-4" />
+                            {t('mcpOpenDir')}
+                          </button>
+                        </div>
+                        {mcpNotice ? <InlineNoticeView notice={mcpNotice} /> : null}
+                      </div>
+                    }
+                  />
+                      </div>
+                    </AdvancedSettingsDisclosure>
+                  </div>
+                </SettingsCard>
+              </div>
+
+
+              <div className="mt-6">
+                <SettingsCard title={t('kunAdvanced')}>
+                  <div className="px-3 py-4">
+                    <AdvancedSettingsDisclosure
+                      title={t('kunAdvancedDetails')}
+                      description={t('kunAdvancedDetailsDesc')}
                     >
                       <div className="divide-y divide-ds-border-muted">
                   <SettingRow
@@ -893,50 +993,6 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                       </div>
                     }
                   />
-                  <SettingRow
-                    title={t('runtimeToken')}
-                    description={t('runtimeTokenDesc')}
-                    control={
-                      <SecretInput
-                        value={kun.runtimeToken}
-                        onChange={(value) => updateKun({ runtimeToken: value })}
-                        visible={showRuntimeToken}
-                        onToggleVisibility={() => setShowRuntimeToken((value: boolean) => !value)}
-                        showLabel={t('showSecret')}
-                        hideLabel={t('hideSecret')}
-                        className="md:max-w-md"
-                      />
-                    }
-                  />
-                  <SettingRow
-                    title={t('kunInsecure')}
-                    description={
-                      kun.runtimeToken.trim()
-                        ? t('kunInsecureDesc')
-                        : t('kunInsecureForcedDesc')
-                    }
-                    control={
-                      <Toggle
-                        checked={isKunRuntimeInsecure(kun)}
-                        disabled={!kun.runtimeToken.trim()}
-                        onChange={(v) => updateKun({ insecure: v })}
-                      />
-                    }
-                  />
-                      </div>
-                    </AdvancedSettingsDisclosure>
-                  </div>
-                </SettingsCard>
-              </div>
-
-              <div className="mt-6">
-                <SettingsCard title={t('kunAdvanced')}>
-                  <div className="px-3 py-4">
-                    <AdvancedSettingsDisclosure
-                      title={t('kunAdvancedDetails')}
-                      description={t('kunAdvancedDetailsDesc')}
-                    >
-                      <div className="divide-y divide-ds-border-muted">
                   <SettingRow
                     title={t('kunModelContextProfile')}
                     description={t('kunModelContextProfileDesc')}
@@ -1295,318 +1351,6 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                       </div>
                     </AdvancedSettingsDisclosure>
                   </div>
-                </SettingsCard>
-              </div>
-
-              <div ref={skillSectionRef} className="mt-6">
-                <SettingsCard title={t('skill')}>
-                  <SettingRow
-                    title={t('skillsLocation')}
-                    description={t('skillsLocationDesc')}
-                    control={
-                      <select
-                        className={selectControlClass}
-                        value={selectedSkillRoot?.id ?? skillRootId}
-                        onChange={(event) => setSkillRootId(event.target.value as SkillRootId)}
-                      >
-                        {skillRootOptions.map((option: any) => (
-                          <option key={option.id} value={option.id} disabled={!option.available}>
-                            {option.available ? option.label : `${option.label} · ${tCommon('pluginSkillRootNeedsWorkspace')}`}
-                          </option>
-                        ))}
-                      </select>
-                    }
-                  />
-                  <SettingRow
-                    title={t('skillsPath')}
-                    description={t('skillsPathDesc')}
-                    control={
-                      <div className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] text-ds-muted shadow-sm">
-                        <code className="block break-all rounded-lg bg-ds-main/70 px-2 py-1 font-mono text-[12px] text-ds-ink">
-                          {selectedSkillRoot?.path || t('skillsRootUnavailable')}
-                        </code>
-                      </div>
-                    }
-                  />
-                  <SettingRow
-                    title={t('skillsScanDirs')}
-                    description={t('skillsScanDirsDesc')}
-                    wideControl
-                    control={
-                      <textarea
-                        value={listSettingsText(form.claw.skills.extraDirs)}
-                        onChange={(event) =>
-                          update({
-                            claw: {
-                              skills: {
-                                extraDirs: splitSettingsList(event.target.value)
-                              }
-                            }
-                          })
-                        }
-                        spellCheck={false}
-                        placeholder={selectedSkillRoot?.path || '~/.agents/skills'}
-                        className="min-h-24 w-full rounded-2xl border border-ds-border bg-ds-card px-4 py-3 font-mono text-[13px] leading-6 text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                      />
-                    }
-                  />
-                  <SettingRow
-                    title={t('skillsActions')}
-                    description={t('skillsActionsDesc')}
-                    wideControl
-                    control={
-                      <div className="flex w-full flex-col gap-3">
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void openSkillRoot()}
-                            className="inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover"
-                          >
-                            <FolderOpen className="h-4 w-4" />
-                            {t('skillsOpenRoot')}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => openPlugins()}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-ds-userbubble px-3 py-2 text-[13px] font-medium text-ds-userbubbleFg shadow-sm transition hover:opacity-90"
-                          >
-                            <Settings className="h-4 w-4" />
-                            {t('skillsOpenPlugins')}
-                          </button>
-                        </div>
-                        {skillNotice ? <InlineNoticeView notice={skillNotice} /> : null}
-                      </div>
-                    }
-                  />
-                </SettingsCard>
-              </div>
-
-              <div ref={mcpSectionRef} className="mt-6">
-                <SettingsCard title={t('mcp')}>
-                  <SettingRow
-                    title={t('mcpSearchEnabled')}
-                    description={t('mcpSearchEnabledDesc')}
-                    control={
-                      <Toggle
-                        checked={mcpSearch.enabled}
-                        onChange={(v) => updateMcpSearch({ enabled: v })}
-                      />
-                    }
-                  />
-                  <div className="px-3 py-4">
-                    <AdvancedSettingsDisclosure
-                      title={t('mcpAdvanced')}
-                      description={t('mcpAdvancedDesc')}
-                    >
-                      <div className="divide-y divide-ds-border-muted">
-                  <SettingRow
-                    title={t('mcpSearchMode')}
-                    description={t('mcpSearchModeDesc')}
-                    control={
-                      <select
-                        className={selectControlClass}
-                        value={mcpSearch.mode}
-                        disabled={!mcpSearch.enabled}
-                        onChange={(e) => updateMcpSearch({ mode: e.target.value })}
-                      >
-                        <option value="auto">{t('mcpSearchModeAuto')}</option>
-                        <option value="search">{t('mcpSearchModeSearch')}</option>
-                        <option value="direct">{t('mcpSearchModeDirect')}</option>
-                      </select>
-                    }
-                  />
-                  <SettingRow
-                    title={t('mcpSearchLimits')}
-                    description={t('mcpSearchLimitsDesc')}
-                    wideControl
-                    control={
-                      <div className="grid gap-3 sm:grid-cols-4">
-                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
-                          {t('mcpSearchAutoThreshold')}
-                          <input
-                            type="number"
-                            min={1}
-                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                            value={mcpSearch.autoThresholdToolCount}
-                            disabled={!mcpSearch.enabled}
-                            onChange={(e) => updateMcpSearch({ autoThresholdToolCount: Number(e.target.value) })}
-                          />
-                        </label>
-                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
-                          {t('mcpSearchTopKDefault')}
-                          <input
-                            type="number"
-                            min={1}
-                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                            value={mcpSearch.topKDefault}
-                            disabled={!mcpSearch.enabled}
-                            onChange={(e) => updateMcpSearch({ topKDefault: Number(e.target.value) })}
-                          />
-                        </label>
-                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
-                          {t('mcpSearchTopKMax')}
-                          <input
-                            type="number"
-                            min={1}
-                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                            value={mcpSearch.topKMax}
-                            disabled={!mcpSearch.enabled}
-                            onChange={(e) => updateMcpSearch({ topKMax: Number(e.target.value) })}
-                          />
-                        </label>
-                        <label className="flex min-w-0 flex-col gap-1.5 text-[12px] font-medium text-ds-muted">
-                          {t('mcpSearchMinScore')}
-                          <input
-                            type="number"
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            className="rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                            value={mcpSearch.minScore}
-                            disabled={!mcpSearch.enabled}
-                            onChange={(e) => updateMcpSearch({ minScore: Number(e.target.value) })}
-                          />
-                        </label>
-                      </div>
-                    }
-                  />
-                  <SettingRow
-                    title={t('mcpSearchDiagnostics')}
-                    description={t('mcpSearchDiagnosticsDesc')}
-                    wideControl
-                    control={
-                      <div className="grid gap-2 text-[12.5px] text-ds-muted sm:grid-cols-3">
-                        <div className="rounded-xl border border-ds-border-muted bg-ds-main/40 px-3 py-2">
-                          {t('mcpSearchStatus')}: <span className="font-mono text-ds-ink">{toolDiagnostics?.mcpSearch?.active ? t('mcpSearchActive') : t('mcpSearchInactive')}</span>
-                        </div>
-                        <div className="rounded-xl border border-ds-border-muted bg-ds-main/40 px-3 py-2">
-                          {t('mcpSearchIndexed')}: <span className="font-mono text-ds-ink">{toolDiagnostics?.mcpSearch?.indexedToolCount ?? runtimeInfo?.capabilities?.mcp?.search?.indexedToolCount ?? 0}</span>
-                        </div>
-                        <div className="rounded-xl border border-ds-border-muted bg-ds-main/40 px-3 py-2">
-                          {t('mcpSearchAdvertised')}: <span className="font-mono text-ds-ink">{toolDiagnostics?.mcpSearch?.advertisedToolCount ?? runtimeInfo?.capabilities?.mcp?.search?.advertisedToolCount ?? 0}</span>
-                        </div>
-                      </div>
-                    }
-                  />
-                  <SettingRow
-                    title={t('configFilePath')}
-                    description={t('mcpPathDesc')}
-                    control={
-                      <div className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] text-ds-muted shadow-sm">
-                        <code className="block break-all rounded-lg bg-ds-main/70 px-2 py-1 font-mono text-[12px] text-ds-ink">
-                          {mcpConfigPath}
-                        </code>
-                      </div>
-                    }
-                  />
-                  <SettingRow
-                    title={t('mcpEditor')}
-                    description={t('mcpEditorDesc')}
-                    wideControl
-                    control={
-                      <div className="flex w-full flex-col gap-3">
-                        <div className="rounded-xl border border-ds-border bg-ds-main/50 px-3 py-2 text-[12px] leading-5 text-ds-muted">
-                          {mcpConfigExists ? t('mcpFileStatusReady') : t('mcpFileStatusMissing')}
-                        </div>
-                        <textarea
-                          value={mcpConfigText}
-                          onChange={(e) => setMcpConfigText(e.target.value)}
-                          spellCheck={false}
-                          placeholder={mcpLoading ? t('loading') : ''}
-                          className="min-h-[320px] w-full rounded-2xl border border-ds-border bg-ds-card px-4 py-3 font-mono text-[13px] leading-6 text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                        />
-                      </div>
-                    }
-                  />
-                  <SettingRow
-                    title={t('mcpActions')}
-                    description={t('mcpRuntimeHint')}
-                    wideControl
-                    control={
-                      <div className="flex w-full flex-col gap-3">
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void saveMcpConfig()}
-                            disabled={mcpBusy || mcpLoading}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-ds-userbubble px-3 py-2 text-[13px] font-medium text-ds-userbubbleFg shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
-                          >
-                            {mcpBusy ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
-                            ) : null}
-                            {t('mcpSave')}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void loadMcpConfig()}
-                            disabled={mcpBusy || mcpLoading}
-                            className="inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover disabled:cursor-not-allowed disabled:opacity-55"
-                          >
-                            <RefreshCw className={`h-3.5 w-3.5 ${mcpLoading ? 'animate-spin' : ''}`} strokeWidth={1.75} />
-                            {t('mcpReload')}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void openMcpConfigDir()}
-                            className="inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover"
-                          >
-                            <FolderOpen className="h-4 w-4" />
-                            {t('mcpOpenDir')}
-                          </button>
-                        </div>
-                        {mcpNotice ? <InlineNoticeView notice={mcpNotice} /> : null}
-                      </div>
-                    }
-                  />
-                      </div>
-                    </AdvancedSettingsDisclosure>
-                  </div>
-                </SettingsCard>
-              </div>
-
-              <div ref={permissionsSectionRef} className="mt-6">
-                <SettingsCard title={t('permissions')}>
-                  <SettingRow
-                    title={t('approvalPolicy')}
-                    description={t('approvalPolicyDesc')}
-                    control={
-                      <select
-                        className={selectControlClass}
-                        value={kun.approvalPolicy}
-                        onChange={(e) =>
-                          updateKun({
-                            approvalPolicy: e.target.value as ApprovalPolicy
-                          })
-                        }
-                      >
-                        <option value="auto">{t('approvalAuto')}</option>
-                        <option value="on-request">{t('approvalOnRequest')}</option>
-                        <option value="untrusted">{t('approvalUntrusted')}</option>
-                        <option value="suggest">{t('approvalSuggest')}</option>
-                        <option value="never">{t('approvalNever')}</option>
-                      </select>
-                    }
-                  />
-                  <SettingRow
-                    title={t('sandboxMode')}
-                    description={t('sandboxModeDesc')}
-                    control={
-                      <select
-                        className={selectControlClass}
-                        value={kun.sandboxMode}
-                        onChange={(e) =>
-                          updateKun({
-                            sandboxMode: e.target.value as SandboxMode
-                          })
-                        }
-                      >
-                        <option value="workspace-write">{t('sandboxWorkspaceWrite')}</option>
-                        <option value="read-only">{t('sandboxReadOnly')}</option>
-                        <option value="danger-full-access">{t('sandboxFullAccess')}</option>
-                        <option value="external-sandbox">{t('sandboxExternal')}</option>
-                      </select>
-                    }
-                  />
                 </SettingsCard>
               </div>
             </>

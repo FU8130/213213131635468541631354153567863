@@ -12,6 +12,7 @@ export type InlineCompletionRequestContext = {
   lineNumber: number
   column: number
   docLength: number
+  /** Windowed context around the cursor — never the full document. */
   prefix: string
   suffix: string
   prefixWindow: string

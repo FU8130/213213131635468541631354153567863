@@ -14,6 +14,26 @@ import { withFileMutationQueue } from './file-mutation-queue.js'
 import type { EditLocalToolOptions, WriteLocalToolOptions } from './builtin-tool-types.js'
 import { defaultEditLocalToolOperations, defaultWriteLocalToolOperations } from './builtin-tool-operations.js'
 import { parseEditInstructions, resolveWorkspacePath, withToolBoundary } from './builtin-tool-utils.js'
+import { assertCanWritePath } from './sandbox-policy.js'
+
+/**
+ * Arguments that failed JSON parsing arrive as `{ __raw: "<partial json>" }`
+ * (tool-argument-repair fallback). The dominant cause is the model's output
+ * limit truncating an oversized payload mid-string, so answer with guidance
+ * the model can act on instead of a generic missing-field error.
+ */
+function truncatedArgumentsError(raw: unknown): { output: { error: string }; isError: true } | null {
+  if (typeof raw !== 'string') return null
+  return {
+    output: {
+      error:
+        'tool arguments were not valid JSON — they were likely truncated by your output limit. ' +
+        `Received ${raw.length} characters. Retry with a much smaller payload: ` +
+        'write a short skeleton first, then extend the file with several small edit calls.'
+    },
+    isError: true
+  }
+}
 
 export function createWriteLocalTool(_options: WriteLocalToolOptions = {}): LocalTool {
   const mkdirOp = _options.operations?.mkdir ?? defaultWriteLocalToolOperations.mkdir!
@@ -33,12 +53,15 @@ export function createWriteLocalTool(_options: WriteLocalToolOptions = {}): Loca
     policy: 'on-request',
     toolKind: 'file_change',
     execute: async (args, context) => withToolBoundary(async () => {
+      const truncated = truncatedArgumentsError(args.__raw)
+      if (truncated) return truncated
       const rawPath = typeof args.path === 'string' ? args.path : ''
       const content = typeof args.content === 'string' ? args.content : null
       if (!rawPath.trim() || content == null) {
         return { output: { error: 'path and content are required' }, isError: true }
       }
       const { absolutePath, relativePath } = resolveWorkspacePath(rawPath, context)
+      assertCanWritePath(absolutePath, context)
       return withFileMutationQueue(absolutePath, async () => {
         await mkdirOp(dirname(absolutePath))
         await writeFileOp(absolutePath, content)
@@ -88,12 +111,15 @@ export function createEditLocalTool(_options: EditLocalToolOptions = {}): LocalT
     policy: 'on-request',
     toolKind: 'file_change',
     execute: async (args, context) => withToolBoundary(async () => {
+      const truncated = truncatedArgumentsError(args.__raw)
+      if (truncated) return truncated
       const rawPath = typeof args.path === 'string' ? args.path : ''
       const edits = parseEditInstructions(args)
       if (!rawPath.trim() || edits.length === 0) {
         return { output: { error: 'path and at least one edit are required' }, isError: true }
       }
       const { absolutePath, relativePath } = resolveWorkspacePath(rawPath, context)
+      assertCanWritePath(absolutePath, context)
       return withFileMutationQueue(absolutePath, async () => {
         const rawSource = await readFileOp(absolutePath)
         const { bom, text: source } = stripBom(rawSource)

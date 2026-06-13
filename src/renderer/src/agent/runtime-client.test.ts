@@ -45,10 +45,11 @@ describe('rendererRuntimeClient', () => {
   it('caches settings reads until invalidated', async () => {
     const getSettings = vi.fn(async () => settings('sk-1'))
     vi.stubGlobal('window', {
-      dsGui: {
+      kunGui: {
         getSettings,
         setSettings: vi.fn(),
         runtimeRequest: vi.fn(),
+        restartRuntime: vi.fn(),
         startSse: vi.fn(),
         stopSse: vi.fn(),
         onSseEvent: vi.fn(),
@@ -69,10 +70,11 @@ describe('rendererRuntimeClient', () => {
     const getSettings = vi.fn(async () => settings('sk-1'))
     const setSettings = vi.fn(async () => settings('sk-2'))
     vi.stubGlobal('window', {
-      dsGui: {
+      kunGui: {
         getSettings,
         setSettings,
         runtimeRequest: vi.fn(),
+        restartRuntime: vi.fn(),
         startSse: vi.fn(),
         stopSse: vi.fn(),
         onSseEvent: vi.fn(),
@@ -89,5 +91,25 @@ describe('rendererRuntimeClient', () => {
     expect(cached.agents.kun.apiKey).toBe('sk-2')
     expect(getSettings).toHaveBeenCalledTimes(1)
     expect(setSettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards explicit runtime restarts through the preload bridge', async () => {
+    const restartRuntime = vi.fn(async () => undefined)
+    vi.stubGlobal('window', {
+      kunGui: {
+        getSettings: vi.fn(),
+        setSettings: vi.fn(),
+        runtimeRequest: vi.fn(),
+        restartRuntime,
+        startSse: vi.fn(),
+        stopSse: vi.fn(),
+        onSseEvent: vi.fn(),
+        onSseEnd: vi.fn(),
+        onSseError: vi.fn()
+      }
+    })
+
+    await expect(rendererRuntimeClient.restartRuntime()).resolves.toBeUndefined()
+    expect(restartRuntime).toHaveBeenCalledTimes(1)
   })
 })

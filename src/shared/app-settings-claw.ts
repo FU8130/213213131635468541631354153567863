@@ -69,6 +69,7 @@ export function defaultClawSettings(): ClawSettingsV1 {
       secret: '',
       weixinBridgeUrl: DEFAULT_WEIXIN_BRIDGE_RPC_URL,
       workspaceRoot: '',
+      providerId: '',
       model: DEFAULT_CLAW_MODEL,
       mode: 'agent',
       responseTimeoutMs: 120_000
@@ -113,6 +114,7 @@ export function normalizeClawSettings(input: ClawSettingsPatchV1 | undefined): C
       secret: typeof im.secret === 'string' ? im.secret.trim() : '',
       weixinBridgeUrl: weixinBridgeUrl || legacyOpenClawGatewayUrl || defaults.im.weixinBridgeUrl,
       workspaceRoot: typeof im.workspaceRoot === 'string' ? im.workspaceRoot.trim() : '',
+      providerId: typeof im.providerId === 'string' ? im.providerId.trim() : '',
       model: typeof im.model === 'string' && im.model.trim() ? im.model.trim() : DEFAULT_CLAW_MODEL,
       mode: normalizeRunMode(im.mode),
       responseTimeoutMs: normalizePositiveInteger(im.responseTimeoutMs, defaults.im.responseTimeoutMs, 5_000, 600_000)
@@ -132,6 +134,7 @@ export function normalizeClawSettings(input: ClawSettingsPatchV1 | undefined): C
             provider,
             label,
             enabled: normalizeBoolean(raw.enabled, true),
+            providerId: typeof raw.providerId === 'string' ? raw.providerId.trim() : '',
             model: normalizeClawModel(raw.model),
             threadId,
             workspaceRoot: typeof raw.workspaceRoot === 'string' ? raw.workspaceRoot.trim() : '',
@@ -146,6 +149,9 @@ export function normalizeClawSettings(input: ClawSettingsPatchV1 | undefined): C
                   .map((conversation) => normalizeClawImConversation(conversation))
                   .filter((conversation): conversation is ClawImConversationV1 => conversation != null)
               : [],
+            ...(typeof raw.welcomeSentAt === 'string' && raw.welcomeSentAt.trim()
+              ? { welcomeSentAt: raw.welcomeSentAt }
+              : {}),
             createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : now,
             updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : now
           }

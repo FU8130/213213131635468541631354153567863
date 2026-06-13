@@ -45,16 +45,22 @@ import {
   splitSettingsList
 } from './settings-utils'
 import { loadKunDiagnostics } from '../lib/load-kun-diagnostics'
-import { emitRendererSettingsChanged } from '../lib/keyboard-shortcut-settings'
+import { SETTINGS_CHANGED_EVENT, emitRendererSettingsChanged } from '../lib/keyboard-shortcut-settings'
 import {
   AgentsSettingsSection,
   ClawSettingsSection,
+  EasterEggSettingsSection,
   GeneralSettingsSection,
+  ImageGenerationSettingsSection,
   KeyboardShortcutsSettingsSection,
+  MediaGenerationSettingsSection,
+  ProvidersSettingsSection,
+  SpeechToTextSettingsSection,
+  UpdatesSettingsSection,
   WriteSettingsSection
 } from './settings-sections'
 
-type SettingsCategory = 'general' | 'write' | 'agents' | 'shortcuts' | 'claw'
+type SettingsCategory = 'general' | 'providers' | 'write' | 'imageGeneration' | 'mediaGeneration' | 'speechToText' | 'agents' | 'permissions' | 'shortcuts' | 'easterEgg' | 'claw' | 'updates'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 type SettingsPatch = AppSettingsPatch
 type SkillRootOption = {
@@ -148,7 +154,7 @@ export function SettingsView(): ReactElement {
 
   useEffect(() => {
     let cancelled = false
-    if (typeof window.dsGui === 'undefined') {
+    if (typeof window.kunGui === 'undefined') {
       setLoadError('PRELOAD_BRIDGE')
       return
     }
@@ -172,16 +178,25 @@ export function SettingsView(): ReactElement {
   }, [formTheme, formUiFontScale])
 
   useEffect(() => {
-    if (typeof window.dsGui?.getLogPath !== 'function') return
-    void window.dsGui.getLogPath().then((p) => setLogPath(p)).catch(() => undefined)
+    const onSettingsChanged = (event: Event): void => {
+      const next = (event as CustomEvent<AppSettingsV1>).detail
+      if (next) setForm(coerceRendererSettings(next))
+    }
+    window.addEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged)
+    return () => window.removeEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged)
+  }, [])
+
+  useEffect(() => {
+    if (typeof window.kunGui?.getLogPath !== 'function') return
+    void window.kunGui.getLogPath().then((p) => setLogPath(p)).catch(() => undefined)
   }, [category])
 
   const loadWriteDebugEntries = useCallback(async (): Promise<void> => {
     setWriteDebugLoading(true)
     setWriteDebugError(null)
     try {
-      const completionEntries = typeof window.dsGui?.listWriteInlineCompletionDebugEntries === 'function'
-        ? await window.dsGui.listWriteInlineCompletionDebugEntries()
+      const completionEntries = typeof window.kunGui?.listWriteInlineCompletionDebugEntries === 'function'
+        ? await window.kunGui.listWriteInlineCompletionDebugEntries()
         : []
       setWriteCompletionDebugEntries(completionEntries)
       setWriteCompletionDebugSelectedId((current) =>
@@ -205,7 +220,7 @@ export function SettingsView(): ReactElement {
     if (!form || initializedCategory.current) return
     initializedCategory.current = true
     if (!getActiveAgentApiKey(form).trim()) {
-      setCategory('general')
+      setCategory('providers')
     }
   }, [form])
 
@@ -214,8 +229,28 @@ export function SettingsView(): ReactElement {
       setCategory('general')
       return
     }
+    if (settingsSection === 'providers') {
+      setCategory('providers')
+      return
+    }
     if (settingsSection === 'write') {
       setCategory('write')
+      return
+    }
+    if (settingsSection === 'imageGeneration') {
+      setCategory('imageGeneration')
+      return
+    }
+    if (settingsSection === 'mediaGeneration') {
+      setCategory('mediaGeneration')
+      return
+    }
+    if (settingsSection === 'speechToText') {
+      setCategory('speechToText')
+      return
+    }
+    if (settingsSection === 'permissions') {
+      setCategory('permissions')
       return
     }
     if (settingsSection === 'claw') {
@@ -226,6 +261,14 @@ export function SettingsView(): ReactElement {
       setCategory('shortcuts')
       return
     }
+    if (settingsSection === 'easterEgg') {
+      setCategory('easterEgg')
+      return
+    }
+    if (settingsSection === 'updates') {
+      setCategory('updates')
+      return
+    }
     setCategory('agents')
   }, [settingsSection])
 
@@ -233,17 +276,27 @@ export function SettingsView(): ReactElement {
     if (!form) return
     if (
       settingsSection === 'general' ||
+      settingsSection === 'providers' ||
       settingsSection === 'write' ||
+      settingsSection === 'imageGeneration' ||
+      settingsSection === 'mediaGeneration' ||
+      settingsSection === 'speechToText' ||
       settingsSection === 'claw' ||
       settingsSection === 'shortcuts' ||
-      category !== 'agents'
+      settingsSection === 'easterEgg' ||
+      settingsSection === 'updates' ||
+      (category !== 'agents' && category !== 'permissions')
     ) {
       return
     }
-    const refs: Record<Exclude<SettingsRouteSection, 'general' | 'write' | 'claw' | 'shortcuts'>, HTMLDivElement | null> = {
+    const refs: Record<
+      Exclude<SettingsRouteSection, 'general' | 'providers' | 'write' | 'imageGeneration' | 'mediaGeneration' | 'speechToText' | 'claw' | 'shortcuts' | 'easterEgg' | 'updates'>,
+      HTMLDivElement | null
+    > = {
       agents: agentsSectionRef.current,
       skill: skillSectionRef.current,
-      mcp: mcpSectionRef.current
+      mcp: mcpSectionRef.current,
+      permissions: permissionsSectionRef.current
     }
     const target = refs[settingsSection]
     if (!target) return
@@ -251,6 +304,15 @@ export function SettingsView(): ReactElement {
       target.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
   }, [category, form, settingsSection])
+
+  useEffect(() => {
+    if (!form || category !== 'permissions') return
+    const target = permissionsSectionRef.current
+    if (!target) return
+    window.requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }, [category, form])
 
   useEffect(() => {
     return () => {
@@ -313,11 +375,11 @@ export function SettingsView(): ReactElement {
   }, [skillRootId, skillRootOptions])
 
   const loadMcpConfig = async (): Promise<void> => {
-    if (typeof window.dsGui?.getDeepseekConfigFile !== 'function') return
+    if (typeof window.kunGui?.getKunConfigFile !== 'function') return
     setMcpLoading(true)
     setMcpNotice(null)
     try {
-      const config = await window.dsGui.getDeepseekConfigFile()
+      const config = await window.kunGui.getKunConfigFile()
       setMcpConfigPath(config.path)
       setMcpConfigText(config.content)
       setMcpConfigExists(config.exists)
@@ -333,7 +395,7 @@ export function SettingsView(): ReactElement {
   }
 
   useEffect(() => {
-    if (category !== 'agents' || mcpLoaded || mcpLoading) return
+    if ((category !== 'agents' && category !== 'permissions') || mcpLoaded || mcpLoading) return
     void loadMcpConfig()
   }, [category, mcpLoaded, mcpLoading])
 
@@ -342,20 +404,20 @@ export function SettingsView(): ReactElement {
       setSkillNotice({ tone: 'error', message: t('skillsRootUnavailable') })
       return
     }
-    if (typeof window.dsGui?.openSkillRoot !== 'function') return
+    if (typeof window.kunGui?.openSkillRoot !== 'function') return
     setSkillNotice(null)
-    const result = await window.dsGui.openSkillRoot(selectedSkillRoot.path)
+    const result = await window.kunGui.openSkillRoot(selectedSkillRoot.path)
     if (!result.ok) {
       setSkillNotice({ tone: 'error', message: result.message ?? t('applyFailed') })
     }
   }
 
   const saveMcpConfig = async (): Promise<void> => {
-    if (typeof window.dsGui?.setDeepseekConfigFile !== 'function') return
+    if (typeof window.kunGui?.setKunConfigFile !== 'function') return
     setMcpBusy(true)
     setMcpNotice(null)
     try {
-      const result = await window.dsGui.setDeepseekConfigFile(mcpConfigText)
+      const result = await window.kunGui.setKunConfigFile(mcpConfigText)
       setMcpConfigPath(result.path)
       setMcpConfigExists(true)
       setMcpNotice({
@@ -373,8 +435,8 @@ export function SettingsView(): ReactElement {
   }
 
   const openMcpConfigDir = async (): Promise<void> => {
-    if (typeof window.dsGui?.openDeepseekConfigDir !== 'function') return
-    const result = await window.dsGui.openDeepseekConfigDir()
+    if (typeof window.kunGui?.openKunConfigDir !== 'function') return
+    const result = await window.kunGui.openKunConfigDir()
     if (!result.ok) {
       setMcpNotice({ tone: 'error', message: result.message ?? t('applyFailed') })
     }
@@ -408,7 +470,7 @@ export function SettingsView(): ReactElement {
   }, [formWorkspaceRoot])
 
   useEffect(() => {
-    if (category !== 'agents') return
+    if (category !== 'agents' && category !== 'permissions') return
     void refreshKunDiagnostics()
   }, [category, refreshKunDiagnostics])
 
@@ -474,8 +536,10 @@ export function SettingsView(): ReactElement {
       }, 1500)
     } catch (e) {
       if (version !== draftVersion.current) return
-      setSaveError(e instanceof Error ? e.message : String(e))
+      const message = e instanceof Error ? e.message : String(e)
+      setSaveError(message)
       setSaveStatus('error')
+      void window.kunGui?.logError?.('settings', 'Failed to apply settings', { message }).catch(() => undefined)
     }
   }
 
@@ -608,10 +672,10 @@ export function SettingsView(): ReactElement {
   const pickWorkspace = async (): Promise<void> => {
     try {
       setWorkspacePickerError(null)
-      if (typeof window.dsGui?.pickWorkspaceDirectory !== 'function') {
+      if (typeof window.kunGui?.pickWorkspaceDirectory !== 'function') {
         throw new Error('workspace:pick-directory unavailable')
       }
-      const picked = await window.dsGui.pickWorkspaceDirectory(form.workspaceRoot || undefined)
+      const picked = await window.kunGui.pickWorkspaceDirectory(form.workspaceRoot || undefined)
       if (!picked.canceled && picked.path) {
         update({ workspaceRoot: picked.path })
       }
@@ -628,10 +692,10 @@ export function SettingsView(): ReactElement {
   const pickWriteWorkspace = async (): Promise<void> => {
     try {
       setWriteWorkspacePickerError(null)
-      if (typeof window.dsGui?.pickWorkspaceDirectory !== 'function') {
+      if (typeof window.kunGui?.pickWorkspaceDirectory !== 'function') {
         throw new Error('workspace:pick-directory unavailable')
       }
-      const picked = await window.dsGui.pickWorkspaceDirectory(
+      const picked = await window.kunGui.pickWorkspaceDirectory(
         form.write.defaultWorkspaceRoot || DEFAULT_WRITE_WORKSPACE_ROOT
       )
       if (!picked.canceled && picked.path) {
@@ -667,10 +731,10 @@ export function SettingsView(): ReactElement {
   const pickClawWorkspace = async (): Promise<void> => {
     try {
       setClawWorkspacePickerError(null)
-      if (typeof window.dsGui?.pickWorkspaceDirectory !== 'function') {
+      if (typeof window.kunGui?.pickWorkspaceDirectory !== 'function') {
         throw new Error('workspace:pick-directory unavailable')
       }
-      const picked = await window.dsGui.pickWorkspaceDirectory(
+      const picked = await window.kunGui.pickWorkspaceDirectory(
         form.claw.im.workspaceRoot || form.workspaceRoot || undefined
       )
       if (!picked.canceled && picked.path) {
@@ -690,8 +754,8 @@ export function SettingsView(): ReactElement {
     setWriteDebugLoading(true)
     setWriteDebugError(null)
     try {
-      if (typeof window.dsGui?.clearWriteInlineCompletionDebugEntries === 'function') {
-        await window.dsGui.clearWriteInlineCompletionDebugEntries()
+      if (typeof window.kunGui?.clearWriteInlineCompletionDebugEntries === 'function') {
+        await window.kunGui.clearWriteInlineCompletionDebugEntries()
       }
       setWriteCompletionDebugEntries([])
       setWriteCompletionDebugSelectedId(null)
@@ -832,11 +896,26 @@ export function SettingsView(): ReactElement {
             </span>
           </div>
 
+          {saveStatus === 'error' && saveError ? (
+            <div
+              role="alert"
+              className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[13px] leading-5 text-red-800 shadow-sm dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200"
+            >
+              {saveError}
+            </div>
+          ) : null}
+
           {category === 'general' ? <GeneralSettingsSection ctx={settingsSectionContext} /> : null}
+          {category === 'providers' ? <ProvidersSettingsSection ctx={settingsSectionContext} /> : null}
           {category === 'write' ? <WriteSettingsSection ctx={settingsSectionContext} /> : null}
-          {category === 'agents' ? <AgentsSettingsSection ctx={settingsSectionContext} /> : null}
+          {category === 'imageGeneration' ? <ImageGenerationSettingsSection ctx={settingsSectionContext} /> : null}
+          {category === 'mediaGeneration' ? <MediaGenerationSettingsSection ctx={settingsSectionContext} /> : null}
+          {category === 'speechToText' ? <SpeechToTextSettingsSection ctx={settingsSectionContext} /> : null}
+          {category === 'agents' || category === 'permissions' ? <AgentsSettingsSection ctx={settingsSectionContext} /> : null}
           {category === 'shortcuts' ? <KeyboardShortcutsSettingsSection ctx={settingsSectionContext} /> : null}
+          {category === 'easterEgg' ? <EasterEggSettingsSection ctx={settingsSectionContext} /> : null}
           {category === 'claw' ? <ClawSettingsSection ctx={settingsSectionContext} /> : null}
+          {category === 'updates' ? <UpdatesSettingsSection ctx={settingsSectionContext} /> : null}
         </div>
       </div>
       {writeDebugModalOpen ? (

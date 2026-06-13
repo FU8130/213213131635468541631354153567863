@@ -154,7 +154,7 @@ function readWeixinPackageInfo(): WeixinPackageInfo {
   const packageJson = resolvePackagePath('@tencent-weixin/openclaw-weixin', 'package.json')
   if (!packageJson) {
     throw new Error(
-      'Built-in WeChat login component is missing. Reinstall DeepSeek GUI or rebuild with @tencent-weixin/openclaw-weixin bundled.'
+      'Built-in WeChat login component is missing. Reinstall Kun or rebuild with @tencent-weixin/openclaw-weixin bundled.'
     )
   }
   const parsed = JSON.parse(readFileSync(packageJson, 'utf8')) as JsonRecord
@@ -177,7 +177,7 @@ function buildBaseInfo(): JsonRecord {
   const info = readWeixinPackageInfo()
   return {
     channel_version: info.version,
-    bot_agent: `DeepSeekGUI/${app.getVersion() || '0.0.0'}`
+    bot_agent: `Kun/${app.getVersion() || '0.0.0'}`
   }
 }
 
@@ -466,7 +466,7 @@ async function readBridgeConfig(): Promise<JsonRecord> {
 async function prepareBridgeState(port: number): Promise<void> {
   if (!resolveWeixinPluginRoot()) {
     throw new Error(
-      'Built-in WeChat login component is missing. Reinstall DeepSeek GUI or rebuild with @tencent-weixin/openclaw-weixin bundled.'
+      'Built-in WeChat login component is missing. Reinstall Kun or rebuild with @tencent-weixin/openclaw-weixin bundled.'
     )
   }
   await ensureStateDirs()
@@ -605,7 +605,7 @@ async function waitForWeixinLogin(params: JsonRecord): Promise<JsonRecord> {
           alreadyConnected: true,
           accountId: normalizeAccountId(sessionKey),
           sessionKey,
-          message: '已连接过此 DeepSeek GUI，无需重复连接。'
+          message: '已连接过此 Kun，无需重复连接。'
         }
       case 'scaned_but_redirect': {
         const redirectHost = recordString(status, 'redirect_host')
@@ -631,7 +631,7 @@ async function waitForWeixinLogin(params: JsonRecord): Promise<JsonRecord> {
           sessionKey,
           baseUrl,
           userId,
-          message: '已将此 DeepSeek GUI 连接到微信。'
+          message: '已将此 Kun 连接到微信。'
         }
       }
     }
@@ -732,7 +732,7 @@ async function getUpdates(
 }
 
 function generateMessageId(): string {
-  return `deepseek-gui-weixin-${randomUUID()}`
+  return `kun-weixin-${randomUUID()}`
 }
 
 async function sendMessageWeixin(params: {
@@ -805,6 +805,93 @@ function buildWebhookMessage(message: WeixinMessage, accountId: string, text: st
   }
 }
 
+const MAX_WEBHOOK_FILES_PER_REPLY = 3
+
+type WeixinOutboundFile = { path: string; fileName: string }
+
+/**
+ * Generated files the Claw webhook attached to its reply (already gated and
+ * workspace-validated on the GUI side). Capped defensively; the webhook caps
+ * extraction at the same count.
+ */
+function webhookGeneratedFiles(result: JsonRecord): WeixinOutboundFile[] {
+  if (!Array.isArray(result.files)) return []
+  const files: WeixinOutboundFile[] = []
+  for (const entry of result.files) {
+    const record = asRecord(entry)
+    const path = recordString(record, 'path')
+    if (!path) continue
+    files.push({
+      path,
+      fileName: recordString(record, 'fileName') || path.split(/[\\/]/).pop() || 'attachment'
+    })
+    if (files.length >= MAX_WEBHOOK_FILES_PER_REPLY) break
+  }
+  return files
+}
+
+type SendWeixinMediaFile = (params: {
+  filePath: string
+  to: string
+  text: string
+  opts: { baseUrl: string; token?: string; timeoutMs?: number; contextToken?: string }
+  cdnBaseUrl: string
+}) => Promise<{ messageId: string }>
+
+let sendWeixinMediaFilePromise: Promise<SendWeixinMediaFile> | null = null
+
+/**
+ * The CDN upload + media message protocol lives in the bundled WeChat plugin.
+ * Loaded lazily so a broken install degrades to a text notice instead of
+ * failing this whole module at startup.
+ */
+function loadSendWeixinMediaFile(): Promise<SendWeixinMediaFile> {
+  sendWeixinMediaFilePromise ??= import('@tencent-weixin/openclaw-weixin/dist/src/messaging/send-media.js')
+    .then((mod) => mod.sendWeixinMediaFile)
+    .catch((error) => {
+      sendWeixinMediaFilePromise = null
+      throw error
+    })
+  return sendWeixinMediaFilePromise
+}
+
+/**
+ * Upload each generated file to the WeChat C2C CDN and deliver it as an
+ * image / video / file message (routed by MIME). A failed file degrades to a
+ * text notice instead of failing the whole reply.
+ */
+async function sendGeneratedFilesWeixin(
+  account: WeixinAccount,
+  to: string,
+  files: readonly WeixinOutboundFile[],
+  contextToken: string | undefined
+): Promise<void> {
+  for (const file of files) {
+    try {
+      const sendWeixinMediaFile = await loadSendWeixinMediaFile()
+      await sendWeixinMediaFile({
+        filePath: file.path,
+        to,
+        text: '',
+        opts: { baseUrl: account.baseUrl, token: account.token, contextToken },
+        cdnBaseUrl: account.cdnBaseUrl
+      })
+    } catch (error) {
+      logWarn('weixin-bridge', 'Failed to send generated file to WeChat.', {
+        accountId: account.accountId,
+        filePath: file.path,
+        message: error instanceof Error ? error.message : String(error)
+      })
+      await sendMessageWeixin({
+        account,
+        to,
+        text: `文件 ${file.fileName} 发送失败，请稍后再试。`,
+        contextToken
+      }).catch(() => undefined)
+    }
+  }
+}
+
 async function postToDeepSeekGuiWebhook(message: WeixinMessage, accountId: string): Promise<JsonRecord> {
   const settings = await resolveRuntimeContext()
   const text = textFromItemList(message.item_list)
@@ -816,6 +903,8 @@ async function postToDeepSeekGuiWebhook(message: WeixinMessage, accountId: strin
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (settings.webhookSecret) {
     headers.authorization = `Bearer ${settings.webhookSecret}`
+    // 同时带新旧两个 secret 头:接收端可能还是只认旧头的老版本。
+    headers['x-kun-secret'] = settings.webhookSecret
     headers['x-deepseek-gui-secret'] = settings.webhookSecret
   }
   const res = await fetch(settings.webhookUrl, {
@@ -826,7 +915,7 @@ async function postToDeepSeekGuiWebhook(message: WeixinMessage, accountId: strin
   })
   const data = await readJsonResponse(res)
   if (!res.ok || data.ok === false) {
-    throw new Error(recordString(data, 'message') || `DeepSeek GUI webhook HTTP ${res.status}`)
+    throw new Error(recordString(data, 'message') || `Kun webhook HTTP ${res.status}`)
   }
   return data
 }
@@ -846,6 +935,42 @@ async function monitorWeixinAccount(accountId: string, signal: AbortSignal): Pro
   let getUpdatesBuf = await loadSyncBuf(account.accountId)
   let nextTimeoutMs = DEFAULT_LONG_POLL_TIMEOUT_MS
   let consecutiveFailures = 0
+  // Per-sender dispatch chains. A single agent turn can run for minutes;
+  // awaiting it inside the long-poll loop froze the whole channel for
+  // every chat until that turn finished (or hit the webhook timeout).
+  // Chaining per sender keeps one conversation ordered while other chats
+  // and the poll loop keep moving.
+  const senderChains = new Map<string, Promise<void>>()
+  const dispatchToSender = (message: WeixinMessage, to: string, contextToken: string | undefined): void => {
+    const task = async (): Promise<void> => {
+      if (signal.aborted) return
+      const result = await postToDeepSeekGuiWebhook(message, account.accountId)
+      const reply = recordString(result, 'reply') || recordString(result, 'text')
+      if (reply) {
+        await sendMessageWeixin({
+          account,
+          to,
+          text: reply,
+          contextToken
+        })
+      }
+      // Generated media files arrive alongside the text reply and go out as
+      // native image / file messages.
+      await sendGeneratedFilesWeixin(account, to, webhookGeneratedFiles(result), contextToken)
+    }
+    const chained = (senderChains.get(to) ?? Promise.resolve())
+      .then(task)
+      .catch((error) => {
+        logWarn('weixin-bridge', 'WeChat message dispatch failed.', {
+          accountId: account.accountId,
+          message: error instanceof Error ? error.message : String(error)
+        })
+      })
+    senderChains.set(to, chained)
+    void chained.finally(() => {
+      if (senderChains.get(to) === chained) senderChains.delete(to)
+    })
+  }
   while (!signal.aborted) {
     try {
       const resp = await getUpdates(account, getUpdatesBuf, nextTimeoutMs)
@@ -874,15 +999,7 @@ async function monitorWeixinAccount(accountId: string, signal: AbortSignal): Pro
         if (!to) continue
         const contextToken = message.context_token || undefined
         if (contextToken) await setContextToken(account.accountId, to, contextToken)
-        const result = await postToDeepSeekGuiWebhook(message, account.accountId)
-        const reply = recordString(result, 'reply') || recordString(result, 'text')
-        if (!reply) continue
-        await sendMessageWeixin({
-          account,
-          to,
-          text: reply,
-          contextToken
-        })
+        dispatchToSender(message, to, contextToken)
       }
     } catch (error) {
       if (signal.aborted) return
@@ -1073,6 +1190,22 @@ export async function ensureWeixinBridgeRpcUrl(): Promise<string> {
   return startPromise
 }
 
+/**
+ * WeChat user id (`ilink_user_id`) that bound this bot account during QR
+ * login, or '' when the account is not configured. Used by Claw to greet
+ * the owner right after the first connection.
+ */
+export async function getWeixinBridgeAccountUserId(accountId: string): Promise<string> {
+  const normalized = normalizeAccountId(accountId)
+  if (!normalized) return ''
+  try {
+    const account = await resolveWeixinAccount(normalized)
+    return account.configured ? account.userId ?? '' : ''
+  } catch {
+    return ''
+  }
+}
+
 export async function sendWeixinBridgeMessage(options: {
   accountId: string
   to: string
@@ -1124,5 +1257,6 @@ export function stopWeixinBridgeRuntime(): void {
 
 export const weixinBridgeRuntimeInternals = {
   buildBaseInfo,
-  normalizeAccountId
+  normalizeAccountId,
+  webhookGeneratedFiles
 }

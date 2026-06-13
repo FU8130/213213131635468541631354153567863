@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dispatchRequest } from '../src/server/http-server.js'
 import { createApprovalRequest } from '../src/domain/approval.js'
-import { makeAssistantTextItem } from '../src/domain/item.js'
+import { makeAssistantTextItem, makeToolCallItem, makeToolResultItem } from '../src/domain/item.js'
 import { encodeSseEvent } from '../src/server/sse.js'
 import { buildHarness, readJson, readSseEvents, usageSnapshot } from './http-server-test-harness.js'
+import type { TurnItem } from '../src/contracts/items.js'
 
 describe('HTTP server', () => {
   let dataDir = ''
@@ -227,6 +228,35 @@ describe('HTTP server', () => {
     const body = await readJson(response) as { turnId: string; userMessageItemId: string }
     expect(body.turnId).toMatch(/^turn_/)
     expect(body.userMessageItemId).toBe(`item_${body.turnId}_user`)
+  })
+
+  it('applies per-turn execution policy to the active thread', async () => {
+    const h = buildHarness()
+    await h.threadService.create({
+      workspace: '/tmp',
+      model: 'deepseek-chat',
+      mode: 'agent',
+      approvalPolicy: 'auto',
+      sandboxMode: 'danger-full-access'
+    }, { id: 'thr_policy', title: 'policy' })
+
+    const response = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/threads/thr_policy/turns', {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-1', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          prompt: 'inspect only',
+          approvalPolicy: 'on-request',
+          sandboxMode: 'read-only'
+        })
+      })
+    )
+
+    expect(response.status).toBe(202)
+    const thread = await h.threadService.get('thr_policy')
+    expect(thread?.approvalPolicy).toBe('on-request')
+    expect(thread?.sandboxMode).toBe('read-only')
   })
 
   it('creates and lists threads through the HTTP layer', async () => {
@@ -548,6 +578,85 @@ describe('HTTP server', () => {
     })
   })
 
+  it('heals stale open session items for finished turns when loading thread detail', async () => {
+    const h = buildHarness()
+    await h.threadService.create(
+      { workspace: '/tmp', model: 'deepseek-chat', mode: 'agent' },
+      { id: 'thr_heal', title: 'Stale session' }
+    )
+    const { turnId } = await h.turnService.startTurn({
+      threadId: 'thr_heal',
+      request: { prompt: 'run a tool' }
+    })
+    await h.turnService.applyItem(
+      'thr_heal',
+      makeToolCallItem({
+        id: 'item_tool_stale',
+        turnId,
+        threadId: 'thr_heal',
+        callId: 'call_stale',
+        toolName: 'echo',
+        arguments: { text: 'hi' }
+      })
+    )
+    await h.turnService.applyItem(
+      'thr_heal',
+      makeToolResultItem({
+        id: 'item_result_stale',
+        turnId,
+        threadId: 'thr_heal',
+        callId: 'call_stale',
+        toolName: 'echo',
+        output: { partial: true },
+        status: 'running'
+      })
+    )
+    const staleThread = await h.threadStore.get('thr_heal')
+    if (!staleThread) throw new Error('expected thread')
+    const finishedAt = '2026-06-05T00:00:00.000Z'
+    await h.threadStore.upsert({
+      ...staleThread,
+      status: 'idle',
+      turns: staleThread.turns.map((turn) =>
+        turn.id === turnId
+          ? {
+              ...turn,
+              status: 'aborted',
+              finishedAt,
+              items: turn.items.map((item): TurnItem =>
+                item.id === 'item_tool_stale' || item.id === 'item_result_stale'
+                  ? ({ ...item, status: 'aborted', finishedAt } as TurnItem)
+                  : item
+              )
+            }
+          : turn
+      )
+    })
+    const staleById = new Map((await h.sessionStore.loadItems('thr_heal')).map((item) => [item.id, item.status]))
+    expect(staleById.get('item_tool_stale')).toBe('pending')
+    expect(staleById.get('item_result_stale')).toBe('running')
+
+    const response = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/threads/thr_heal', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await readJson(response)) as {
+      turns: Array<{ id: string; items: Array<{ id: string; status: string }> }>
+    }
+    const responseItems = new Map(
+      (body.turns.find((turn) => turn.id === turnId)?.items ?? []).map((item) => [item.id, item.status])
+    )
+    expect(responseItems.get('item_tool_stale')).toBe('aborted')
+    expect(responseItems.get('item_result_stale')).toBe('aborted')
+    const healedById = new Map((await h.sessionStore.loadItems('thr_heal')).map((item) => [item.id, item.status]))
+    expect(healedById.get('item_tool_stale')).toBe('aborted')
+    expect(healedById.get('item_result_stale')).toBe('aborted')
+  })
+
   it('persists GUI plan context from start-turn requests', async () => {
     const h = buildHarness()
     const create = await dispatchRequest(
@@ -679,6 +788,51 @@ describe('HTTP server', () => {
         .map((line) => Number(line.slice(3).trim()))
     )
     expect(ids.every((id) => id > secondSeq)).toBe(true)
+  })
+
+  it('delivers an event exactly once when it lands in both backlog and live bus', async () => {
+    const h = buildHarness()
+    const thread = await h.threadService.create(
+      { workspace: '/tmp', model: 'deepseek-chat', mode: 'agent' },
+      { id: 'thr_dedup', title: 'Dedup' }
+    )
+    const recorded = await h.runtime.events.record({ kind: 'heartbeat', threadId: thread.id })
+
+    const eventStream = await dispatchRequest(
+      h.router,
+      new Request(`http://localhost/v1/threads/${thread.id}/events?since_seq=0`, {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+    // Simulate the persist/publish race: the event is already in the replayed
+    // backlog when the live bus re-delivers it after the subscription starts.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    h.bus.publish(recorded)
+
+    const frames = await readSseEvents(eventStream)
+    const occurrences = frames.filter((frame) => frame.includes(`id: ${recorded.seq}\n`))
+    expect(occurrences).toHaveLength(1)
+  })
+
+  it('skips SSE backlog replay when the client is already caught up', async () => {
+    const h = buildHarness()
+    const thread = await h.threadService.create(
+      { workspace: '/tmp', model: 'deepseek-chat', mode: 'agent' },
+      { id: 'thr_caught_up', title: 'Caught up' }
+    )
+    const latestSeq = await h.sessionStore.highestSeq(thread.id)
+    const loadEventsSince = vi.spyOn(h.sessionStore, 'loadEventsSince')
+
+    const eventStream = await dispatchRequest(
+      h.router,
+      new Request(`http://localhost/v1/threads/${thread.id}/events?since_seq=${latestSeq}`, {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+    const events = await readSseEvents(eventStream)
+
+    expect(events).toEqual([])
+    expect(loadEventsSince).not.toHaveBeenCalled()
   })
 
   it('resolves an approval through the HTTP endpoint', async () => {
@@ -963,6 +1117,37 @@ describe('HTTP server', () => {
     const response = await dispatchRequest(
       h.router,
       new Request('http://localhost/v1/usage?group_by=thread', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await readJson(response)) as {
+      group_by: string
+      buckets: Array<{ thread_id: string; total_tokens: number; turns: number }>
+    }
+    expect(body.group_by).toBe('thread')
+    expect(body.buckets).toEqual([
+      expect.objectContaining({ thread_id: 'thr_live', total_tokens: 20, turns: 1 })
+    ])
+  })
+
+  it('filters thread-grouped usage buckets by thread_id', async () => {
+    const h = buildHarness()
+    await h.threadService.create(
+      { workspace: '/tmp/project', model: 'deepseek-chat', mode: 'agent' },
+      { id: 'thr_live', title: 'Live usage' }
+    )
+    await h.threadService.create(
+      { workspace: '/tmp/project', model: 'deepseek-chat', mode: 'agent' },
+      { id: 'thr_other', title: 'Other usage' }
+    )
+    h.runtime.usageService.record('thr_live', usageSnapshot({ promptTokens: 12, completionTokens: 8 }))
+    h.runtime.usageService.record('thr_other', usageSnapshot({ promptTokens: 90, completionTokens: 10 }))
+
+    const response = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/usage?group_by=thread&thread_id=thr_live', {
         headers: { authorization: 'Bearer tok-1' }
       })
     )

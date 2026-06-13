@@ -1,101 +1,79 @@
 import type { ReactElement } from 'react'
-import type { ApprovalPolicy, AppSettingsV1, SandboxMode } from '@shared/app-settings'
+import { useTranslation } from 'react-i18next'
 import {
-  DEFAULT_WRITE_INLINE_COMPLETION_BASE_URL,
   DEFAULT_WRITE_INLINE_COMPLETION_MAX_TOKENS,
   DEFAULT_WRITE_INLINE_COMPLETION_MODEL,
   DEFAULT_WRITE_INLINE_LONG_COMPLETION_MAX_TOKENS,
-  DEFAULT_KUN_DATA_DIR,
+  DEFAULT_MODEL_PROVIDER_ID,
   WRITE_INLINE_COMPLETION_MODEL_IDS,
-  isKunRuntimeInsecure
+  WRITE_QUICK_ACTION_MAX_COUNT,
+  defaultModelProviderSettings,
+  defaultWriteSelectionAssistSettings,
+  resolveWriteInlineCompletionProviderId,
+  type WriteQuickActionV1
 } from '@shared/app-settings'
-import type { GuiUpdateChannel } from '@shared/gui-update'
-import type { SkillRootId } from '../lib/skill-root-preference'
-import { FolderOpen, Loader2, PencilLine, RefreshCw, Settings } from 'lucide-react'
-import { GuiUpdateControl } from './settings-gui-update'
+import { WRITE_DESIGN_DRAFT_DEFAULT_PROMPT, WRITE_INFOGRAPHIC_DEFAULT_PROMPT } from '@shared/write-infographic'
+import { WRITE_PROTOTYPE_DEFAULT_PROMPT } from '@shared/write-prototype'
+import { PencilLine, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import { builtinWriteQuickActionDefaults } from '../write/quick-actions'
 import {
-  InlineNoticeView,
-  SecretInput,
-  SectionJumpButton,
+  AdvancedSettingsDisclosure,
+  ModelSelect,
   SettingsCard,
   SettingRow,
   Toggle
 } from './settings-controls'
 
+const textInputClass =
+  'w-full rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30'
+const ghostButtonClass =
+  'inline-flex items-center gap-1.5 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[13px] font-medium text-ds-ink shadow-sm transition hover:bg-ds-hover'
+
+export function writeInlineCompletionModelOptions(providerModels: readonly string[]): string[] {
+  const scopedModels = providerModels
+    .map((model) => model.trim())
+    .filter(Boolean)
+  return scopedModels.length > 0
+    ? [...new Set(scopedModels)]
+    : [...WRITE_INLINE_COMPLETION_MODEL_IDS]
+}
+
 export function WriteSettingsSection({ ctx }: { ctx: Record<string, any> }): ReactElement {
   const {
     t,
-    tCommon,
     form,
+    provider,
     kun,
-    activeApiKey,
     update,
-    updateKun,
-    updateSharedCredential,
-    sharedApiKey,
-    sharedBaseUrl,
-    showApiKey,
-    setShowApiKey,
-    showRuntimeToken,
-    setShowRuntimeToken,
-    portError,
     selectControlClass,
-    openOnboardingPreview,
-    pickWorkspace,
-    resetWorkspaceToDefault,
-    workspacePickerError,
-    guiUpdateInfo,
-    checkingGuiUpdate,
-    downloadingGuiUpdate,
-    installingGuiUpdate,
-    guiUpdateDownloaded,
-    guiUpdateProgress,
-    guiUpdateError,
-    checkGuiUpdate,
-    downloadGuiUpdate,
-    installGuiUpdate,
-    logPath,
-    logDirOpenError,
-    setLogDirOpenError,
     pickWriteWorkspace,
     resetWriteWorkspaceToDefault,
     writeWorkspacePickerError,
-    writeInlineApiKeyInherited,
-    effectiveWriteInlineApiKey,
-    writeInlineBaseUrlInherited,
-    effectiveWriteInlineBaseUrl,
     writeInlineModelInherited,
-    effectiveWriteInlineModel,
     setWriteDebugModalOpen,
-    loadWriteDebugEntries,
-    scrollToAgentSection,
-    agentsSectionRef,
-    skillSectionRef,
-    mcpSectionRef,
-    permissionsSectionRef,
-    selectedSkillRoot,
-    skillRootOptions,
-    skillRootId,
-    setSkillRootId,
-    skillNotice,
-    openSkillRoot,
-    openPlugins,
-    mcpConfigPath,
-    mcpConfigExists,
-    mcpConfigText,
-    setMcpConfigText,
-    mcpLoading,
-    mcpBusy,
-    mcpNotice,
-    saveMcpConfig,
-    loadMcpConfig,
-    openMcpConfigDir,
-    pickClawWorkspace,
-    resetClawWorkspaceToDefault,
-    clawWorkspacePickerError,
-    splitSettingsList,
-    listSettingsText
+    loadWriteDebugEntries
   } = ctx
+  const { t: tCommon } = useTranslation('common')
+  const providerSettings = provider ?? defaultModelProviderSettings()
+  const selectionAssist = form.write.selectionAssist ?? defaultWriteSelectionAssistSettings()
+  const updateQuickActions = (quickActions: WriteQuickActionV1[]): void => {
+    update({ write: { selectionAssist: { quickActions } } })
+  }
+  const effectiveWriteProviderId = resolveWriteInlineCompletionProviderId(form)
+  const effectiveWriteProvider =
+    providerSettings.providers.find((item: { id: string }) => item.id === effectiveWriteProviderId) ??
+    providerSettings.providers.find((item: { id: string }) => item.id === DEFAULT_MODEL_PROVIDER_ID) ??
+    providerSettings.providers[0]
+  const writeInlineProviderInherited = form.write.inlineCompletion.inheritProvider !== false
+  const writeInlineProviderModels = effectiveWriteProvider?.models ?? []
+  const writeInlineModelOptions = writeInlineCompletionModelOptions(writeInlineProviderModels)
+  // 「默认」选项要展示继承链真正会选中的模型,而不是当前覆盖值:
+  // 显式指定供应商时取其首个模型,否则跟随 AI 助手当前模型。
+  const writeInlineInheritDefault =
+    (!writeInlineProviderInherited && form.write.inlineCompletion.providerId?.trim()
+      ? writeInlineProviderModels[0]
+      : undefined)
+    || (kun?.model?.trim() || DEFAULT_WRITE_INLINE_COMPLETION_MODEL)
 
   return (
             <>
@@ -143,31 +121,6 @@ export function WriteSettingsSection({ ctx }: { ctx: Record<string, any> }): Rea
                     </div>
                   }
                 />
-                <SettingRow
-                  title={t('writeInlineCompletionApiKey')}
-                  description={t('writeInlineCompletionApiKeyDesc')}
-                  control={
-                    <div className="w-full min-w-0 md:max-w-md">
-                      <SecretInput
-                        value={form.write.inlineCompletion.apiKey}
-                        onChange={(value) => update({ write: { inlineCompletion: { apiKey: value } } })}
-                        visible={showApiKey}
-                        onToggleVisibility={() => setShowApiKey((value: boolean) => !value)}
-                        placeholder={t('writeInlineCompletionApiKeyPlaceholder')}
-                        autoComplete="off"
-                        showLabel={t('showSecret')}
-                        hideLabel={t('hideSecret')}
-                      />
-                      <p className="mt-2 text-[12px] text-ds-muted">
-                        {writeInlineApiKeyInherited
-                          ? effectiveWriteInlineApiKey
-                            ? t('writeInlineCompletionApiKeyInherited')
-                            : t('writeInlineCompletionApiKeyMissing')
-                          : t('writeInlineCompletionApiKeyOverride')}
-                      </p>
-                    </div>
-                  }
-                />
               </SettingsCard>
 
               <SettingsCard title={t('writeInlineCompletion')} className="mt-5">
@@ -182,6 +135,66 @@ export function WriteSettingsSection({ ctx }: { ctx: Record<string, any> }): Rea
                   }
                 />
                 <SettingRow
+                  title={t('writeInlineCompletionProvider')}
+                  description={t('writeInlineCompletionProviderDesc')}
+                  control={
+                    <div className="w-full min-w-0 md:max-w-md">
+                      <select
+                        className={selectControlClass}
+                        value={writeInlineProviderInherited ? '' : form.write.inlineCompletion.providerId}
+                        onChange={(e) => {
+                          const providerId = e.target.value
+                          update({
+                            write: {
+                              inlineCompletion: {
+                                inheritProvider: !providerId,
+                                providerId
+                              }
+                            }
+                          })
+                        }}
+                      >
+                        <option value="">
+                          {t('writeInlineCompletionProviderInherit', {
+                            value: effectiveWriteProvider?.name ?? t('modelProviderDefault')
+                          })}
+                        </option>
+                        {providerSettings.providers.map((item: { id: string; name: string }) => (
+                          <option key={item.id} value={item.id}>{item.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  }
+                />
+                <SettingRow
+                  title={t('writeInlineCompletionModel')}
+                  description={t('writeInlineCompletionModelDesc')}
+                  control={
+                    <div className="w-full min-w-0 md:max-w-md">
+                      <ModelSelect
+                        value={writeInlineModelInherited ? '' : form.write.inlineCompletion.model}
+                        options={writeInlineModelOptions}
+                        defaultLabel={t('modelSelectDefaultOption', { model: writeInlineInheritDefault })}
+                        allowCustom
+                        customLabel={t('modelSelectCustomOption')}
+                        customPlaceholder={t('modelSelectCustomPlaceholder')}
+                        selectClassName={selectControlClass}
+                        onChange={(value) => {
+                          const model = value.trim()
+                          update({
+                            write: {
+                              inlineCompletion: {
+                                inheritModel: !model,
+                                model: model || DEFAULT_WRITE_INLINE_COMPLETION_MODEL
+                              }
+                            }
+                          })
+                        }}
+                      />
+                    </div>
+                  }
+                />
+                <SettingRow
                   title={t('writeInlineCompletionRetrieval')}
                   description={t('writeInlineCompletionRetrievalDesc')}
                   control={
@@ -191,68 +204,12 @@ export function WriteSettingsSection({ ctx }: { ctx: Record<string, any> }): Rea
                     />
                   }
                 />
-                <SettingRow
-                  title={t('writeInlineCompletionBaseUrl')}
-                  description={t('writeInlineCompletionBaseUrlDesc')}
-                  control={
-                    <div className="w-full min-w-0 md:max-w-md">
-                      <input
-                        className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                        value={form.write.inlineCompletion.baseUrl}
-                        placeholder={DEFAULT_WRITE_INLINE_COMPLETION_BASE_URL}
-                        onChange={(e) => update({ write: { inlineCompletion: { baseUrl: e.target.value } } })}
-                      />
-                      <p className="mt-2 text-[12px] text-ds-muted">
-                        {writeInlineBaseUrlInherited
-                          ? t('writeInlineCompletionBaseUrlInherited', { value: effectiveWriteInlineBaseUrl })
-                          : t('writeInlineCompletionBaseUrlOverride', { value: effectiveWriteInlineBaseUrl })}
-                      </p>
-                    </div>
-                  }
-                />
-                <SettingRow
-                  title={t('writeInlineCompletionModel')}
-                  description={t('writeInlineCompletionModelDesc')}
-                  control={
-                    <div className="w-full min-w-0 md:max-w-md">
-                      <input
-                        list="write-inline-completion-model-options"
-                        className="w-full min-w-0 rounded-xl border border-ds-border bg-ds-card px-3 py-2 text-[14px] text-ds-ink shadow-sm focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
-                        value={writeInlineModelInherited ? '' : form.write.inlineCompletion.model}
-                        placeholder={t('writeInlineCompletionModelPlaceholder')}
-                        onChange={(e) => {
-                          const value = e.target.value.trim()
-                          update({
-                            write: {
-                              inlineCompletion: {
-                                inheritModel: !value,
-                                model: value || DEFAULT_WRITE_INLINE_COMPLETION_MODEL
-                              }
-                            }
-                          })
-                        }}
-                      />
-                      <datalist id="write-inline-completion-model-options">
-                        {WRITE_INLINE_COMPLETION_MODEL_IDS.map((model) => (
-                          <option
-                            key={model}
-                            value={model}
-                            label={t(
-                              model === DEFAULT_WRITE_INLINE_COMPLETION_MODEL
-                                ? 'writeInlineCompletionModelFlash'
-                                : 'writeInlineCompletionModelPro'
-                            )}
-                          />
-                        ))}
-                      </datalist>
-                      <p className="mt-2 text-[12px] text-ds-muted">
-                        {writeInlineModelInherited
-                          ? t('writeInlineCompletionModelInherited', { value: effectiveWriteInlineModel })
-                          : t('writeInlineCompletionModelOverride', { value: effectiveWriteInlineModel })}
-                      </p>
-                    </div>
-                  }
-                />
+                <div className="px-3 py-4">
+                  <AdvancedSettingsDisclosure
+                    title={t('writeInlineCompletionAdvanced')}
+                    description={t('writeInlineCompletionAdvancedDesc')}
+                  >
+                    <div className="divide-y divide-ds-border-muted">
                 <SettingRow
                   title={t('writeInlineCompletionDebounce')}
                   description={t('writeInlineCompletionDebounceDesc')}
@@ -337,8 +294,178 @@ export function WriteSettingsSection({ ctx }: { ctx: Record<string, any> }): Rea
                     />
                   }
                 />
-                <div className="px-3 py-3 text-[12.5px] leading-5 text-ds-muted">
-                  {t('writeInlineCompletionApiNote')}
+                    </div>
+                  </AdvancedSettingsDisclosure>
+                </div>
+              </SettingsCard>
+
+              <SettingsCard title={t('writeSelectionAssistTitle')} className="mt-5">
+                <div className="px-3 py-4">
+                  <AdvancedSettingsDisclosure
+                    title={t('writeSelectionAssistAdvanced')}
+                    description={t('writeSelectionAssistAdvancedDesc')}
+                  >
+                    <div className="flex flex-col gap-5 px-4 py-4">
+                      <div>
+                        <div className="text-[13px] font-semibold text-ds-ink">
+                          {t('writeInfographicPromptLabel')}
+                        </div>
+                        <p className="mt-1 text-[12.5px] leading-5 text-ds-faint">
+                          {t('writeInfographicPromptDesc')}
+                        </p>
+                        <textarea
+                          className={`${textInputClass} mt-2 min-h-[72px] resize-y leading-5`}
+                          value={selectionAssist.infographicPrompt}
+                          placeholder={WRITE_INFOGRAPHIC_DEFAULT_PROMPT}
+                          spellCheck={false}
+                          onChange={(e) =>
+                            update({ write: { selectionAssist: { infographicPrompt: e.target.value } } })
+                          }
+                        />
+                      </div>
+
+                      <div>
+                        <div className="text-[13px] font-semibold text-ds-ink">
+                          {t('writeDesignDraftPromptLabel')}
+                        </div>
+                        <p className="mt-1 text-[12.5px] leading-5 text-ds-faint">
+                          {t('writeDesignDraftPromptDesc')}
+                        </p>
+                        <textarea
+                          className={`${textInputClass} mt-2 min-h-[72px] resize-y leading-5`}
+                          value={selectionAssist.designDraftPrompt}
+                          placeholder={WRITE_DESIGN_DRAFT_DEFAULT_PROMPT}
+                          spellCheck={false}
+                          onChange={(e) =>
+                            update({ write: { selectionAssist: { designDraftPrompt: e.target.value } } })
+                          }
+                        />
+                      </div>
+
+                      <div>
+                        <div className="text-[13px] font-semibold text-ds-ink">
+                          {t('writePrototypePromptLabel')}
+                        </div>
+                        <p className="mt-1 text-[12.5px] leading-5 text-ds-faint">
+                          {t('writePrototypePromptDesc')}
+                        </p>
+                        <textarea
+                          className={`${textInputClass} mt-2 min-h-[72px] resize-y leading-5`}
+                          value={selectionAssist.prototypePrompt}
+                          placeholder={WRITE_PROTOTYPE_DEFAULT_PROMPT}
+                          spellCheck={false}
+                          onChange={(e) =>
+                            update({ write: { selectionAssist: { prototypePrompt: e.target.value } } })
+                          }
+                        />
+                      </div>
+
+                      <div>
+                        <div className="text-[13px] font-semibold text-ds-ink">
+                          {t('writeQuickActionsLabel')}
+                        </div>
+                        <p className="mt-1 text-[12.5px] leading-5 text-ds-faint">
+                          {t('writeQuickActionsDesc')}
+                        </p>
+                        <div className="mt-3 flex flex-col gap-3">
+                          {selectionAssist.quickActions.map(
+                            (action: WriteQuickActionV1, index: number) => {
+                              const builtin = builtinWriteQuickActionDefaults(action.id, tCommon)
+                              return (
+                                <div
+                                  key={action.id}
+                                  className="rounded-xl border border-ds-border-muted bg-ds-card/70 p-3"
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <input
+                                      className={`${textInputClass} max-w-[200px]`}
+                                      value={action.label}
+                                      placeholder={builtin?.label ?? t('writeQuickActionLabelPlaceholder')}
+                                      spellCheck={false}
+                                      onChange={(e) => {
+                                        const next = [...selectionAssist.quickActions]
+                                        next[index] = { ...action, label: e.target.value }
+                                        updateQuickActions(next)
+                                      }}
+                                    />
+                                    <select
+                                      className={selectControlClass}
+                                      value={action.mode}
+                                      title={t('writeQuickActionModeLabel')}
+                                      aria-label={t('writeQuickActionModeLabel')}
+                                      onChange={(e) => {
+                                        const next = [...selectionAssist.quickActions]
+                                        next[index] = {
+                                          ...action,
+                                          mode: e.target.value === 'edit' ? 'edit' : 'chat'
+                                        }
+                                        updateQuickActions(next)
+                                      }}
+                                    >
+                                      <option value="edit">{t('writeQuickActionModeEdit')}</option>
+                                      <option value="chat">{t('writeQuickActionModeChat')}</option>
+                                    </select>
+                                    <button
+                                      type="button"
+                                      className="ml-auto inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-ds-faint transition hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300"
+                                      title={t('writeQuickActionRemove')}
+                                      aria-label={t('writeQuickActionRemove')}
+                                      onClick={() =>
+                                        updateQuickActions(
+                                          selectionAssist.quickActions.filter(
+                                            (item: WriteQuickActionV1) => item.id !== action.id
+                                          )
+                                        )
+                                      }
+                                    >
+                                      <Trash2 className="h-4 w-4" strokeWidth={1.8} />
+                                    </button>
+                                  </div>
+                                  <textarea
+                                    className={`${textInputClass} mt-2 min-h-[60px] resize-y leading-5`}
+                                    value={action.prompt}
+                                    placeholder={builtin?.prompt ?? t('writeQuickActionPromptPlaceholder')}
+                                    spellCheck={false}
+                                    onChange={(e) => {
+                                      const next = [...selectionAssist.quickActions]
+                                      next[index] = { ...action, prompt: e.target.value }
+                                      updateQuickActions(next)
+                                    }}
+                                  />
+                                </div>
+                              )
+                            }
+                          )}
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className={ghostButtonClass}
+                            disabled={selectionAssist.quickActions.length >= WRITE_QUICK_ACTION_MAX_COUNT}
+                            onClick={() =>
+                              updateQuickActions([
+                                ...selectionAssist.quickActions,
+                                { id: `custom-${Date.now().toString(36)}`, label: '', prompt: '', mode: 'chat' }
+                              ])
+                            }
+                          >
+                            <Plus className="h-4 w-4" strokeWidth={2} />
+                            {t('writeQuickActionAdd')}
+                          </button>
+                          <button
+                            type="button"
+                            className={ghostButtonClass}
+                            onClick={() =>
+                              update({ write: { selectionAssist: defaultWriteSelectionAssistSettings() } })
+                            }
+                          >
+                            <RotateCcw className="h-4 w-4" strokeWidth={1.8} />
+                            {t('writeQuickActionsReset')}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </AdvancedSettingsDisclosure>
                 </div>
               </SettingsCard>
 

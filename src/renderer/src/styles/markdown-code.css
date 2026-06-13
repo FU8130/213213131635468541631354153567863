@@ -347,14 +347,14 @@ html[data-theme='dark'] .ds-markdown .ds-code-block-html > pre span {
 .ds-code-sidebar {
   --ds-code-sidebar-editor-bg: #fbfcff;
   --ds-code-sidebar-gutter-bg: #f3f6fb;
-  --ds-code-sidebar-active-line-bg: rgba(0, 136, 255, 0.13);
+  --ds-code-sidebar-active-line-bg: rgba(59, 130, 216, 0.13);
   background: var(--ds-bg-canvas);
 }
 
 html[data-theme='dark'] .ds-code-sidebar {
-  --ds-code-sidebar-editor-bg: #181818;
-  --ds-code-sidebar-gutter-bg: #202020;
-  --ds-code-sidebar-active-line-bg: rgba(51, 156, 255, 0.18);
+  --ds-code-sidebar-editor-bg: #151c2e;
+  --ds-code-sidebar-gutter-bg: #1b2338;
+  --ds-code-sidebar-active-line-bg: rgba(111, 176, 232, 0.18);
 }
 
 .ds-code-sidebar-topbar {
@@ -398,7 +398,7 @@ html[data-theme='dark'] .ds-code-sidebar {
   align-items: center;
   justify-content: center;
   border-radius: 5px;
-  background: #202020;
+  background: #1b2338;
   padding: 0 0.3rem;
   color: #ffffff;
   font-family: 'SF Mono', 'JetBrains Mono', 'IBM Plex Mono', monospace;
@@ -649,7 +649,7 @@ html[data-theme='dark'] .ds-file-preview-code-html > pre span {
   border-radius: 22px;
   background: var(--ds-card-strong);
   box-shadow:
-    0 34px 90px rgba(0, 0, 0, 0.42),
+    0 34px 90px rgba(2, 6, 16, 0.42),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 

@@ -1,11 +1,11 @@
 # Kun GUI single-runtime architecture
 
-This document describes how DeepSeek GUI should now be organized around one dedicated runtime,
+This document describes how the Kun desktop app should now be organized around one dedicated runtime,
 `Kun`, that serves the GUI through a single HTTP/SSE boundary.
 The conclusion is clear up front: the GUI keeps one agent with the only ID
 `kun`; Code, Write, and Connect phone all flow through the same `kun serve`
 HTTP/SSE boundary.
-CodeWhale, Reasonix, painting/design entry points, runtime diagnostics panel,
+Historical runtimes, painting/design entry points, runtime diagnostics panel,
 and agent switching are no longer shown as primary product surfaces.
 
 ## Target boundary
@@ -14,8 +14,8 @@ and agent switching are no longer shown as primary product surfaces.
 Renderer (React + Zustand)
   Code / Write / Connect phone UI
         |
-        | window.dsGui.runtimeRequest(path, method, body)
-        | window.dsGui.startSse(threadId, sinceSeq)
+        | window.kunGui.runtimeRequest(path, method, body)
+        | window.kunGui.startSse(threadId, sinceSeq)
         v
 Preload IPC bridge
         |
@@ -38,24 +38,23 @@ kun serve (TypeScript package)
   /v1/workspace/status
 ```
 
-This boundary follows the HTTP architecture used by TUI/CodeWhale: GUI never embeds the agent loop,
-does not juggle multiple state machines through stdio/RPC, and treats the local
-HTTP server as the stable API boundary.
-Inside `kun`, the cache-first agent loop is adopted from Reasonix (`immutable` prompt
-prefix, append-only log, bounded LRU/TTL cache, inflight cleanup, steering queue,
-context compaction, usage/cache telemetry).
+This boundary uses a local HTTP service architecture: GUI never embeds the agent loop,
+does not juggle multiple state machines through stdio/RPC, and treats `kun serve`
+as the stable API boundary.
+Inside `kun`, the cache-first agent loop uses immutable prompt prefixes,
+append-only logs, bounded LRU/TTL caches, inflight cleanup, steering queues,
+context compaction, and usage/cache telemetry.
 
 ## Cache-hit optimization
 
-Kun cache-hit metrics should be computed and optimized using DeepSeek native fields first:
+Kun cache-hit metrics should be computed and optimized using provider-native usage fields first:
 
 - Model client prefers native fields:
   `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens`.
   Only when those are missing should it fall back to compatibility fields
   such as `prompt_tokens_details.cached_tokens` and `cache_read_input_tokens`.
 - Use hit rate as `hit / (hit + miss)`, not `hit / prompt_tokens`.
-  DeepSeek native misses are not always equal to `prompt_tokens - hit`; Reasonix also uses
-  the `hit + miss` denominator.
+  Provider-native misses are not always equal to `prompt_tokens - hit`.
 - `kun/src/prompt/kun-system-prompt.ts` is the stable prefix.
   It may only contain long-lived Kun run contract content and must not include
   workspace names, timestamps, file snippets, selected text, user dynamic state,
@@ -71,7 +70,7 @@ or timestamps.
   Stable ordering avoids prefix churn caused by schema reordering.
 - Each turn persists a canonical tool-catalog fingerprint and count.
   If a scope detects tool-definition drift, `toolCatalogDrift` is recorded to aid cache debugging.
-- Before sending historical messages to DeepSeek, repair message history:
+- Before sending historical messages to the upstream model, repair message history:
   no orphaned `tool_result`, no `tool_call` whose result is missing.
   Multiple tool calls in one response are reorganized into a single legal
   assistant `tool_calls` message to reduce 400/retry loops.
@@ -93,10 +92,10 @@ Observed temporary-thread verification on `2026-06-02`:
   overall (including warm-up) `95.2%`, latest round `98.1%`.
 
 Pre-existing usage events persisted before optimization cannot be rewritten because
-DeepSeek native cache fields were not recorded then; they only reflect old behavior and
+provider-native cache fields were not recorded then; they only reflect old behavior and
 should not be treated as evidence that current hit rates are lower.
 
-Reasonix findings still useful as future references:
+Cache capabilities still worth pursuing next:
 
 - Tool-collection mutation policy: adding tools should be append-only; edit/reorder/remove
   requires either restart or a new session boundary to avoid sudden cache misses.
@@ -132,10 +131,9 @@ kept removed:
 
 Main process and preload no longer expose old provider IPC:
 
-- Remove `deepseek:spawn-if-needed`, `deepseek:update-*`, `deepseek:diagnostics`.
-- Remove `reasonix:rpc-send`, `reasonix:spawn-if-needed`, and the `reasonix` RPC bridge.
-- Remove CodeWhale adapter, Reasonix adapter, Reasonix HTTP bridge,
-  DeepSeek/CodeWhale updater, legacy binary resolver, and old process manager.
+- Remove historical runtime spawn/update/diagnostics IPC.
+- Remove historical RPC event bridges.
+- Remove historical adapters, HTTP bridges, updaters, binary resolvers, and process managers.
 - Remove diagnostic/importer modules unrelated to Kun.
 
 Main process now only needs:
@@ -160,7 +158,7 @@ Saved settings should now be just:
       "apiKey": "",
       "baseUrl": "https://api.deepseek.com/beta",
       "runtimeToken": "",
-      "dataDir": "~/.deepseekgui/kun",
+      "dataDir": "~/.kun/data",
       "model": "deepseek-v4-pro",
       "approvalPolicy": "auto",
       "sandboxMode": "workspace-write",
@@ -170,17 +168,15 @@ Saved settings should now be just:
 }
 ```
 
-The only reason strings `codewhale` and `reasonix` remain in code is for one-time
-migration from old settings:
+The only reason historical provider strings remain in code is one-time migration
+from old settings:
 
-- `agentProvider: codewhale | reasonix | deepseek-runtime` normalizes to `kun`.
-- Old `agents.deepseek` / `agents.codewhale` values for `port`, `autoStart`, `apiKey`,
-  `baseUrl`, `runtimeToken`, `approvalPolicy`, and `sandboxMode` are migrated into
+- Historical `agentProvider` values normalize to `kun`.
+- Historical provider values for `port`, `autoStart`, `apiKey`, `baseUrl`,
+  `runtimeToken`, `approvalPolicy`, `sandboxMode`, and `model` are migrated into
   `agents.kun`.
-- Old `agents.reasonix` values for `apiKey`, `baseUrl`, `model`, and `autoStart`
-  are also migrated to `agents.kun`.
-- Persisted files after migration no longer retain `agents.codewhale` / `agents.reasonix`.
-- Legacy Connect phone fields (internally still named Claw) `agentThreadIds.codewhale` and `agentThreadIds.reasonix` are collapsed
+- Persisted files after migration no longer retain historical provider blocks.
+- Legacy Connect phone fields (internally still named Claw) `agentThreadIds` are collapsed
   to `agentThreadIds.kun`; per-provider maps are not retained.
 
 ## Code / Write / Connect phone flows under Kun
@@ -189,16 +185,16 @@ migration from old settings:
   steer, interrupt, compact, approval, and SSE mapping.
   Chat UI does not directly know about old providers.
 - Write: writing assistant and inline completion share the same Kun API key/base URL.
-  Write thread registry identifies write threads as Kun threads only, with no Reasonix distinction.
+  Write thread registry identifies write threads as Kun threads only, with no legacy-runtime distinction.
 - Connect phone: scheduled tasks, Feishu/Lark/WeChat, and IM webhooks create or reuse Kun threads.
   The codebase still uses the internal `claw` route, settings key, and runtime file names for legacy-name compatibility.
   `threadId` / `localThreadId` remain only for legacy settings compatibility;
   canonical mapping is written to `agentThreadIds.kun`.
 
-## Functional parity from CodeWhale in GUI HTTP path
+## Functional parity in GUI HTTP path
 
-Replacing CodeWhale is not only preserving chat.
-Kun GUI HTTP must expose the same capabilities previously exposed through CodeWhale:
+Runtime unification is not only preserving chat.
+Kun GUI HTTP must expose the capabilities already consumed by the store/UI:
 
 - `GET /v1/threads` supports `limit`, `search`, `include_archived`, `archived_only`.
   Archived/deleted threads are hidden by default; session search and archive views
@@ -207,7 +203,7 @@ Kun GUI HTTP must expose the same capabilities previously exposed through CodeWh
   and writes historical items back into the new thread's session store.
   During copy, pending `approval` / `user-input` states are rewritten to history-only
   states to prevent hanging gates in new sessions.
-- `POST /v1/sessions/{id}/resume-thread` follows the previous CodeWhale resume path.
+- `POST /v1/sessions/{id}/resume-thread` follows the historical resume path.
   Kun should first attempt same-name thread restore, then session snapshot/JSONL reconstruction,
 and return `404` when not found.
 - Both `POST /v1/user-inputs/{id}` and legacy `POST /v1/user-input/{id}` are accepted,
@@ -223,21 +219,10 @@ and return `404` when not found.
 
 Legacy runtime paths should not reappear:
 
-- `src/renderer/src/agent/codewhale-runtime.ts`
-- `src/renderer/src/agent/reasonix-runtime.ts`
-- `src/renderer/src/agent/reasonix-event-mapper.ts`
-- `src/main/runtime/codewhale-adapter.ts`
-- `src/main/runtime/reasonix-adapter.ts`
-- `src/main/runtime/reasonix-http-bridge.ts`
-- `src/main/deepseek-process.ts`
-- `src/main/resolve-deepseek-binary.ts`
-- `src/main/deepseek-updater.ts`
-- `src/main/reasonix-process.ts`
-- `src/main/reasonix-config.ts`
-- `src/main/resolve-reasonix-binary.ts`
-- `src/shared/reasonix-protocol.ts`
-- `src/shared/deepseek-update.ts`
-- Diagnostic/importer modules for old runtime paths.
+- Historical runtime adapters / bridges
+- Historical runtime process managers / binary resolvers
+- Historical runtime update modules
+- Diagnostics/importers outside Kun
 
 Legacy UI entrypoints should not reappear:
 
@@ -245,7 +230,6 @@ Legacy UI entrypoints should not reappear:
 - `ConnectionStatusBar`
 - `RuntimeDiagnosticsDialog`
 - `RuntimeInsightsPanel`
-- `ReasonixInsightsPanel`
 - Design/Painting starter card
 
 ## Design constraints
@@ -277,12 +261,12 @@ npm run build
 
 Manual smoke checks:
 
-1. Open DeepSeek GUI.
+1. Open the Kun desktop app.
 2. Code can create a new session, send messages, stream output, and use approval/interruption.
 3. Write opens writing space; inline completion and inline selected-text assistant share API key.
 4. Connect phone can save settings, run manual tasks, and write thread IDs back to Kun mapping.
-5. `Settings -> Agents` shows only Kun, with no provider switch and no runtime diagnostics/
-   CodeWhale/Reasonix blocks.
+5. `Settings -> Agents` shows only Kun, with no provider switch, runtime diagnostics,
+   or historical provider blocks.
 6. If `GET /v1/usage?group_by=thread` returns history, home and footer no longer show
    blank “No usage yet”, but show token, turn, cache-hit indicators.
 7. Thread search, archive, fork/resume, and request_user_input answer/cancel flows all operate

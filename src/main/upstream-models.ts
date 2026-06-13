@@ -4,16 +4,21 @@ import { join } from 'node:path'
 import {
   getModelProviderProfile,
   getModelProviderSettings,
+  isComposerChatModelId,
   listModelProviderModelIds,
+  listNonTextModelIds,
+  modelProfileSupportsTextChat,
+  modelProviderModelProfile,
+  modelProviderModelProfilesForSettings,
   resolveKunRuntimeSettings,
   type AppSettingsV1
 } from '../shared/app-settings'
 import { DEFAULT_COMPOSER_MODEL_IDS } from '../shared/default-composer-models'
-import type { ModelProviderModelGroup } from '../shared/ds-gui-api'
+import type { ModelProviderModelGroup } from '../shared/kun-gui-api'
 import { upstreamOpenAiModelsUrl } from '../shared/openai-compat-url'
 
 export type FetchUpstreamModelsResult =
-  | { ok: true; modelIds: string[]; modelGroups?: ModelProviderModelGroup[] }
+  | { ok: true; modelIds: string[]; defaultModelId?: string; modelGroups?: ModelProviderModelGroup[] }
   | { ok: false; message: string }
 
 const UPSTREAM_MODELS_TIMEOUT_MS = 8_000
@@ -28,11 +33,19 @@ export async function fetchUpstreamModelIds(
 ): Promise<FetchUpstreamModelsResult> {
   const configuredModelIds = await readConfiguredKunModelIds(settings)
   const configuredGroups = await readConfiguredModelGroups(settings)
+  const nonTextModelIds = listNonTextModelIds(settings)
+  const runtime = resolveKunRuntimeSettings(settings)
+  const runtimeModel = runtime.model.trim()
+  const defaultModelId = isComposerChatModelId(runtimeModel, nonTextModelIds) ? runtimeModel : ''
   const key = apiKey.trim()
   if (!key) {
-    return modelListOrError(configuredModelIds, configuredGroups, 'Missing API key; cannot query upstream /v1/models.')
+    return modelListOrError(
+      configuredModelIds,
+      configuredGroups,
+      defaultModelId,
+      'Missing API key; cannot query upstream /v1/models.'
+    )
   }
-  const runtime = resolveKunRuntimeSettings(settings)
   const activeProvider = getModelProviderProfile(settings, runtime.providerId)
   const url = upstreamOpenAiModelsUrl(runtime.baseUrl)
   try {
@@ -49,6 +62,7 @@ export async function fetchUpstreamModelIds(
       return modelListOrError(
         configuredModelIds,
         configuredGroups,
+        defaultModelId,
         `Upstream models request failed (${res.status}): ${text.slice(0, 400)}`
       )
     }
@@ -56,17 +70,33 @@ export async function fetchUpstreamModelIds(
     try {
       parsed = JSON.parse(text) as unknown
     } catch {
-      return modelListOrError(configuredModelIds, configuredGroups, 'Upstream /v1/models returned non-JSON body.')
+      return modelListOrError(
+        configuredModelIds,
+        configuredGroups,
+        defaultModelId,
+        'Upstream /v1/models returned non-JSON body.'
+      )
     }
     const data = (parsed as { data?: unknown }).data
     if (!Array.isArray(data)) {
-      return modelListOrError(configuredModelIds, configuredGroups, 'Upstream /v1/models JSON missing data[] array.')
+      return modelListOrError(
+        configuredModelIds,
+        configuredGroups,
+        defaultModelId,
+        'Upstream /v1/models JSON missing data[] array.'
+      )
     }
     const ids = new Set<string>()
     for (const row of data) {
       if (row && typeof row === 'object' && typeof (row as { id?: unknown }).id === 'string') {
         const id = (row as { id: string }).id.trim()
-        if (id) ids.add(id)
+        if (
+          id
+          && isComposerChatModelId(id, nonTextModelIds)
+          && modelProfileSupportsTextChat(modelProviderModelProfile(activeProvider, id))
+        ) {
+          ids.add(id)
+        }
       }
     }
     const sorted = mergeModelIds([...ids, ...configuredModelIds])
@@ -76,25 +106,30 @@ export async function fetchUpstreamModelIds(
     return {
       ok: true,
       modelIds: sorted,
+      defaultModelId,
       modelGroups: mergeModelGroups([
         ...configuredGroups,
         {
           providerId: activeProvider.id,
           label: activeProvider.name,
-          modelIds: [...ids]
+          modelIds: [...ids],
+          modelProfiles: activeProvider.modelProfiles
         }
       ])
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    return modelListOrError(configuredModelIds, configuredGroups, msg)
+    return modelListOrError(configuredModelIds, configuredGroups, defaultModelId, msg)
   }
 }
 
 export async function readConfiguredKunModelIds(settings: AppSettingsV1): Promise<string[]> {
   const runtime = resolveKunRuntimeSettings(settings)
   const configPath = join(expandHome(runtime.dataDir), 'config.json')
-  const ids = [runtime.model, ...listModelProviderModelIds(settings)]
+  const nonTextModelIds = listNonTextModelIds(settings)
+  const ids = [runtime.model, ...listModelProviderModelIds(settings)].filter((id) =>
+    isComposerChatModelId(id, nonTextModelIds)
+  )
   let parsed: unknown
   try {
     parsed = JSON.parse(await readFile(configPath, 'utf8')) as unknown
@@ -106,29 +141,36 @@ export async function readConfiguredKunModelIds(settings: AppSettingsV1): Promis
   const contextCompaction = objectValue(root.contextCompaction)
   return mergeModelIds([
     ...ids,
-    ...modelIdsFromProfiles(objectValue(contextCompaction.modelProfiles)),
-    ...modelIdsFromProfiles(objectValue(models.profiles))
+    ...modelIdsFromProfiles(objectValue(contextCompaction.modelProfiles), nonTextModelIds),
+    ...modelIdsFromProfiles(objectValue(models.profiles), nonTextModelIds)
   ])
 }
 
 function modelListOrError(
   ids: readonly string[],
   groups: readonly ModelProviderModelGroup[],
+  defaultModelId: string,
   message: string
 ): FetchUpstreamModelsResult {
   return hasCustomModelId(ids)
-    ? { ok: true, modelIds: mergeModelIds(ids), modelGroups: mergeModelGroups(groups) }
+    ? { ok: true, modelIds: mergeModelIds(ids), defaultModelId, modelGroups: mergeModelGroups(groups) }
     : { ok: false, message }
 }
 
 async function readConfiguredModelGroups(settings: AppSettingsV1): Promise<ModelProviderModelGroup[]> {
   const groups: ModelProviderModelGroup[] = []
+  const nonTextModelIds = listNonTextModelIds(settings)
   for (const provider of getModelProviderSettings(settings).providers) {
-    if (provider.models.length === 0) continue
+    const modelIds = provider.models.filter((id) =>
+      isComposerChatModelId(id, nonTextModelIds)
+      && modelProfileSupportsTextChat(modelProviderModelProfile(provider, id))
+    )
+    if (modelIds.length === 0) continue
     groups.push({
       providerId: provider.id,
       label: provider.name,
-      modelIds: provider.models
+      modelIds,
+      modelProfiles: provider.modelProfiles
     })
   }
   return mergeModelGroups([
@@ -146,27 +188,34 @@ function mergeModelGroups(groups: readonly ModelProviderModelGroup[]): ModelProv
     const modelIds = sortComposerModelIds([
       ...(existing?.modelIds ?? []),
       ...group.modelIds
-    ]).filter((id) => id !== 'auto')
+    ])
     byProvider.set(providerId, {
       providerId,
       label: group.label.trim() || providerId,
-      modelIds
+      modelIds,
+      modelProfiles: {
+        ...(existing?.modelProfiles ?? {}),
+        ...(group.modelProfiles ?? {})
+      }
     })
   }
   return [...byProvider.values()].filter((group) => group.modelIds.length > 0)
 }
 
-function modelIdsFromProfiles(profiles: Record<string, unknown>): string[] {
+function modelIdsFromProfiles(
+  profiles: Record<string, unknown>,
+  nonTextModelIds: readonly string[] = []
+): string[] {
   const ids: string[] = []
   for (const [modelId, rawProfile] of Object.entries(profiles)) {
     const trimmed = modelId.trim()
-    if (trimmed) ids.push(trimmed)
+    if (trimmed && isComposerChatModelId(trimmed, nonTextModelIds)) ids.push(trimmed)
     const aliases = objectValue(rawProfile).aliases
     if (Array.isArray(aliases)) {
       for (const alias of aliases) {
         if (typeof alias !== 'string') continue
         const trimmedAlias = alias.trim()
-        if (trimmedAlias) ids.push(trimmedAlias)
+        if (trimmedAlias && isComposerChatModelId(trimmedAlias, nonTextModelIds)) ids.push(trimmedAlias)
       }
     }
   }
@@ -191,6 +240,7 @@ async function readConfiguredProfileAliasGroups(
   const aliasesByModel = new Map<string, string[]>()
   collectModelProfileAliases(aliasesByModel, objectValue(contextCompaction.modelProfiles))
   collectModelProfileAliases(aliasesByModel, objectValue(models.profiles))
+  const providerModelProfiles = modelProviderModelProfilesForSettings(settings)
 
   const aliasGroups: ModelProviderModelGroup[] = []
   for (const group of providerGroups) {
@@ -202,7 +252,8 @@ async function readConfiguredProfileAliasGroups(
     aliasGroups.push({
       providerId: group.providerId,
       label: group.label,
-      modelIds: aliases
+      modelIds: aliases,
+      modelProfiles: providerModelProfiles
     })
   }
   return aliasGroups
@@ -243,10 +294,9 @@ function sortComposerModelIds(ids: readonly string[]): string[] {
   const ordered = new Set<string>()
   for (const id of ids) {
     const trimmed = id.trim()
-    if (trimmed) ordered.add(trimmed)
+    if (trimmed && trimmed !== 'auto') ordered.add(trimmed)
   }
-  const tail = [...ordered].filter((id) => id !== 'auto').sort((a, b) => a.localeCompare(b))
-  return ordered.has('auto') ? ['auto', ...tail] : tail
+  return [...ordered].sort((a, b) => a.localeCompare(b))
 }
 
 function expandHome(path: string): string {

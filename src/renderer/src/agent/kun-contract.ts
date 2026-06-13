@@ -20,6 +20,8 @@ export type CoreThreadSummaryJson = {
   model: string
   mode: string
   status: CoreThreadStatus
+  approvalPolicy?: string
+  sandboxMode?: string
   relation?: 'primary' | 'fork' | 'side'
   parentThreadId?: string
   forkedFromThreadId?: string
@@ -46,6 +48,7 @@ export type CoreAttachmentMetadataJson = {
   hash: string
   width?: number
   height?: number
+  localFilePath?: string
   textFallback?: CoreAttachmentTextFallbackJson
   threadIds?: string[]
   workspaces?: string[]
@@ -207,6 +210,19 @@ export type CoreRuntimeCapabilityManifestJson = {
   memory: CoreRuntimeCapabilityStateJson & {
     scopes: Array<'user' | 'workspace' | 'project'>
     maxInjectedRecords: number
+  }
+  /** Optional so the GUI keeps working against older Kun builds without the capability. */
+  imageGen?: CoreRuntimeCapabilityStateJson & {
+    model?: string
+  }
+  speechGen?: CoreRuntimeCapabilityStateJson & {
+    model?: string
+  }
+  musicGen?: CoreRuntimeCapabilityStateJson & {
+    model?: string
+  }
+  videoGen?: CoreRuntimeCapabilityStateJson & {
+    model?: string
   }
 }
 
@@ -467,11 +483,7 @@ export type CoreUsageSnapshotJson = {
   turns?: number
   costUsd?: number
   costCny?: number
-  cacheSavingsUsd?: number
-  cacheSavingsCny?: number
   tokenEconomySavingsTokens?: number
-  tokenEconomySavingsUsd?: number
-  tokenEconomySavingsCny?: number
 }
 
 export type CoreRuntimeEventJson = {
@@ -483,6 +495,8 @@ export type CoreRuntimeEventJson = {
   itemId?: string
   item?: CoreTurnItemJson
   approvalId?: string
+  approvalPolicy?: string
+  sandboxMode?: string
   toolName?: string
   callId?: string
   readyCount?: number

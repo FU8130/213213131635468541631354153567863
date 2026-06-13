@@ -62,10 +62,14 @@ describe('domain.thread', () => {
       id: 'thr_1',
       title: 'demo',
       workspace: '/tmp',
-      model: 'deepseek-chat'
+      model: 'deepseek-chat',
+      approvalPolicy: 'on-request',
+      sandboxMode: 'read-only'
     })
     const summary = toThreadSummary(thread)
     expect(summary).not.toHaveProperty('turns')
+    expect(summary.approvalPolicy).toBe('on-request')
+    expect(summary.sandboxMode).toBe('read-only')
   })
 })
 
@@ -80,6 +84,17 @@ describe('domain.turn', () => {
     const item = makeUserItem({ id: 'i1', turnId: 'turn_1', threadId: 'thr_1', text: 'hi' })
     const next = appendTurnItem(appendTurnItem(baseTurn, item), item)
     expect(next.items).toHaveLength(1)
+  })
+
+  it('persists the disableUserInput flag only when set', () => {
+    expect(baseTurn).not.toHaveProperty('disableUserInput')
+    const headless = createTurnRecord({
+      id: 'turn_im',
+      threadId: 'thr_1',
+      prompt: 'hi from wechat',
+      disableUserInput: true
+    })
+    expect(headless.disableUserInput).toBe(true)
   })
 
   it('replaces an existing item with the same id', () => {

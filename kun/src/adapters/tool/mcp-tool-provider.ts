@@ -1,5 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { createHash } from 'node:crypto'
+import { posix, win32 } from 'node:path'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -77,6 +78,19 @@ export type McpToolProviderBuildResult = {
 export type McpToolProviderOptions = {
   clientFactory?: (serverId: string, server: McpServerConfig) => Promise<McpClientLike>
   nowIso?: () => string
+  /**
+   * Upper bound for connect + initial tool listing per server during startup.
+   * A slow or hung server (e.g. an npx-based stdio server resolving packages)
+   * must not keep the whole runtime from reporting ready.
+   */
+  startupConnectTimeoutMs?: number
+}
+
+const DEFAULT_MCP_STARTUP_CONNECT_TIMEOUT_MS = 10_000
+
+export type McpStdioEnvironmentOptions = {
+  platform?: NodeJS.Platform
+  baseEnv?: NodeJS.ProcessEnv
 }
 
 type McpConnectionState = {
@@ -128,36 +142,75 @@ export async function buildMcpToolProviders(
     }
   }
 
-  for (const [serverId, server] of Object.entries(mcp.servers)) {
-    if (!server.enabled) {
-      diagnostics.push(serverDiagnostic({ serverId, server }, 'disabled', 0))
+  // Connect all servers in parallel — startup previously paid the sum of
+  // every server's connect + list latency, and a single hung server (e.g.
+  // npx resolving a package) blocked the runtime ready signal forever.
+  const startupTimeoutMs = options.startupConnectTimeoutMs ?? DEFAULT_MCP_STARTUP_CONNECT_TIMEOUT_MS
+  type ConnectOutcome =
+    | { serverId: string; server: McpServerConfig; status: 'disabled' }
+    | { serverId: string; server: McpServerConfig; status: 'error'; error: unknown }
+    | {
+        serverId: string
+        server: McpServerConfig
+        status: 'connected'
+        state: McpConnectionState
+        listed: McpToolDescriptor[]
+      }
+  const outcomes = await Promise.all(
+    Object.entries(mcp.servers).map(async ([serverId, server]): Promise<ConnectOutcome> => {
+      if (!server.enabled) {
+        return { serverId, server, status: 'disabled' }
+      }
+      const attempt = (async () => {
+        const client = await clientFactory(serverId, server)
+        const state: McpConnectionState = {
+          serverId,
+          server,
+          client,
+          clientFactory,
+          nowIso,
+          lastConnectedAt: nowIso()
+        }
+        const listed = await refreshMcpConnectionCatalog(state)
+        return { state, listed }
+      })()
+      try {
+        const result = await raceStartupTimeout(attempt, startupTimeoutMs, serverId)
+        return { serverId, server, status: 'connected', ...result }
+      } catch (error) {
+        return { serverId, server, status: 'error', error }
+      }
+    })
+  )
+
+  for (const outcome of outcomes) {
+    if (outcome.status === 'disabled') {
+      diagnostics.push(serverDiagnostic({ serverId: outcome.serverId, server: outcome.server }, 'disabled', 0))
       continue
     }
-    try {
-      const client = await clientFactory(serverId, server)
-      const state: McpConnectionState = {
-        serverId,
-        server,
-        client,
-        clientFactory,
-        nowIso,
-        lastConnectedAt: nowIso()
-      }
-      connected.push(state)
-      const listed = await refreshMcpConnectionCatalog(state)
-      catalogState.records.push(...listed.map((tool) => createMcpSearchCatalogRecord(state, tool)))
-      const tools = listed.map((tool) => createMcpLocalTool(state, tool))
-      directProviders.push({
-        id: `mcp:${serverId}`,
-        kind: 'mcp',
-        enabled: true,
-        available: true,
-        tools
-      })
-      diagnostics.push(serverDiagnostic(state, 'connected', tools.length))
-    } catch (error) {
-      diagnostics.push(serverDiagnostic({ serverId, server }, 'error', 0, errorMessage(error)))
+    if (outcome.status === 'error') {
+      diagnostics.push(
+        serverDiagnostic(
+          { serverId: outcome.serverId, server: outcome.server },
+          'error',
+          0,
+          formatMcpConnectionError(outcome.error, outcome.server)
+        )
+      )
+      continue
     }
+    const { state, listed } = outcome
+    connected.push(state)
+    catalogState.records.push(...listed.map((tool) => createMcpSearchCatalogRecord(state, tool)))
+    const tools = listed.map((tool) => createMcpLocalTool(state, tool))
+    directProviders.push({
+      id: `mcp:${outcome.serverId}`,
+      kind: 'mcp',
+      enabled: true,
+      available: true,
+      tools
+    })
+    diagnostics.push(serverDiagnostic(state, 'connected', tools.length))
   }
 
   const connectedServers = diagnostics.filter((diagnostic) => diagnostic.status === 'connected').length
@@ -248,7 +301,7 @@ function createTransport(server: McpServerConfig): Transport {
       return new StdioClientTransport({
         command: server.command ?? '',
         args: server.args,
-        env: server.env,
+        env: buildMcpStdioEnvironment(server.env),
         stderr: 'pipe'
       })
     case 'streamable-http':
@@ -356,8 +409,55 @@ async function callMcpToolWithReconnect(
   } catch (error) {
     state.lastError = redactSecretText(errorMessage(error))
     if (signal?.aborted) throw error
+    // Deterministic server-side failures (validation errors, bad
+    // arguments) come back identically on a fresh connection; tearing
+    // down a healthy session for them just loses server state. Only
+    // transport-looking failures earn a reconnect + retry.
+    if (!looksLikeMcpTransportError(error)) throw error
     const client = await reconnectMcpConnection(state)
     return client.callTool(input, { signal, timeout })
+  }
+}
+
+function looksLikeMcpTransportError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase()
+  return (
+    message.includes('connect') ||
+    message.includes('connection') ||
+    message.includes('transport') ||
+    message.includes('timed out') ||
+    message.includes('timeout') ||
+    message.includes('epipe') ||
+    message.includes('broken pipe') ||
+    message.includes('socket') ||
+    message.includes('stream closed') ||
+    message.includes('fetch failed') ||
+    message.includes('network')
+  )
+}
+
+async function raceStartupTimeout<T extends { state: McpConnectionState }>(
+  attempt: Promise<T>,
+  timeoutMs: number,
+  serverId: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      attempt,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`MCP server "${serverId}" did not connect within ${timeoutMs}ms during startup`)),
+          timeoutMs
+        )
+      })
+    ])
+  } catch (error) {
+    // A late successful connection would otherwise leak the child process.
+    void attempt.then((result) => result.state.client.close()).catch(() => undefined)
+    throw error
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
@@ -422,4 +522,128 @@ function normalizePathForTrust(value: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+export function buildMcpStdioEnvironment(
+  serverEnv: Record<string, string> = {},
+  options: McpStdioEnvironmentOptions = {}
+): Record<string, string> {
+  const platform = options.platform ?? process.platform
+  const baseEnv = options.baseEnv ?? process.env
+  const pathKey = findPathKey(serverEnv) ?? findPathKey(baseEnv) ?? 'PATH'
+  const configuredPath = readEnvPath(serverEnv)
+  const inheritedPath = readEnvPath(baseEnv)
+  const pathValue = mergePathEntries(
+    [configuredPath ?? inheritedPath ?? '', ...commonMcpCommandPathEntries(platform, baseEnv)],
+    pathDelimiter(platform)
+  )
+  return {
+    ...serverEnv,
+    ...(pathValue ? { [pathKey]: pathValue } : {})
+  }
+}
+
+export function formatMcpConnectionError(error: unknown, server: McpServerConfig): string {
+  const message = errorMessage(error)
+  if (server.transport !== 'stdio' || !isMissingExecutableError(error, message)) return message
+  const command = missingExecutableCommand(error) ?? server.command ?? 'configured command'
+  const hint = isBareCommand(command)
+    ? missingBareCommandHint(command)
+    : `Could not find MCP command "${command}". Check that the configured executable path exists.`
+  return `${message}. ${hint}`
+}
+
+function commonMcpCommandPathEntries(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (platform === 'darwin') {
+    return [
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      '/opt/local/bin',
+      homePath(env, '.volta/bin'),
+      homePath(env, '.local/bin'),
+      homePath(env, '.bun/bin')
+    ].filter((entry): entry is string => Boolean(entry))
+  }
+  if (platform === 'linux') {
+    return [
+      '/home/linuxbrew/.linuxbrew/bin',
+      '/usr/local/bin',
+      '/usr/bin',
+      homePath(env, '.volta/bin'),
+      homePath(env, '.local/bin'),
+      homePath(env, '.bun/bin')
+    ].filter((entry): entry is string => Boolean(entry))
+  }
+  if (platform === 'win32') {
+    return [
+      env.APPDATA ? win32.join(env.APPDATA, 'npm') : '',
+      env.ProgramFiles ? win32.join(env.ProgramFiles, 'nodejs') : '',
+      env['ProgramFiles(x86)'] ? win32.join(env['ProgramFiles(x86)'], 'nodejs') : ''
+    ].filter((entry): entry is string => Boolean(entry))
+  }
+  return []
+}
+
+function findPathKey(env: Record<string, string | undefined>): string | undefined {
+  return Object.keys(env).find((key) => key.toLowerCase() === 'path')
+}
+
+function readEnvPath(env: Record<string, string | undefined>): string | undefined {
+  const key = findPathKey(env)
+  const value = key ? env[key] : undefined
+  return value && value.trim() ? value : undefined
+}
+
+function mergePathEntries(values: string[], delimiter: string): string {
+  const seen = new Set<string>()
+  const entries: string[] = []
+  for (const value of values) {
+    for (const entry of value.split(delimiter)) {
+      const trimmed = entry.trim()
+      if (!trimmed) continue
+      const key = trimmed.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      entries.push(trimmed)
+    }
+  }
+  return entries.join(delimiter)
+}
+
+function pathDelimiter(platform: NodeJS.Platform): string {
+  return platform === 'win32' ? ';' : ':'
+}
+
+function homePath(env: NodeJS.ProcessEnv, relativePath: string): string {
+  return env.HOME ? posix.join(env.HOME, relativePath) : ''
+}
+
+function isMissingExecutableError(error: unknown, message: string): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : ''
+  return code === 'ENOENT' || /\bspawn\s+\S+\s+ENOENT\b/i.test(message)
+}
+
+function missingExecutableCommand(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const path = (error as { path?: unknown }).path
+  return typeof path === 'string' && path.trim() ? path.trim() : undefined
+}
+
+function isBareCommand(command: string): boolean {
+  return Boolean(command.trim()) && !command.includes('/') && !command.includes('\\')
+}
+
+function missingBareCommandHint(command: string): string {
+  if (process.platform === 'win32') {
+    return `Could not find "${command}" on PATH while starting the MCP server. Make sure Node/npm is installed and available to Kun, or set the MCP command to an absolute path.`
+  }
+  if (process.platform === 'darwin') {
+    return `Could not find "${command}" on PATH while starting the MCP server. If Kun was launched from Finder or the desktop, make sure Node/npm is installed and available to GUI apps, or set the MCP command to an absolute path such as /opt/homebrew/bin/${command}.`
+  }
+  return `Could not find "${command}" on PATH while starting the MCP server. Make sure Node/npm is installed and available to Kun, or set the MCP command to an absolute path such as /usr/local/bin/${command}.`
 }

@@ -38,6 +38,7 @@ import { createSideActions } from './chat-store-side-actions'
 import {
   activeClawChannel,
   compactCodeWorkspaceRoots,
+  fallbackComposerModel,
   forgetCodeWorkspaceRoot,
   hydrateBlockModelLabels,
   isClawThread,
@@ -56,7 +57,6 @@ import {
   collectAssistantTextForTurn,
   findLatestUserBlockId,
   findReusableEmptyThreadId,
-  hasPendingRuntimeWork,
   threadBelongsToWorkspace
 } from './chat-store-runtime-helpers'
 import {
@@ -127,6 +127,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   workspaceRoot: '',
   workspaceLabel: i18n.t('common:workingDirectory'),
   runtimeConnection: 'idle',
+  runtimeStatus: null,
   codeWorkspaceRoots: [],
   threads: [],
   threadSearch: '',
@@ -150,6 +151,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   turnReasoningLastAtByUserId: {},
   inspectorSelectedId: null,
   composerModel: '',
+  composerProviderId: '',
   composerPickList: mergeComposerPickList(false, []),
   composerModelGroups: [],
   queuedMessages: [],
@@ -183,6 +185,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     persistComposerModel,
     readStoredComposerModel,
     mergeComposerPickList,
+    fallbackComposerModel,
     getComposerModelLoadPromise: () => composerModelLoadPromise,
     setComposerModelLoadPromise: (promise) => {
       composerModelLoadPromise = promise

@@ -1,22 +1,31 @@
-import { type ReactElement, type RefObject } from 'react'
+import { type MutableRefObject, type ReactElement, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { WriteInlineCompletionSettingsV1 } from '@shared/app-settings'
 import type { WriteRenderSafety } from '../../write/write-render-safety'
 import type { WriteRecentEdit } from '../../write/recent-edits'
-import type { WriteEditorSelectionState } from './WriteMarkdownEditor'
+import {
+  WriteRichEditor,
+  type WriteRichEditorHandle
+} from '../../write/tiptap/WriteRichEditor'
+import type { WriteEditorSelectionState, WriteMarkdownEditorHandle } from './WriteMarkdownEditor'
 import { WriteMarkdownEditor } from './WriteMarkdownEditor'
 import { WriteMarkdownPreview } from './WriteMarkdownPreview'
 import { WriteWorkspaceStart } from './WriteWorkspaceStart'
 import { WriteImagePreview } from './WriteImagePreview'
+import { WritePdfViewer } from './WritePdfViewer'
 
 type Props = {
   activeFilePath: string | null
   activeFileIsImage: boolean
+  activeFileIsPdf: boolean
   activeFileIsText: boolean
   fileLoading: boolean
   fileContent: string
   imageDataUrl: string
   imageMimeType: string
+  pdfDataBase64: string
+  pdfMimeType: string
+  pdfMtimeMs: number
   fileSize: number
   workspaceRoot: string
   workspaceName: string
@@ -29,6 +38,9 @@ type Props = {
   editorWidth: string
   previewWidth: string
   editorAppearance: 'source' | 'live'
+  richModeActive: boolean
+  richHandleRef: MutableRefObject<WriteRichEditorHandle | null>
+  markdownHandleRef?: MutableRefObject<WriteMarkdownEditorHandle | null>
   debouncedPreviewContent: string
   isMarkdown: boolean
   inlineCompletion: WriteInlineCompletionSettingsV1
@@ -51,11 +63,15 @@ type Props = {
 export function WriteWorkspaceDocumentPane({
   activeFilePath,
   activeFileIsImage,
+  activeFileIsPdf,
   activeFileIsText,
   fileLoading,
   fileContent,
   imageDataUrl,
   imageMimeType,
+  pdfDataBase64,
+  pdfMimeType: _pdfMimeType,
+  pdfMtimeMs,
   fileSize,
   workspaceRoot,
   workspaceName,
@@ -68,6 +84,9 @@ export function WriteWorkspaceDocumentPane({
   editorWidth,
   previewWidth,
   editorAppearance,
+  richModeActive,
+  richHandleRef,
+  markdownHandleRef,
   debouncedPreviewContent,
   isMarkdown,
   inlineCompletion,
@@ -121,6 +140,20 @@ export function WriteWorkspaceDocumentPane({
     )
   }
 
+  if (activeFileIsPdf) {
+    return (
+      <WritePdfViewer
+        filePath={activeFilePath}
+        dataBase64={pdfDataBase64}
+        size={fileSize}
+        mtimeMs={pdfMtimeMs}
+        workspaceRoot={workspaceRoot}
+        viewerRef={editorPaneRef}
+        onSelectionChange={onSelectionChange}
+      />
+    )
+  }
+
   if (!activeFileIsText) {
     return (
       <div className="flex h-full min-h-[320px] items-center justify-center text-[14px] text-ds-muted">
@@ -142,28 +175,78 @@ export function WriteWorkspaceDocumentPane({
       <div className="flex min-h-0 min-w-0 flex-1">
         {editorVisible ? (
           <div ref={editorPaneRef} className={`${editorWidth} min-h-0 overflow-hidden`}>
-            <WriteMarkdownEditor
-              value={fileContent}
-              workspaceRoot={workspaceRoot}
-              filePath={activeFilePath}
-              appearance={editorAppearance}
-              livePreviewEnabled={renderSafety.livePreviewEnabled}
-              readOnly={renderSafety.readOnly}
-              completionModel={inlineCompletion.model}
-              completionEnabled={inlineCompletion.enabled && inlineCompletionApiReady}
-              completionDebounceMs={inlineCompletion.debounceMs}
-              completionMinAcceptScore={inlineCompletion.minAcceptScore}
-              completionLongEnabled={inlineCompletion.longCompletionEnabled}
-              completionLongDebounceMs={inlineCompletion.longDebounceMs}
-              completionLongMinAcceptScore={inlineCompletion.longMinAcceptScore}
-              recentEdits={recentEdits}
-              onChange={onContentChange}
-              onDocumentEdit={onDocumentEdit}
-              onSelectionChange={onSelectionChange}
-              onSaveShortcut={onSaveShortcut}
-              onImagePasteSaved={onImagePasteSaved}
-              onImagePasteError={onImagePasteError}
-            />
+            {richModeActive ? (
+              <WriteRichEditor
+                value={fileContent}
+                workspaceRoot={workspaceRoot}
+                filePath={activeFilePath}
+                readOnly={renderSafety.readOnly}
+                completionModel={inlineCompletion.model}
+                completionEnabled={inlineCompletion.enabled && inlineCompletionApiReady}
+                completionDebounceMs={inlineCompletion.debounceMs}
+                completionMinAcceptScore={inlineCompletion.minAcceptScore}
+                completionLongEnabled={inlineCompletion.longCompletionEnabled}
+                completionLongDebounceMs={inlineCompletion.longDebounceMs}
+                completionLongMinAcceptScore={inlineCompletion.longMinAcceptScore}
+                recentEdits={recentEdits}
+                onChange={onContentChange}
+                onDocumentEdit={onDocumentEdit}
+                onSelectionChange={onSelectionChange}
+                onSaveShortcut={onSaveShortcut}
+                onImagePasteSaved={onImagePasteSaved}
+                onImagePasteError={onImagePasteError}
+                handleRef={richHandleRef}
+                fallback={
+                  <WriteMarkdownEditor
+                    value={fileContent}
+                    workspaceRoot={workspaceRoot}
+                    filePath={activeFilePath}
+                    appearance="live"
+                    livePreviewEnabled={renderSafety.livePreviewEnabled}
+                    readOnly={renderSafety.readOnly}
+                    completionModel={inlineCompletion.model}
+                    completionEnabled={inlineCompletion.enabled && inlineCompletionApiReady}
+                    completionDebounceMs={inlineCompletion.debounceMs}
+                    completionMinAcceptScore={inlineCompletion.minAcceptScore}
+                    completionLongEnabled={inlineCompletion.longCompletionEnabled}
+                    completionLongDebounceMs={inlineCompletion.longDebounceMs}
+                    completionLongMinAcceptScore={inlineCompletion.longMinAcceptScore}
+                    recentEdits={recentEdits}
+                    onChange={onContentChange}
+                    onDocumentEdit={onDocumentEdit}
+                    onSelectionChange={onSelectionChange}
+                    onSaveShortcut={onSaveShortcut}
+                    onImagePasteSaved={onImagePasteSaved}
+                    onImagePasteError={onImagePasteError}
+                    handleRef={markdownHandleRef}
+                  />
+                }
+              />
+            ) : (
+              <WriteMarkdownEditor
+                value={fileContent}
+                workspaceRoot={workspaceRoot}
+                filePath={activeFilePath}
+                appearance={editorAppearance}
+                livePreviewEnabled={renderSafety.livePreviewEnabled}
+                readOnly={renderSafety.readOnly}
+                completionModel={inlineCompletion.model}
+                completionEnabled={inlineCompletion.enabled && inlineCompletionApiReady}
+                completionDebounceMs={inlineCompletion.debounceMs}
+                completionMinAcceptScore={inlineCompletion.minAcceptScore}
+                completionLongEnabled={inlineCompletion.longCompletionEnabled}
+                completionLongDebounceMs={inlineCompletion.longDebounceMs}
+                completionLongMinAcceptScore={inlineCompletion.longMinAcceptScore}
+                recentEdits={recentEdits}
+                onChange={onContentChange}
+                onDocumentEdit={onDocumentEdit}
+                onSelectionChange={onSelectionChange}
+                onSaveShortcut={onSaveShortcut}
+                onImagePasteSaved={onImagePasteSaved}
+                onImagePasteError={onImagePasteError}
+                handleRef={markdownHandleRef}
+              />
+            )}
           </div>
         ) : null}
 
@@ -173,6 +256,7 @@ export function WriteWorkspaceDocumentPane({
               content={debouncedPreviewContent}
               isMarkdown={isMarkdown && renderSafety.markdownPreviewEnabled}
               filePath={activeFilePath}
+              workspaceRoot={workspaceRoot}
               previewErrorMessage={t('writePreviewErrorFallback')}
             />
           </div>

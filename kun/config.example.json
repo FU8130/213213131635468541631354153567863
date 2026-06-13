@@ -112,5 +112,6 @@
       "scopes": ["user", "workspace", "project"],
       "maxInjectedRecords": 8
     }
-  }
+  },
+  "hooks": []
 }

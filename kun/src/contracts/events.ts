@@ -3,6 +3,7 @@ import { TurnItem } from './items.js'
 import { ThreadGoalSchema, ThreadTodoListSchema } from './threads.js'
 import { UsageSnapshotSchema } from './usage.js'
 import { RuntimeErrorSeverity } from './errors.js'
+import { ApprovalPolicySchema, SandboxModeSchema } from './policy.js'
 
 /**
  * Persisted runtime events. Every event has a per-thread `seq` so the
@@ -118,6 +119,8 @@ export const ApprovalEvent = RuntimeEventBase.extend({
   approvalId: z.string().min(1),
   toolName: z.string().min(1),
   status: z.enum(['pending', 'allowed', 'denied', 'expired']),
+  approvalPolicy: ApprovalPolicySchema.optional(),
+  sandboxMode: SandboxModeSchema.optional(),
   summary: z.string().optional()
 })
 export type ApprovalEvent = z.infer<typeof ApprovalEvent>

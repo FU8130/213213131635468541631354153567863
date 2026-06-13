@@ -1,16 +1,26 @@
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
-import { EditorSelection, Facet, StateField, type EditorState, type Extension } from '@codemirror/state'
+import {
+  EditorSelection,
+  Facet,
+  StateField,
+  type ChangeDesc,
+  type EditorState,
+  type Extension,
+  type Transaction
+} from '@codemirror/state'
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
 import {
-  resolveWriteMarkdownResource,
-  resolveWriteMarkdownResourcePath
-} from '../components/write/WriteMarkdownPreview'
+  initialWriteMarkdownImageSrc,
+  resolveWriteMarkdownImage
+} from './markdown-image'
 import {
   CodeBlockToolbarWidget,
   CodeBlockWidget,
   HrWidget,
+  HtmlEmbedWidget,
   ImageWidget,
+  InfographicPendingWidget,
   ListBulletWidget,
   TableWidget,
   TaskCheckboxWidget,
@@ -20,6 +30,8 @@ import {
   type CodeBlockRange,
   type ParsedTable
 } from './markdown-live-widgets'
+import { parsePendingInfographicImage } from './infographic-pending'
+import { isHtmlEmbedSrc } from '@shared/write-prototype'
 
 type DecorationRange = {
   from: number
@@ -34,6 +46,7 @@ type BlockRange = {
 
 type MarkdownImageContext = {
   filePath?: string | null
+  workspaceRoot?: string | null
 }
 
 const CONCEAL_MARKS = new Set([
@@ -60,12 +73,12 @@ const markDeco = Decoration.mark({ class: 'cm-write-md-mark' })
 const codeBlockLineDeco = Decoration.line({ class: 'cm-write-md-codeblock-line' })
 
 const writeMarkdownHighlight = HighlightStyle.define([
-  { tag: tags.heading1, fontSize: '1.95em', fontWeight: '700', letterSpacing: '-0.035em' },
-  { tag: tags.heading2, fontSize: '1.45em', fontWeight: '650', letterSpacing: '-0.025em' },
-  { tag: tags.heading3, fontSize: '1.18em', fontWeight: '650' },
-  { tag: tags.heading4, fontSize: '1.05em', fontWeight: '650' },
+  { tag: tags.heading1, fontSize: '1.875em', fontWeight: '700', letterSpacing: '-0.02em' },
+  { tag: tags.heading2, fontSize: '1.5em', fontWeight: '650', letterSpacing: '-0.015em' },
+  { tag: tags.heading3, fontSize: '1.25em', fontWeight: '650' },
+  { tag: tags.heading4, fontSize: '1.06em', fontWeight: '650' },
   { tag: tags.heading5, fontSize: '1em', fontWeight: '650' },
-  { tag: tags.heading6, fontSize: '0.96em', fontWeight: '650', color: 'var(--ds-text-muted)' },
+  { tag: tags.heading6, fontSize: '0.95em', fontWeight: '650', color: 'var(--ds-text-muted)' },
   { tag: tags.processingInstruction, color: 'var(--ds-text-faint)', opacity: '0.58' },
   { tag: tags.strong, fontWeight: '700' },
   { tag: tags.emphasis, fontStyle: 'italic' },
@@ -79,7 +92,7 @@ const writeMarkdownHighlight = HighlightStyle.define([
   },
   { tag: tags.link, color: 'var(--ds-accent)', textDecoration: 'underline' },
   { tag: tags.url, color: 'var(--ds-text-faint)', fontSize: '0.86em' },
-  { tag: tags.quote, color: 'var(--ds-text-muted)', fontStyle: 'italic' },
+  { tag: tags.quote, color: 'var(--ds-text-muted)' },
   { tag: tags.meta, color: 'var(--ds-text-faint)' }
 ])
 
@@ -95,9 +108,9 @@ const writeMarkdownLiveTheme = EditorView.theme({
     textAlign: 'center'
   },
   '&.cm-write-live-preview .cm-write-md-blockquote-line': {
-    borderLeft: '3px solid color-mix(in srgb, var(--ds-accent) 42%, transparent)',
-    color: 'var(--ds-text-muted)',
-    paddingLeft: '0.9rem'
+    borderLeft: '3px solid color-mix(in srgb, var(--ds-text) 78%, transparent)',
+    color: 'var(--ds-text)',
+    paddingLeft: '1em'
   },
   '&.cm-write-live-preview .cm-write-md-link-text': {
     color: 'var(--ds-accent)',
@@ -144,17 +157,28 @@ function rangeTouchesActiveLine(state: EditorState, from: number, to: number, ac
   return false
 }
 
+function parseMarkdownImageSource(source: string): { alt: string; rawSrc: string } | null {
+  const match = /^!\[([^\]]*)\]\(\s*(?:<([^>]*)>|([^)\s]+))(?:\s+["'][^"']*["'])?\s*\)$/.exec(source.trim())
+  if (!match) return null
+  return { alt: match[1] || '', rawSrc: match[2] ?? match[3] ?? '' }
+}
+
 function markdownImageFromSource(source: string, filePath?: string | null): {
   src: string
   alt: string
   localPath?: string
 } | null {
-  const match = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)$/.exec(source.trim())
-  if (!match) return null
-  const resolved = resolveWriteMarkdownResource(match[2], filePath)
-  if (!resolved) return null
-  const localPath = resolveWriteMarkdownResourcePath(match[2], filePath)
-  return { alt: match[1] || '', src: resolved, ...(localPath ? { localPath } : {}) }
+  const parsed = parseMarkdownImageSource(source)
+  if (!parsed) return null
+  const { alt, rawSrc } = parsed
+  const resolved = resolveWriteMarkdownImage(rawSrc, filePath)
+  if (!resolved.fallbackSrc && !resolved.localPath) return null
+  const initialSrc = initialWriteMarkdownImageSrc(rawSrc, filePath) ?? ''
+  return {
+    alt,
+    src: initialSrc,
+    ...(resolved.localPath ? { localPath: resolved.localPath } : {})
+  }
 }
 
 function splitTableLine(line: string): string[] {
@@ -301,7 +325,8 @@ function collectMarkdownCodeBlockRangesFromState(
 
 export const markdownLivePreviewTestInternals = {
   collectMarkdownCodeBlockRangesFromState,
-  collectRevealLinesFromState
+  collectRevealLinesFromState,
+  markdownImageFromSource
 }
 
 function addFencedCodeLineDecorations(
@@ -377,12 +402,58 @@ function buildDecorationSet(ranges: DecorationRange[]): DecorationSet {
   )
 }
 
-function buildMarkdownBlockDecorations(state: EditorState): DecorationSet {
+type TableEntry = BlockRange & { table: ParsedTable }
+
+type BlockPreviewState = {
+  decorations: DecorationSet
+  codeBlocks: CodeBlockRange[]
+  tables: TableEntry[]
+  activeKey: string
+}
+
+// Characters that can introduce or break a fenced code block or table row.
+// Edits whose surrounding lines contain none of these cannot change the block
+// structure, so the expensive whole-document scan can be skipped.
+const BLOCK_STRUCTURE_MARKERS = /[`~|]/
+
+function scanBlockRanges(state: EditorState): { codeBlocks: CodeBlockRange[]; tables: TableEntry[] } {
+  const noActiveLines = new Set<number>()
+  return {
+    codeBlocks: collectMarkdownCodeBlockRangesFromState(state, 0, state.doc.length, noActiveLines),
+    tables: collectMarkdownTableRangesFromState(state, 0, state.doc.length, noActiveLines)
+  }
+}
+
+function revealedBlockKey(
+  state: EditorState,
+  codeBlocks: CodeBlockRange[],
+  tables: TableEntry[],
+  activeLines: Set<number>
+): string {
+  const revealed: string[] = []
+  for (const block of codeBlocks) {
+    if (rangeTouchesActiveLine(state, block.from, block.to, activeLines)) {
+      revealed.push(`c${block.from}-${block.to}`)
+    }
+  }
+  for (const table of tables) {
+    if (rangeTouchesActiveLine(state, table.from, table.to, activeLines)) {
+      revealed.push(`t${table.from}-${table.to}`)
+    }
+  }
+  return revealed.join('|')
+}
+
+function assembleBlockPreview(
+  state: EditorState,
+  codeBlocks: CodeBlockRange[],
+  tables: TableEntry[]
+): BlockPreviewState {
   const activeLines = collectActiveLinesFromState(state)
   const ranges: DecorationRange[] = []
   const renderedBlocks: BlockRange[] = []
 
-  for (const codeRange of collectMarkdownCodeBlockRangesFromState(state, 0, state.doc.length, activeLines)) {
+  for (const codeRange of codeBlocks) {
     if (rangeTouchesActiveLine(state, codeRange.from, codeRange.to, activeLines)) continue
     renderedBlocks.push({ from: codeRange.from, to: codeRange.to })
     ranges.push({
@@ -395,7 +466,8 @@ function buildMarkdownBlockDecorations(state: EditorState): DecorationSet {
     })
   }
 
-  for (const tableRange of collectMarkdownTableRangesFromState(state, 0, state.doc.length, activeLines)) {
+  for (const tableRange of tables) {
+    if (rangeTouchesActiveLine(state, tableRange.from, tableRange.to, activeLines)) continue
     if (isInsideBlockRanges(tableRange.from, tableRange.to, renderedBlocks)) continue
     ranges.push({
       from: tableRange.from,
@@ -404,20 +476,73 @@ function buildMarkdownBlockDecorations(state: EditorState): DecorationSet {
     })
   }
 
-  return buildDecorationSet(ranges)
+  return {
+    decorations: buildDecorationSet(ranges),
+    codeBlocks,
+    tables,
+    activeKey: revealedBlockKey(state, codeBlocks, tables, activeLines)
+  }
 }
 
-const markdownBlockPreviewField = StateField.define<DecorationSet>({
-  create(state) {
-    return buildMarkdownBlockDecorations(state)
-  },
-  update(decorations, transaction) {
-    if (transaction.docChanged || transaction.selection) {
-      return buildMarkdownBlockDecorations(transaction.state)
+function blockStructureMayHaveChanged(
+  transaction: Transaction,
+  cached: { codeBlocks: CodeBlockRange[]; tables: TableEntry[] }
+): boolean {
+  let suspicious = false
+  transaction.changes.iterChanges((fromA, toA, fromB, toB) => {
+    if (suspicious) return
+    if (BLOCK_STRUCTURE_MARKERS.test(transaction.startState.sliceDoc(fromA, toA))) {
+      suspicious = true
+      return
     }
-    return decorations
+    const startLine = transaction.state.doc.lineAt(fromB)
+    const endLine = transaction.state.doc.lineAt(Math.min(transaction.state.doc.length, toB))
+    if (BLOCK_STRUCTURE_MARKERS.test(transaction.state.sliceDoc(startLine.from, endLine.to))) {
+      suspicious = true
+      return
+    }
+    const touchesBlock = (range: BlockRange): boolean => fromA <= range.to && toA >= range.from
+    if (cached.codeBlocks.some(touchesBlock) || cached.tables.some(touchesBlock)) {
+      suspicious = true
+    }
+  })
+  return suspicious
+}
+
+function mapBlockRange<T extends BlockRange>(range: T, changes: ChangeDesc): T {
+  return {
+    ...range,
+    from: changes.mapPos(range.from, 1),
+    to: changes.mapPos(range.to, -1)
+  }
+}
+
+const markdownBlockPreviewField = StateField.define<BlockPreviewState>({
+  create(state) {
+    const { codeBlocks, tables } = scanBlockRanges(state)
+    return assembleBlockPreview(state, codeBlocks, tables)
   },
-  provide: (field) => EditorView.decorations.from(field)
+  update(value, transaction) {
+    if (transaction.docChanged) {
+      // Fast path: edits that cannot alter block structure only shift the
+      // cached ranges instead of rescanning every line of the document.
+      if (blockStructureMayHaveChanged(transaction, value)) {
+        const { codeBlocks, tables } = scanBlockRanges(transaction.state)
+        return assembleBlockPreview(transaction.state, codeBlocks, tables)
+      }
+      const codeBlocks = value.codeBlocks.map((range) => mapBlockRange(range, transaction.changes))
+      const tables = value.tables.map((range) => mapBlockRange(range, transaction.changes))
+      return assembleBlockPreview(transaction.state, codeBlocks, tables)
+    }
+    if (transaction.selection) {
+      const activeLines = collectActiveLinesFromState(transaction.state)
+      const activeKey = revealedBlockKey(transaction.state, value.codeBlocks, value.tables, activeLines)
+      if (activeKey === value.activeKey) return value
+      return assembleBlockPreview(transaction.state, value.codeBlocks, value.tables)
+    }
+    return value
+  },
+  provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
 })
 
 function buildMarkdownDecorations(view: EditorView): DecorationSet {
@@ -425,16 +550,30 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
   const imageContext = view.state.facet(markdownImageContextFacet)
   const ranges: DecorationRange[] = []
   const renderedBlocks: BlockRange[] = []
+  // Reuse the block ranges cached by markdownBlockPreviewField so scrolling,
+  // typing, and cursor movement never trigger another whole-document scan.
+  const blockCache = view.state.field(markdownBlockPreviewField, false) ?? null
 
   for (const { from, to } of view.visibleRanges) {
-    for (const codeRange of collectMarkdownCodeBlockRanges(view, from, to, activeLines)) {
+    const codeRanges = blockCache
+      ? blockCache.codeBlocks.filter((block) => block.to >= from && block.from <= to)
+      : collectMarkdownCodeBlockRanges(view, from, to, activeLines)
+    for (const codeRange of codeRanges) {
       renderedBlocks.push({ from: codeRange.from, to: codeRange.to })
       addFencedCodeLineDecorations(view, codeRange, activeLines, ranges)
     }
   }
 
   for (const { from, to } of view.visibleRanges) {
-    for (const tableRange of collectMarkdownTableRanges(view, from, to, activeLines)) {
+    const tableRanges = blockCache
+      ? blockCache.tables.filter(
+          (table) =>
+            table.to >= from &&
+            table.from <= to &&
+            !rangeTouchesActiveLine(view.state, table.from, table.to, activeLines)
+        )
+      : collectMarkdownTableRanges(view, from, to, activeLines)
+    for (const tableRange of tableRanges) {
       renderedBlocks.push({ from: tableRange.from, to: tableRange.to })
     }
   }
@@ -454,9 +593,6 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
           case 'FencedCode':
           case 'CodeBlock':
             return false
-          case 'ATXHeading1':
-            ranges.push({ from: line.from, to: line.from, deco: centerLineDeco })
-            break
           case 'Blockquote':
             ranges.push({ from: line.from, to: line.from, deco: blockquoteLineDeco })
             break
@@ -479,10 +615,35 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
 
         switch (node.name) {
           case 'Image': {
-            const parsed = markdownImageFromSource(
-              view.state.doc.sliceString(node.from, node.to),
-              imageContext.filePath
-            )
+            const source = view.state.doc.sliceString(node.from, node.to)
+            const pending = parsePendingInfographicImage(source)
+            if (pending) {
+              ranges.push({
+                from: node.from,
+                to: node.to,
+                deco: Decoration.replace({ widget: new InfographicPendingWidget(pending.id) })
+              })
+              return false
+            }
+            // HTML prototypes branch before the image resolver: it would
+            // happily build an ImageWidget for any extension and fail to load.
+            const inlineImage = parseMarkdownImageSource(source)
+            if (inlineImage && isHtmlEmbedSrc(inlineImage.rawSrc)) {
+              ranges.push({
+                from: node.from,
+                to: node.to,
+                deco: Decoration.replace({
+                  widget: new HtmlEmbedWidget(
+                    inlineImage.rawSrc,
+                    inlineImage.alt,
+                    imageContext.filePath ?? null,
+                    imageContext.workspaceRoot ?? null
+                  )
+                })
+              })
+              return false
+            }
+            const parsed = markdownImageFromSource(source, imageContext.filePath)
             if (parsed) {
               ranges.push({
                 from: node.from,
@@ -566,10 +727,13 @@ const markdownLivePreviewPlugin = ViewPlugin.fromClass(
   }
 )
 
-export function writeMarkdownLivePreviewExtensions(filePath?: string | null): Extension[] {
+export function writeMarkdownLivePreviewExtensions(
+  filePath?: string | null,
+  workspaceRoot?: string | null
+): Extension[] {
   return [
     EditorView.editorAttributes.of({ class: 'cm-write-live-preview' }),
-    markdownImageContextFacet.of({ filePath }),
+    markdownImageContextFacet.of({ filePath, workspaceRoot }),
     syntaxHighlighting(writeMarkdownHighlight),
     writeMarkdownLiveTheme,
     markdownBlockPreviewField,

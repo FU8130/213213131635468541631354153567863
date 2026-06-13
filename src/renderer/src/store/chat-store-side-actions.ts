@@ -6,7 +6,7 @@ import type {
   ToolBlock,
   ToolEventPayload
 } from '../agent/types'
-import { DEFAULT_KUN_MODEL } from '@shared/app-settings'
+import { DEFAULT_KUN_MODEL, MODEL_REASONING_EFFORTS } from '@shared/app-settings'
 import type { ChatState, SideConversation, SidePanelState } from './chat-store-types'
 import { upsertUserBlock } from './chat-store-runtime-helpers'
 
@@ -46,9 +46,9 @@ function defaultSideModel(state: ChatState, parentThreadId: string): string {
 
 function sideReasoningEffortRequestValue(value: string): string | undefined {
   const normalized = value.trim().toLowerCase()
-  if (normalized === 'low') return 'off'
-  if (normalized === 'medium' || normalized === 'high' || normalized === 'max') return normalized
-  return undefined
+  return MODEL_REASONING_EFFORTS.includes(normalized as (typeof MODEL_REASONING_EFFORTS)[number])
+    ? normalized
+    : undefined
 }
 
 function patchSide(
@@ -92,7 +92,10 @@ function flushSideLiveBlocks(side: SideConversation): { side: SideConversation; 
   }
 }
 
-function buildSideSink(sideId: string, ctx: SideContext): ThreadEventSink {
+function buildSideSink(sideId: string, ctx: SideContext, sinceSeq = 0): ThreadEventSink {
+  // Replayed or re-delivered deltas duplicate text already on screen;
+  // drop anything at or below the subscription's replay floor.
+  let appliedDeltaSeqFloor = sinceSeq
   return {
     onSeq: (seq) => {
       ctx.set((s) => patchSide(s, sideId, (side) => ({ ...side, lastSeq: Math.max(side.lastSeq, seq) })))
@@ -112,7 +115,15 @@ function buildSideSink(sideId: string, ctx: SideContext): ThreadEventSink {
         })
       )
     },
-    onDeltas: (deltas) => {
+    onDeltas: (rawDeltas) => {
+      const deltas: typeof rawDeltas = []
+      for (const delta of rawDeltas) {
+        if (typeof delta.seq === 'number') {
+          if (delta.seq <= appliedDeltaSeqFloor) continue
+          appliedDeltaSeqFloor = delta.seq
+        }
+        deltas.push(delta)
+      }
       if (deltas.length === 0) return
       ctx.set((s) =>
         patchSide(s, sideId, (side) => {
@@ -284,7 +295,7 @@ function startSideSubscription(sideId: string, sinceSeq: number, ctx: SideContex
   teardownSideSubscription(sideId)
   const ac = new AbortController()
   sideAbortControllers.set(sideId, ac)
-  const sink = buildSideSink(sideId, ctx)
+  const sink = buildSideSink(sideId, ctx, sinceSeq)
   const provider = ctx.getProvider()
   void provider.subscribeThreadEvents(sideId, sinceSeq, sink, ac.signal)
 }
@@ -532,7 +543,7 @@ export function createSideActions(ctx: SideContext): Pick<
       // as a generic runtimeRequest body — we use a direct request here
       // because the rename surface is title-only.
       try {
-        const response = await window.dsGui.runtimeRequest(
+        const response = await window.kunGui.runtimeRequest(
           `/v1/threads/${encodeURIComponent(sideId)}`,
           'PATCH',
           JSON.stringify({ relation: 'primary' })

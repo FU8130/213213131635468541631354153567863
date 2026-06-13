@@ -4,9 +4,21 @@ import type { WritePreviewMode, WriteSaveStatus } from '../../write/write-worksp
 
 export const WRITE_AUTOSAVE_MS = 900
 export const WRITE_PREVIEW_DEBOUNCE_MS = 60
-export const INLINE_AGENT_MIN_WIDTH = 280
-export const INLINE_AGENT_MAX_WIDTH = 440
-export const INLINE_AGENT_FALLBACK_HEIGHT = 56
+
+/**
+ * Preview re-render debounce that scales with document size: small files keep
+ * the near-instant 60ms feel while large documents stop re-parsing the whole
+ * Markdown tree on every keystroke.
+ */
+export function writePreviewDebounceMs(contentLength: number): number {
+  if (contentLength < 30_000) return WRITE_PREVIEW_DEBOUNCE_MS
+  if (contentLength < 120_000) return 180
+  if (contentLength < 300_000) return 320
+  return 500
+}
+export const INLINE_AGENT_MIN_WIDTH = 264
+export const INLINE_AGENT_MAX_WIDTH = 340
+export const INLINE_AGENT_GAP = 8
 export const WRITE_EXPORT_NOTICE_MS = 3_600
 export const INLINE_EDIT_RECENT_CONTEXT_CHARS = 180
 export const WRITE_EXPORT_FORMATS: WriteExportFormat[] = ['html', 'pdf', 'doc', 'docx']
@@ -27,9 +39,11 @@ export type WriteModeMenuItem = {
 
 export type WriteInlineAgentPosition = {
   left: number
-  top: number
   width: number
-  origin: 'top-center' | 'bottom-center'
+  /** Top of the selection rect in viewport coords; the menu measures itself and places above/below. */
+  anchorTop: number
+  /** Bottom of the selection rect in viewport coords. */
+  anchorBottom: number
 }
 
 export function isMarkdownFile(filePath: string): boolean {
@@ -61,23 +75,19 @@ export function useDebouncedValue<T>(value: T, delayMs: number): T {
 
 export function inlineAgentPosition(selection: {
   anchorRect?: { left: number; top: number; bottom: number; width: number } | null
-}): WriteInlineAgentPosition | null {
+}, options: { compact?: boolean } = {}): WriteInlineAgentPosition | null {
   const rect = selection.anchorRect
   if (!rect) return null
-  const width = clamp(Math.round(window.innerWidth * 0.24), INLINE_AGENT_MIN_WIDTH, INLINE_AGENT_MAX_WIDTH)
-  const height = INLINE_AGENT_FALLBACK_HEIGHT
-  const viewportWidth = window.innerWidth
-  const viewportHeight = window.innerHeight
-  const left = clamp(rect.left + rect.width / 2 - width / 2, 16, viewportWidth - width - 16)
-  const bottomTop = rect.bottom + 8
-  const topTop = rect.top - height - 8
-  const useTop = bottomTop + height > viewportHeight - 16 && topTop >= 16
-  const top = clamp(useTop ? topTop : bottomTop, 16, viewportHeight - height - 16)
+  const minWidth = options.compact ? 240 : INLINE_AGENT_MIN_WIDTH
+  const maxWidth = options.compact ? 320 : INLINE_AGENT_MAX_WIDTH
+  const targetRatio = options.compact ? 0.22 : 0.28
+  const width = clamp(Math.round(window.innerWidth * targetRatio), minWidth, maxWidth)
+  const left = clamp(rect.left + rect.width / 2 - width / 2, 16, window.innerWidth - width - 16)
   return {
     left,
-    top,
     width,
-    origin: useTop ? 'bottom-center' : 'top-center'
+    anchorTop: rect.top,
+    anchorBottom: rect.bottom
   }
 }
 

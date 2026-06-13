@@ -7,6 +7,7 @@ import type {
   CoreRuntimeSkillJson,
   CoreRuntimeToolDiagnosticsJson
 } from './kun-contract'
+import type { ApprovalPolicy, SandboxMode } from '@shared/app-settings'
 
 export type ToolItemKind = 'tool_call' | 'command_execution' | 'file_change'
 export type RuntimeErrorSeverity = 'info' | 'warning' | 'error'
@@ -15,9 +16,23 @@ export type AttachmentReference = {
   id: string
   name?: string
   mimeType?: string
+  byteSize?: number
   width?: number
   height?: number
   previewUrl?: string
+}
+
+export type GeneratedFileReference = {
+  id?: string
+  name?: string
+  mimeType?: string
+  byteSize?: number
+  width?: number
+  height?: number
+  previewUrl?: string
+  path?: string
+  relativePath?: string
+  absolutePath?: string
 }
 
 export type RuntimeChildMetadata = {
@@ -40,6 +55,7 @@ export type RuntimeDisclosureMetadata = {
   displayText?: string
   attachmentIds?: string[]
   attachments?: AttachmentReference[]
+  generatedFiles?: GeneratedFileReference[]
   activeSkillIds?: string[]
   injectedMemoryIds?: string[]
   skillInjectionBytes?: number
@@ -73,6 +89,8 @@ export type NormalizedThread = {
   mode: string
   workspace?: string
   status?: string
+  approvalPolicy?: ApprovalPolicy
+  sandboxMode?: SandboxMode
   archived?: boolean
   preview?: string
   latestTurnId?: string
@@ -342,6 +360,10 @@ export type ThreadDeltaEvent = {
   seq?: number
 }
 
+export type ThreadErrorOptions = {
+  terminal?: boolean
+}
+
 /** Cumulative usage/cost for a Kun thread. */
 export type ThreadUsageSnapshot = {
   inputTokens: number
@@ -353,11 +375,7 @@ export type ThreadUsageSnapshot = {
   totalTokens: number
   costUsd: number
   costCny: number | null
-  cacheSavingsUsd: number
-  cacheSavingsCny: number | null
   tokenEconomySavingsTokens: number
-  tokenEconomySavingsUsd: number
-  tokenEconomySavingsCny: number | null
   turns: number
 }
 
@@ -376,7 +394,7 @@ export type ThreadEventSink = {
   onGoal(ev: { threadId: string; goal: ThreadGoal | null; cleared?: boolean; createdAt?: string }): void
   onTodos?(ev: { threadId: string; todos: ThreadTodoList | null; cleared?: boolean; createdAt?: string }): void
   onTurnComplete(): void
-  onError(err: Error): void
+  onError(err: Error, options?: ThreadErrorOptions): void
   /** Optional: cumulative usage update for the thread. */
   onUsage?(usage: ThreadUsageSnapshot): void
 }
@@ -436,6 +454,7 @@ export interface AgentProvider {
     name: string
     mimeType?: string
     dataBase64: string
+    localFilePath?: string
     textFallback?: CoreAttachmentTextFallbackJson
     threadId?: string
     workspace?: string

@@ -1,25 +1,40 @@
-import { useEffect, useRef, type ReactElement } from 'react'
+import { useEffect, useRef, type MutableRefObject, type ReactElement } from 'react'
 import { Annotation, Compartment, EditorSelection, EditorState, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { bracketMatching, indentOnInput } from '@codemirror/language'
 import { languages } from '@codemirror/language-data'
 import { drawSelection, EditorView, highlightActiveLine, keymap, type ViewUpdate } from '@codemirror/view'
+import {
+  applyWriteBlockTypeToLines,
+  detectWriteBlockTypeFromLine,
+  type WriteBlockType
+} from '../../write/block-type'
 import { buildInlineCompletionExtension, buildInlineCompletionPayload } from '../../write/inline-completion'
 import { writeMarkdownLivePreviewExtensions } from '../../write/markdown-live-preview'
 import { createWriteRecentEdit, type WriteRecentEdit } from '../../write/recent-edits'
+import { isSelectableRasterImageSrc, parseImageMarkdownLine } from '../../write/selected-image'
 import { buildWriteTemplateShortcutExpansion } from '../../write/template-shortcuts'
 import {
   buildWriteCanonicalTermPropagationChanges,
   buildWriteTermPropagationChanges,
   type WriteTermReplacementSeed
 } from '../../write/term-propagation'
+import { writeSelectionStatesEqual } from '../../write/write-selection'
 
 export type WriteSelectionAnchorRect = {
   left: number
   right: number
   top: number
   bottom: number
+  width: number
+  height: number
+}
+
+export type WriteSelectionPageRect = {
+  page: number
+  x: number
+  y: number
   width: number
   height: number
 }
@@ -33,6 +48,7 @@ export type WriteSelectionRange = {
   endColumn: number
   text: string
   charCount: number
+  page?: number
 }
 
 export type WriteEditorSelectionState = {
@@ -40,6 +56,37 @@ export type WriteEditorSelectionState = {
   ranges: WriteSelectionRange[]
   charCount: number
   anchorRect?: WriteSelectionAnchorRect
+  rects?: WriteSelectionPageRect[]
+  sourceKind?: 'text' | 'pdf'
+  pageStart?: number
+  pageEnd?: number
+  /** Block type of the line at the selection start (selection toolbar). */
+  blockType?: WriteBlockType
+  /** Set when a single raster image is selected (TipTap node selection or a
+   * caret on an image markdown line in source mode). */
+  selectedImage?: WriteSelectedImage
+}
+
+export type WriteSelectedImage = {
+  src: string
+  alt: string
+  /** Source-mode only: the document offsets of the image markdown line. */
+  line?: { from: number; to: number }
+}
+
+/**
+ * Imperative surface for the selection toolbar: replaces a document range
+ * through the editor so undo history stays granular and the selection ends up
+ * covering the replacement (allowing chained formatting).
+ */
+export type WriteMarkdownEditorHandle = {
+  applyRangeReplacement: (
+    range: { from: number; to: number },
+    original: string,
+    replacement: string
+  ) => boolean
+  /** Rewrite the block markers of the lines spanning the current selection. */
+  setBlockType: (type: WriteBlockType) => boolean
 }
 
 type Props = {
@@ -64,6 +111,7 @@ type Props = {
   onSaveShortcut: () => void
   onImagePasteSaved?: () => void
   onImagePasteError?: (message: string) => void
+  handleRef?: MutableRefObject<WriteMarkdownEditorHandle | null>
 }
 
 const externalValueSyncAnnotation = Annotation.define<boolean>()
@@ -111,7 +159,10 @@ function unionRects(rects: Array<{ left: number; right: number; top: number; bot
   }
 }
 
-function selectionAnchorRect(view: EditorView, ranges: WriteSelectionRange[]): WriteSelectionAnchorRect | undefined {
+function selectionAnchorRect(
+  view: EditorView,
+  ranges: Array<Pick<WriteSelectionRange, 'from' | 'to'>>
+): WriteSelectionAnchorRect | undefined {
   const rects: Array<{ left: number; right: number; top: number; bottom: number }> = []
   for (const range of ranges) {
     const start = view.coordsAtPos(range.from, 1)
@@ -145,11 +196,28 @@ function selectionState(view: EditorView): WriteEditorSelectionState {
     .filter((value): value is WriteSelectionRange => value !== null)
 
   const text = ranges.map((range) => range.text).join('\n\n')
+  const mainFrom = clampOffset(view.state, view.state.selection.main.from)
+  const mainLine = view.state.doc.lineAt(mainFrom)
+
+  // A bare caret on an image markdown line counts as selecting that image
+  // (clicking the live-preview image widget focuses its source line).
+  let selectedImage: WriteSelectedImage | undefined
+  if (ranges.length === 0 && view.state.selection.ranges.length === 1) {
+    const parsed = parseImageMarkdownLine(mainLine.text)
+    if (parsed && isSelectableRasterImageSrc(parsed.src)) {
+      selectedImage = { ...parsed, line: { from: mainLine.from, to: mainLine.to } }
+    }
+  }
+
   return {
     text,
     ranges,
     charCount: ranges.reduce((total, range) => total + range.charCount, 0),
-    anchorRect: selectionAnchorRect(view, ranges)
+    anchorRect: selectedImage
+      ? selectionAnchorRect(view, [{ from: mainLine.from, to: mainLine.to }])
+      : selectionAnchorRect(view, ranges),
+    blockType: detectWriteBlockTypeFromLine(mainLine.text),
+    ...(selectedImage ? { selectedImage } : {})
   }
 }
 
@@ -204,17 +272,17 @@ function buildEditorTheme(appearance: 'source' | 'live'): Extension {
       backgroundColor: 'transparent',
       fontFamily: sourceMode
         ? 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace'
-        : 'Georgia, Charter, "Iowan Old Style", "Noto Serif SC", serif',
-      fontSize: sourceMode ? '14px' : '15px'
+        : "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Microsoft YaHei', sans-serif",
+      fontSize: sourceMode ? '14px' : '16px'
     },
     '.cm-scroller': {
       overflow: 'auto',
-      lineHeight: sourceMode ? '1.75' : '1.85',
+      lineHeight: '1.75',
       backgroundColor: 'transparent'
     },
     '.cm-content': {
       minHeight: '100%',
-      padding: '26px 24px 56px',
+      padding: sourceMode ? '26px 24px 56px' : 'clamp(40px, 7vh, 72px) 24px 120px',
       caretColor: 'var(--ds-text)'
     },
     '.cm-cursor, .cm-dropCursor': {
@@ -318,7 +386,8 @@ export function WriteMarkdownEditor({
   onSelectionChange,
   onSaveShortcut,
   onImagePasteSaved,
-  onImagePasteError
+  onImagePasteError,
+  handleRef
 }: Props): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -346,6 +415,8 @@ export function WriteMarkdownEditor({
   const onImagePasteSavedRef = useRef(onImagePasteSaved)
   const onImagePasteErrorRef = useRef(onImagePasteError)
   const valueRef = useRef(value)
+  const lastSelectionRef = useRef<WriteEditorSelectionState | null>(null)
+  const lastEmittedValueRef = useRef<string | null>(null)
 
   workspaceRootRef.current = workspaceRoot ?? ''
   filePathRef.current = filePath ?? ''
@@ -390,8 +461,8 @@ export function WriteMarkdownEditor({
       language: 'markdown',
       getModel: () => completionModelRef.current,
       requestCompletion: async (context, mode) => {
-        if (typeof window.dsGui?.requestWriteInlineCompletion !== 'function') return null
-        const result = await window.dsGui.requestWriteInlineCompletion(
+        if (typeof window.kunGui?.requestWriteInlineCompletion !== 'function') return null
+        const result = await window.kunGui.requestWriteInlineCompletion(
           buildInlineCompletionPayload(context, {
             model: completionModelRef.current,
             workspaceRoot: workspaceRootRef.current,
@@ -423,7 +494,7 @@ export function WriteMarkdownEditor({
         themeCompartment.of(buildEditorTheme(appearanceRef.current)),
         livePreviewCompartment.of(
           appearanceRef.current === 'live' && livePreviewEnabledRef.current
-            ? writeMarkdownLivePreviewExtensions(filePathRef.current)
+            ? writeMarkdownLivePreviewExtensions(filePathRef.current, workspaceRootRef.current)
             : []
         ),
         editableCompartment.of(buildInteractionExtensions(readOnlyRef.current, appearanceRef.current)),
@@ -464,10 +535,10 @@ export function WriteMarkdownEditor({
               event.preventDefault()
               return true
             }
-            if (typeof window.dsGui?.saveWorkspaceClipboardImage !== 'function') return false
+            if (typeof window.kunGui?.saveWorkspaceClipboardImage !== 'function') return false
 
             event.preventDefault()
-            void window.dsGui
+            void window.kunGui
               .saveWorkspaceClipboardImage({
                 workspaceRoot: nextWorkspaceRoot,
                 currentFilePath: nextFilePath,
@@ -515,18 +586,34 @@ export function WriteMarkdownEditor({
           const termPropagationSync = update.transactions.some((transaction) =>
             transaction.annotation(termPropagationAnnotation)
           )
+          // Materialise the document string at most once per update; on large
+          // documents doc.toString() walks the whole rope and used to run for
+          // both the onChange emit and the term propagation scan.
+          let docString: string | null = null
+          const docText = (): string => {
+            if (docString === null) docString = update.state.doc.toString()
+            return docString
+          }
           if (update.docChanged && !externalValueSync) {
             const recentEdits = recentEditsFromUpdate(update, filePathRef.current)
             if (recentEdits.length > 0) onDocumentEditRef.current?.(recentEdits)
-            onChangeRef.current(update.state.doc.toString())
+            lastEmittedValueRef.current = docText()
+            onChangeRef.current(lastEmittedValueRef.current)
           }
           if (update.docChanged || update.selectionSet) {
-            onSelectionChangeRef.current(selectionState(update.view))
+            const nextSelection = selectionState(update.view)
+            if (
+              !lastSelectionRef.current ||
+              !writeSelectionStatesEqual(lastSelectionRef.current, nextSelection)
+            ) {
+              lastSelectionRef.current = nextSelection
+              onSelectionChangeRef.current(nextSelection)
+            }
           }
           if (update.docChanged && !externalValueSync && !termPropagationSync) {
             const seed = termReplacementSeedFromUpdate(update)
             if (seed) {
-              const content = update.state.doc.toString()
+              const content = docText()
               const rawPropagationChanges = [
                 ...buildWriteTermPropagationChanges(content, seed),
                 ...buildWriteCanonicalTermPropagationChanges(content, seed)
@@ -555,15 +642,60 @@ export function WriteMarkdownEditor({
       parent: hostRef.current
     })
     viewRef.current = view
-    onSelectionChangeRef.current(selectionState(view))
+    lastEmittedValueRef.current = valueRef.current
+    const initialSelection = selectionState(view)
+    lastSelectionRef.current = initialSelection
+    onSelectionChangeRef.current(initialSelection)
+
+    if (handleRef) {
+      handleRef.current = {
+        applyRangeReplacement: (range, original, replacement) => {
+          const instance = viewRef.current
+          if (!instance || readOnlyRef.current) return false
+          const from = clampOffset(instance.state, range.from)
+          const to = clampOffset(instance.state, range.to)
+          if (to < from || instance.state.sliceDoc(from, to) !== original) return false
+          instance.focus()
+          instance.dispatch({
+            changes: { from, to, insert: replacement },
+            selection: EditorSelection.range(from, from + replacement.length),
+            scrollIntoView: true
+          })
+          return true
+        },
+        setBlockType: (type) => {
+          const instance = viewRef.current
+          if (!instance || readOnlyRef.current) return false
+          const { from, to } = instance.state.selection.main
+          const startLine = instance.state.doc.lineAt(from)
+          const endLine = instance.state.doc.lineAt(to)
+          const lines: string[] = []
+          for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+            lines.push(instance.state.doc.line(lineNumber).text)
+          }
+          const next = applyWriteBlockTypeToLines(lines, type).join('\n')
+          if (instance.state.sliceDoc(startLine.from, endLine.to) === next) return false
+          instance.focus()
+          instance.dispatch({
+            changes: { from: startLine.from, to: endLine.to, insert: next },
+            selection: EditorSelection.range(startLine.from, startLine.from + next.length),
+            scrollIntoView: true
+          })
+          return true
+        }
+      }
+    }
 
     return () => {
+      if (handleRef) handleRef.current = null
       view.destroy()
       viewRef.current = null
       themeCompartmentRef.current = null
       livePreviewCompartmentRef.current = null
       editableCompartmentRef.current = null
     }
+    // Mount-once editor; handleRef is a stable ref container from the parent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -576,20 +708,29 @@ export function WriteMarkdownEditor({
       effects: [
         themeCompartment.reconfigure(buildEditorTheme(appearance)),
         livePreviewCompartment.reconfigure(
-          appearance === 'live' && livePreviewEnabled ? writeMarkdownLivePreviewExtensions(filePath) : []
+          appearance === 'live' && livePreviewEnabled
+            ? writeMarkdownLivePreviewExtensions(filePath, workspaceRoot)
+            : []
         ),
         editableCompartment.reconfigure(buildInteractionExtensions(readOnly, appearance))
       ]
     })
-  }, [appearance, filePath, livePreviewEnabled, readOnly])
+  }, [appearance, filePath, livePreviewEnabled, readOnly, workspaceRoot])
 
   useEffect(() => {
     const view = viewRef.current
     if (!view) return
+    // The value usually round-trips from our own onChange emit; comparing the
+    // reference first avoids re-serialising the whole document per keystroke.
+    if (value === lastEmittedValueRef.current) return
     const current = view.state.doc.toString()
-    if (current === value) return
+    if (current === value) {
+      lastEmittedValueRef.current = value
+      return
+    }
     const nextLength = value.length
     const { anchor, head } = view.state.selection.main
+    lastEmittedValueRef.current = value
     view.dispatch({
       changes: { from: 0, to: current.length, insert: value },
       annotations: externalValueSyncAnnotation.of(true),

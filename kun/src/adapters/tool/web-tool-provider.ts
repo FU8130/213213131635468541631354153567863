@@ -6,6 +6,9 @@ import { LocalToolHost } from './local-tool-host.js'
 
 const DEFAULT_WEB_TIMEOUT_MS = 15_000
 const DEFAULT_WEB_MAX_BYTES = 1_000_000
+// Models sometimes pass tiny max_bytes budgets (2000 was common in the
+// wild); below this floor the extracted text is too small to be useful.
+const MIN_WEB_FETCH_BYTES = 4_096
 const DEFAULT_SEARCH_LIMIT = 5
 const MAX_SEARCH_LIMIT = 10
 
@@ -110,7 +113,13 @@ function createFetchTool(config: WebCapabilityConfig, provider: WebProvider) {
       const policy = validateUrlPolicy(rawUrl, config)
       if (!policy.ok) return toolError('policy_blocked', policy.reason, telemetry({ startedAt, policy: 'blocked', url: rawUrl }))
       if (!provider.fetch) return toolError('provider_unavailable', 'web fetch provider is unavailable')
-      const maxBytes = boundedInt(args.max_bytes, DEFAULT_WEB_MAX_BYTES, 1, DEFAULT_WEB_MAX_BYTES)
+      const maxBytesCap = config.maxFetchBytes ?? DEFAULT_WEB_MAX_BYTES
+      const maxBytes = boundedInt(
+        args.max_bytes,
+        maxBytesCap,
+        Math.min(MIN_WEB_FETCH_BYTES, maxBytesCap),
+        maxBytesCap
+      )
       const timeoutMs = boundedInt(args.timeout_ms, DEFAULT_WEB_TIMEOUT_MS, 1, DEFAULT_WEB_TIMEOUT_MS)
       try {
         const result = await provider.fetch({
@@ -212,11 +221,9 @@ class FetchWebProvider implements WebProvider {
       const response = await fetch(request.url, { signal: controller.signal })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
-      // Fast-fail if content-length is known and exceeds limit
-      const contentLength = response.headers.get('content-length')
-      if (contentLength && Number(contentLength) > request.maxBytes) {
-        throw new Error(`content exceeds ${request.maxBytes} byte limit`)
-      }
+      // Oversized pages truncate at maxBytes via the streaming read below.
+      // Hard-failing on the declared content-length made most real pages
+      // unfetchable whenever the model passed a small byte budget.
 
       // Stream response body with size limit
       const reader = response.body?.getReader()

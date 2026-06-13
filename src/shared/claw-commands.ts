@@ -1,11 +1,10 @@
-import type { ClawModel } from './app-settings'
-
 export type ClawCommand =
   | { kind: 'clear' }
   | { kind: 'help' }
   | { kind: 'showModel' }
-  | { kind: 'model'; model: ClawModel }
-  | { kind: 'invalidModel' }
+  | { kind: 'model'; model: string }
+  | { kind: 'showProvider' }
+  | { kind: 'provider'; providerId: string }
 
 export function parseClawCommand(text: string): ClawCommand | null {
   const raw = text.trim().replace(/^／/, '/')
@@ -17,15 +16,12 @@ export function parseClawCommand(text: string): ClawCommand | null {
     return { kind: 'help' }
   }
   const match = raw.match(/^[/-](?:model|模型)(?:\s+(.+))?$/i)
-  if (!match) return null
-  const value = (match[1] ?? '').trim().toLowerCase()
-  if (!value) return { kind: 'showModel' }
-  if (value === 'auto' || value === '自动') return { kind: 'model', model: 'auto' }
-  if (value === 'pro' || value === 'deepseek-v4-pro') {
-    return { kind: 'model', model: 'deepseek-v4-pro' }
+  if (match) {
+    const value = (match[1] ?? '').trim()
+    return value ? { kind: 'model', model: value } : { kind: 'showModel' }
   }
-  if (value === 'flash' || value === 'deepseek-v4-flash') {
-    return { kind: 'model', model: 'deepseek-v4-flash' }
-  }
-  return { kind: 'invalidModel' }
+  const providerMatch = raw.match(/^[/-](?:provider|供应商|提供商)(?:\s+(.+))?$/i)
+  if (!providerMatch) return null
+  const providerId = (providerMatch[1] ?? '').trim()
+  return providerId ? { kind: 'provider', providerId } : { kind: 'showProvider' }
 }

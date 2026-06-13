@@ -5,6 +5,7 @@ import {
   Archive,
   ChevronDown,
   ChevronRight,
+  ClipboardList,
   Folder,
   FolderPlus,
   FolderOpen,
@@ -17,8 +18,12 @@ import {
   Trash2
 } from 'lucide-react'
 import type { NormalizedThread } from '../../agent/types'
+import { confirmDialog } from '../../lib/confirm-dialog'
 import { formatRelativeTime } from '../../lib/format-relative-time'
 import { workspaceLabelFromPath } from '../../lib/workspace-label'
+import { deleteSddDraft } from '../../sdd/sdd-draft-actions'
+import { listSddDraftHistory, type SddDraftHistoryItem } from '../../sdd/sdd-draft-history'
+import { useSddDraftStore, type SddDraft } from '../../sdd/sdd-draft-store'
 import {
   isClawWorkspacePath,
   isInternalDeepSeekGuiWorkspace,
@@ -48,6 +53,7 @@ type SidebarProjectsSectionProps = {
   onPickWorkspace: () => void
   onRemoveWorkspace: (workspacePath: string) => Promise<void>
   onCreateThreadInWorkspace: (workspacePath: string) => void
+  onOpenRequirementDraft: (draft: SddDraft) => void
   onSelectThread: (threadId: string) => void
   onRenameThread: (threadId: string, title: string) => Promise<void>
   onArchiveThread: (threadId: string) => Promise<void>
@@ -70,6 +76,31 @@ export type RenameThreadDialogState = {
   thread: NormalizedThread
   value: string
   submitting: boolean
+}
+
+const SDD_DRAFT_HISTORY_PAGE_SIZE = 3
+const SDD_DRAFT_HISTORY_LOAD_LIMIT = 40
+
+function isSidebarProjectWorkspacePath(workspacePath: string): boolean {
+  const normalized = normalizeWorkspaceRoot(workspacePath)
+  if (!normalized) return false
+  if (isInternalTemporaryWorkspace(normalized)) return false
+  if (isInternalDeepSeekGuiWorkspace(normalized)) return false
+  if (isClawWorkspacePath(normalized)) return false
+  return true
+}
+
+function compareWorkspacePathsByActive(a: string, b: string, selectedWorkspace: string): number {
+  const selectedWorkspaceKey = workspaceRootIdentityKey(selectedWorkspace)
+  const aKey = workspaceRootIdentityKey(a)
+  const bKey = workspaceRootIdentityKey(b)
+  if (aKey === selectedWorkspaceKey && bKey !== selectedWorkspaceKey) return -1
+  if (bKey === selectedWorkspaceKey && aKey !== selectedWorkspaceKey) return 1
+  return a.localeCompare(b)
+}
+
+function sortWorkspacePathsByActive(workspacePaths: string[], selectedWorkspace: string): string[] {
+  return [...workspacePaths].sort((a, b) => compareWorkspacePathsByActive(a, b, selectedWorkspace))
 }
 
 export function buildSidebarWorkspaceGroups(options: {
@@ -139,6 +170,106 @@ export function buildSidebarWorkspaceGroups(options: {
   })
 }
 
+export function buildSidebarDraftWorkspacePaths(options: {
+  threads: NormalizedThread[]
+  workspaceRoot: string
+  workspaceRoots: string[]
+}): string[] {
+  const map = new Map<string, string>()
+  const selectedWorkspace = normalizeWorkspaceRoot(options.workspaceRoot)
+
+  const upsertWorkspace = (workspacePath: string): void => {
+    const normalized = normalizeWorkspaceRoot(workspacePath)
+    if (!isSidebarProjectWorkspacePath(normalized)) return
+    const key = workspaceRootIdentityKey(normalized)
+    if (!key) return
+    const previous = map.get(key)
+    if (!previous || normalized === selectedWorkspace) {
+      map.set(key, normalized)
+    }
+  }
+
+  upsertWorkspace(selectedWorkspace)
+  for (const workspacePath of options.workspaceRoots) {
+    upsertWorkspace(workspacePath)
+  }
+  for (const thread of options.threads) {
+    upsertWorkspace(thread.workspace ?? '')
+  }
+
+  return sortWorkspacePathsByActive([...map.values()], selectedWorkspace)
+}
+
+export function filterSddDraftHistoryItems(
+  items: SddDraftHistoryItem[],
+  searchQuery: string,
+  workspacePath = ''
+): SddDraftHistoryItem[] {
+  const query = searchQuery.trim().toLowerCase()
+  if (!query) return items
+  const workspaceLabel = workspacePath ? workspaceLabelFromPath(workspacePath) : ''
+  return items.filter((item) => {
+    const haystack = [
+      item.title,
+      item.relativePath,
+      item.absolutePath,
+      item.searchText,
+      workspacePath,
+      workspaceLabel
+    ]
+      .filter(Boolean)
+      .join('\n')
+      .toLowerCase()
+    return haystack.includes(query)
+  })
+}
+
+export function mergeSidebarWorkspaceGroupsWithDraftHistory(options: {
+  groups: SidebarWorkspaceGroup[]
+  draftHistoryByWorkspace: Record<string, SddDraftHistoryItem[]>
+  workspaceRoot: string
+}): SidebarWorkspaceGroup[] {
+  const selectedWorkspace = normalizeWorkspaceRoot(options.workspaceRoot)
+  const map = new Map<string, SidebarWorkspaceGroup>()
+
+  const upsertGroup = (workspacePath: string, threads: NormalizedThread[] = []): void => {
+    const normalized = normalizeWorkspaceRoot(workspacePath)
+    if (!isSidebarProjectWorkspacePath(normalized)) return
+    const key = workspaceRootIdentityKey(normalized)
+    if (!key) return
+    const previous = map.get(key)
+    if (previous) {
+      previous[1].push(...threads)
+      if (normalized === selectedWorkspace) previous[0] = normalized
+      return
+    }
+    map.set(key, [normalized, [...threads]])
+  }
+
+  for (const [workspacePath, threads] of options.groups) {
+    upsertGroup(workspacePath, threads)
+  }
+  for (const [workspacePath, items] of Object.entries(options.draftHistoryByWorkspace)) {
+    if (items.length > 0) upsertGroup(workspacePath)
+  }
+
+  return Array.from(map.values()).sort(([a], [b]) => compareWorkspacePathsByActive(a, b, selectedWorkspace))
+}
+
+function sddDraftHistoryForWorkspace(
+  draftHistoryByWorkspace: Record<string, SddDraftHistoryItem[]>,
+  workspacePath: string
+): SddDraftHistoryItem[] {
+  const exact = draftHistoryByWorkspace[workspacePath]
+  if (exact) return exact
+  const targetKey = workspaceRootIdentityKey(workspacePath)
+  if (!targetKey) return []
+  for (const [path, history] of Object.entries(draftHistoryByWorkspace)) {
+    if (workspaceRootIdentityKey(path) === targetKey) return history
+  }
+  return []
+}
+
 export function SidebarProjectsSection({
   threads,
   activeView,
@@ -155,6 +286,7 @@ export function SidebarProjectsSection({
   onPickWorkspace,
   onRemoveWorkspace,
   onCreateThreadInWorkspace,
+  onOpenRequirementDraft,
   onSelectThread,
   onRenameThread,
   onArchiveThread,
@@ -167,9 +299,14 @@ export function SidebarProjectsSection({
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Record<string, boolean>>({})
   const [deletingThreadIds, setDeletingThreadIds] = useState<Record<string, boolean>>({})
+  const [deletingDraftIds, setDeletingDraftIds] = useState<Record<string, boolean>>({})
+  const [draftHistoryErrors, setDraftHistoryErrors] = useState<Record<string, string>>({})
+  const [draftHistoryRefreshVersion, setDraftHistoryRefreshVersion] = useState(0)
   const [searchOpen, setSearchOpen] = useState(false)
   const [threadContextMenu, setThreadContextMenu] = useState<ThreadContextMenuState | null>(null)
   const [renameThreadDialog, setRenameThreadDialog] = useState<RenameThreadDialogState | null>(null)
+  const [draftHistoryByWorkspace, setDraftHistoryByWorkspace] = useState<Record<string, SddDraftHistoryItem[]>>({})
+  const activeSddDraftId = useSddDraftStore((s) => s.activeDraft?.id ?? '')
 
   const groups = useMemo(() => {
     return buildSidebarWorkspaceGroups({
@@ -181,8 +318,70 @@ export function SidebarProjectsSection({
     })
   }, [searchQuery, showArchived, threads, workspaceRoot, workspaceRoots])
 
+  const draftHistoryWorkspacePaths = useMemo(() => {
+    return buildSidebarDraftWorkspacePaths({
+      threads,
+      workspaceRoot,
+      workspaceRoots
+    })
+  }, [threads, workspaceRoot, workspaceRoots])
+
+  const filteredDraftHistoryByWorkspace = useMemo(() => {
+    return Object.fromEntries(
+      Object.entries(draftHistoryByWorkspace)
+        .map(([path, history]) => [
+          path,
+          filterSddDraftHistoryItems(history, searchQuery, path)
+        ] as const)
+        .filter(([, history]) => history.length > 0)
+    )
+  }, [draftHistoryByWorkspace, searchQuery])
+
+  const displayGroups = useMemo(() => {
+    return mergeSidebarWorkspaceGroupsWithDraftHistory({
+      groups,
+      draftHistoryByWorkspace: filteredDraftHistoryByWorkspace,
+      workspaceRoot
+    })
+  }, [filteredDraftHistoryByWorkspace, groups, workspaceRoot])
+
   const searchVisible = searchOpen || searchQuery.trim().length > 0
-  const allGroupsCollapsed = groups.length > 0 && groups.every(([workspacePath]) => collapsed[workspacePath] === true)
+  const allGroupsCollapsed = displayGroups.length > 0 && displayGroups.every(([workspacePath]) => collapsed[workspacePath] === true)
+  const workspaceHistoryKey = draftHistoryWorkspacePaths.join('\n')
+
+  useEffect(() => {
+    if (
+      typeof window === 'undefined' ||
+      typeof window.kunGui?.listWorkspaceDirectory !== 'function' ||
+      typeof window.kunGui?.readWorkspaceFile !== 'function'
+    ) {
+      setDraftHistoryByWorkspace({})
+      return
+    }
+    const workspacePaths = workspaceHistoryKey.split('\n').filter(Boolean)
+    if (workspacePaths.length === 0) {
+      setDraftHistoryByWorkspace({})
+      return
+    }
+    let cancelled = false
+    void Promise.all(
+      workspacePaths.map(async (path) => {
+        const history = await listSddDraftHistory({
+          workspaceRoot: path,
+          listWorkspaceDirectory: window.kunGui.listWorkspaceDirectory,
+          readWorkspaceFile: window.kunGui.readWorkspaceFile,
+          limit: SDD_DRAFT_HISTORY_LOAD_LIMIT
+        }).catch(() => [])
+        return [path, history] as const
+      })
+    ).then((entries) => {
+      if (cancelled) return
+      setDraftHistoryByWorkspace(Object.fromEntries(entries.filter(([, history]) => history.length > 0)))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [draftHistoryRefreshVersion, workspaceHistoryKey])
 
   useEffect(() => {
     if (!threadContextMenu) return
@@ -201,19 +400,19 @@ export function SidebarProjectsSection({
   }, [threadContextMenu])
 
   const toggleAllGroups = (): void => {
-    if (groups.length === 0) return
+    if (displayGroups.length === 0) return
     if (allGroupsCollapsed) {
       setCollapsed({})
       return
     }
-    setCollapsed(Object.fromEntries(groups.map(([workspacePath]) => [workspacePath, true])))
+    setCollapsed(Object.fromEntries(displayGroups.map(([workspacePath]) => [workspacePath, true])))
   }
 
   const handleDeleteThread = async (thread: NormalizedThread): Promise<void> => {
     const threadId = thread.id.trim()
     if (!threadId || deletingThreadIds[threadId]) return
     const confirmMessage = t('sidebarThreadDeleteConfirm', { title: thread.title })
-    if (!window.confirm(confirmMessage)) return
+    if (!(await confirmDialog(confirmMessage))) return
     setDeletingThreadIds((prev) => ({ ...prev, [threadId]: true }))
     try {
       await onDeleteThread(threadId)
@@ -230,7 +429,7 @@ export function SidebarProjectsSection({
     const threadId = thread.id.trim()
     if (!threadId || deletingThreadIds[threadId]) return
     const confirmMessage = t('sidebarThreadArchiveConfirm', { title: thread.title })
-    if (!window.confirm(confirmMessage)) return
+    if (!(await confirmDialog(confirmMessage))) return
     setDeletingThreadIds((prev) => ({ ...prev, [threadId]: true }))
     try {
       await onArchiveThread(threadId)
@@ -319,8 +518,51 @@ export function SidebarProjectsSection({
 
   const handleRemoveWorkspace = async (workspacePath: string): Promise<void> => {
     const confirmMessage = t('sidebarWorkspaceRemoveConfirm', { path: workspacePath })
-    if (!window.confirm(confirmMessage)) return
+    if (!(await confirmDialog(confirmMessage))) return
     await onRemoveWorkspace(workspacePath)
+  }
+
+  const handleDeleteRequirementDraft = async (draft: SddDraftHistoryItem): Promise<void> => {
+    const draftId = draft.id.trim()
+    if (!draftId || deletingDraftIds[draftId]) return
+    const workspaceKey = draft.workspaceRoot
+    const confirmMessage = t('sddDraftHistoryDeleteConfirm', { title: draft.title })
+    if (!(await confirmDialog(confirmMessage))) return
+
+    setDeletingDraftIds((prev) => ({ ...prev, [draftId]: true }))
+    setDraftHistoryErrors((prev) => {
+      const next = { ...prev }
+      delete next[workspaceKey]
+      return next
+    })
+    try {
+      const result = await deleteSddDraft(draft)
+      if (!result.ok) {
+        setDraftHistoryErrors((prev) => ({
+          ...prev,
+          [workspaceKey]: t('sddDraftHistoryDeleteFailed', { message: result.message })
+        }))
+        return
+      }
+      setDraftHistoryByWorkspace((current) => {
+        const next = Object.fromEntries(
+          Object.entries(current)
+            .map(([workspacePath, items]) => [
+              workspacePath,
+              items.filter((item) => item.id !== draftId)
+            ] as const)
+            .filter(([, items]) => items.length > 0)
+        )
+        return next
+      })
+      setDraftHistoryRefreshVersion((version) => version + 1)
+    } finally {
+      setDeletingDraftIds((prev) => {
+        const next = { ...prev }
+        delete next[draftId]
+        return next
+      })
+    }
   }
 
   return (
@@ -382,7 +624,7 @@ export function SidebarProjectsSection({
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2 pt-0.5">
-        {groups.length === 0 ? (
+        {displayGroups.length === 0 ? (
           <SidebarEmpty
             runtimeReady={runtimeReady}
             hasWorkspace={!!workspaceRoot}
@@ -391,7 +633,7 @@ export function SidebarProjectsSection({
           />
         ) : null}
 
-        {groups.map(([workspacePath, list]) => {
+        {displayGroups.map(([workspacePath, list]) => {
           const folderName = workspaceLabelFromPath(workspacePath)
           const workspaceContext = workspaceContextLabel(workspacePath, folderName)
           const isCollapsed = collapsed[workspacePath] === true
@@ -403,6 +645,7 @@ export function SidebarProjectsSection({
           const visibleThreads = workspaceExpanded
             ? sortedThreads
             : sortedThreads.slice(0, 5)
+          const draftHistory = sddDraftHistoryForWorkspace(filteredDraftHistoryByWorkspace, workspacePath)
           return (
             <div key={workspacePath} className="mb-2">
               <SidebarTreeRow
@@ -453,7 +696,16 @@ export function SidebarProjectsSection({
 
               {!isCollapsed ? (
                 <div className="mt-1 space-y-[3px] pl-4">
-                  {sortedThreads.length === 0 ? (
+                  <SddDraftHistoryRows
+                    items={draftHistory}
+                    activeDraftId={activeSddDraftId}
+                    deletingDraftIds={deletingDraftIds}
+                    error={draftHistoryErrors[workspacePath] ?? ''}
+                    onOpen={onOpenRequirementDraft}
+                    onDelete={(draft) => void handleDeleteRequirementDraft(draft)}
+                    t={t}
+                  />
+                  {sortedThreads.length === 0 && draftHistory.length === 0 ? (
                     <div className="flex items-center justify-between gap-2 px-2.5 py-1.5">
                       <div className="text-[12.5px] leading-5 text-ds-faint">
                         {searchQuery.trim()
@@ -563,6 +815,133 @@ type ThreadRowProps = {
   onArchive: () => void
   onDelete: () => void
   onRestore: () => void
+}
+
+export function SddDraftHistoryRows({
+  items,
+  activeDraftId,
+  onOpen,
+  onDelete,
+  deletingDraftIds = {},
+  error = '',
+  t
+}: {
+  items: SddDraftHistoryItem[]
+  activeDraftId: string
+  onOpen: (draft: SddDraft) => void
+  onDelete?: (draft: SddDraftHistoryItem) => void
+  deletingDraftIds?: Record<string, boolean>
+  error?: string
+  t: (k: string, opts?: Record<string, unknown>) => string
+}): ReactElement | null {
+  const itemKey = items.map((item) => item.id).join('\n')
+  const [collapsed, setCollapsed] = useState(true)
+  const [visibleCount, setVisibleCount] = useState(SDD_DRAFT_HISTORY_PAGE_SIZE)
+
+  useEffect(() => {
+    setCollapsed(true)
+    setVisibleCount(SDD_DRAFT_HISTORY_PAGE_SIZE)
+  }, [itemKey])
+
+  if (items.length === 0) return null
+
+  const visibleItems = items.slice(0, visibleCount)
+  const remainingCount = Math.max(0, items.length - visibleItems.length)
+  const nextCount = Math.min(SDD_DRAFT_HISTORY_PAGE_SIZE, remainingCount)
+
+  return (
+    <div className="mb-1.5 rounded-lg border border-transparent bg-[var(--ds-sidebar-row-hover)]/35 px-1 py-1">
+      <SidebarTreeRow
+        title={t('sddDraftHistoryTitle')}
+        ariaLabel={collapsed ? t('sddDraftHistoryExpand') : t('sddDraftHistoryCollapse')}
+        onClick={() => setCollapsed((current) => !current)}
+        className="min-h-[28px]"
+        buttonClassName="items-center gap-1.5 px-2 py-1.5"
+      >
+        {collapsed ? (
+          <ChevronRight className="h-3 w-3 shrink-0 text-ds-faint" strokeWidth={2} />
+        ) : (
+          <ChevronDown className="h-3 w-3 shrink-0 text-ds-faint" strokeWidth={2} />
+        )}
+        <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-ds-faint">
+          {t('sddDraftHistoryTitle')}
+        </span>
+        <span className="shrink-0 rounded-md bg-ds-card/70 px-1.5 py-0.5 text-[10.5px] text-ds-faint tabular-nums">
+          {items.length}
+        </span>
+      </SidebarTreeRow>
+      {error ? (
+        <div className="px-2 py-1 text-[11.5px] leading-4 text-red-600 dark:text-red-300">
+          {error}
+        </div>
+      ) : null}
+      {!collapsed ? (
+        <div className="space-y-[2px] pt-1">
+          {visibleItems.map((item) => (
+            <SidebarTreeRow
+              key={item.id}
+              active={activeDraftId === item.id}
+              activeVariant="outline"
+              actionsVisibility={deletingDraftIds[item.id] ? 'visible' : 'hidden'}
+              actionsLayout="overlay"
+              actions={
+                onDelete ? (
+                  <SidebarIconButton
+                    onClick={() => onDelete(item)}
+                    disabled={deletingDraftIds[item.id] === true}
+                    tone="danger"
+                    title={t('sddDraftHistoryDelete')}
+                    ariaLabel={t('sddDraftHistoryDelete')}
+                    stopPropagation
+                  >
+                    {deletingDraftIds[item.id] ? (
+                      <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />
+                    ) : (
+                      <Trash2 className="h-3 w-3" strokeWidth={1.9} />
+                    )}
+                  </SidebarIconButton>
+                ) : null
+              }
+              className="min-h-[32px]"
+              buttonClassName="items-center gap-2 px-2 py-1.5"
+              title={item.relativePath}
+              ariaLabel={t('sddDraftHistoryOpen', { title: item.title })}
+              onClick={() => onOpen(item)}
+            >
+              <span
+                className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg border transition ${
+                  activeDraftId === item.id
+                    ? 'border-accent/25 bg-accent/10 text-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]'
+                    : 'border-ds-border-muted bg-ds-card/70 text-ds-faint group-hover:border-accent/20 group-hover:bg-accent/10 group-hover:text-accent'
+                }`}
+                aria-hidden="true"
+              >
+                <ClipboardList className="h-4 w-4" strokeWidth={1.9} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] leading-4 text-ds-ink">{item.title}</span>
+                <span className="block truncate text-[11.5px] leading-4 text-ds-faint">{item.relativePath}</span>
+              </span>
+              <span className="shrink-0 rounded-md bg-ds-card/70 px-1.5 py-0.5 text-[10.5px] text-ds-faint transition group-hover:opacity-0 group-focus-within:opacity-0">
+                {item.source === 'remembered' ? t('sddDraftHistoryRemembered') : t('sddDraftHistoryDisk')}
+              </span>
+            </SidebarTreeRow>
+          ))}
+        </div>
+      ) : null}
+      {!collapsed && remainingCount > 0 ? (
+        <button
+          type="button"
+          onClick={() =>
+            setVisibleCount((count) => Math.min(items.length, count + SDD_DRAFT_HISTORY_PAGE_SIZE))
+          }
+          className="ml-1 mt-1 rounded-md px-2.5 py-1.5 text-[12.5px] text-ds-faint transition hover:bg-[var(--ds-sidebar-row-hover)] hover:text-ds-ink"
+        >
+          {t('sddDraftHistoryShowMore', { count: nextCount })}
+        </button>
+      ) : null}
+    </div>
+  )
 }
 
 function ThreadRow({
@@ -717,7 +1096,7 @@ export function ThreadRenameDialog({
       <form
         onSubmit={onSubmit}
         onMouseDown={(event) => event.stopPropagation()}
-        className="w-full max-w-sm rounded-[24px] border border-ds-border bg-ds-card p-5 shadow-[0_24px_72px_rgba(15,23,42,0.22)]"
+        className="w-full max-w-sm rounded-[24px] border border-ds-border bg-ds-card p-5 shadow-[0_24px_72px_rgba(20,47,95,0.22)]"
       >
         <h2
           id="thread-rename-dialog-title"
@@ -788,7 +1167,7 @@ function ThreadContextMenu({
     <div
       role="menu"
       aria-label={state.thread.title}
-      className="ds-thread-context-menu ds-no-drag fixed z-50 min-w-[168px] rounded-lg border border-ds-border bg-ds-card/98 p-1 text-[13px] text-ds-ink shadow-[0_16px_42px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:bg-ds-card"
+      className="ds-thread-context-menu ds-no-drag fixed z-50 min-w-[168px] rounded-lg border border-ds-border bg-ds-card/98 p-1 text-[13px] text-ds-ink shadow-[0_16px_42px_rgba(20,47,95,0.16)] backdrop-blur-xl dark:bg-ds-card"
       style={{ left: state.x, top: state.y }}
       onPointerDown={(event) => event.stopPropagation()}
     >

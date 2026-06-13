@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { chatBlockFromItem, dispatchKunRuntimeEvent, mergeChatBlocks } from './kun-mapper'
 import type { CoreRuntimeEventJson, CoreTurnItemJson } from './kun-contract'
-import type { ThreadEventSink } from './types'
+import type { ThreadErrorOptions, ThreadEventSink } from './types'
 
 function makeSink(): ThreadEventSink {
   return {
@@ -179,14 +179,16 @@ describe('review mapping', () => {
 describe('create_plan tool mapping', () => {
   it('surfaces turn failure messages from Kun lifecycle events', async () => {
     let capturedError: string | null = null
+    let capturedErrorOptions: ThreadErrorOptions | null = null
     let capturedRuntimeError: unknown = null
     const sink: ThreadEventSink = {
       ...makeSink(),
       onRuntimeError: (event) => {
         capturedRuntimeError = event
       },
-      onError: (error) => {
+      onError: (error, options) => {
         capturedError = error.message
+        capturedErrorOptions = options ?? null
       }
     }
 
@@ -208,6 +210,7 @@ describe('create_plan tool mapping', () => {
       message: 'model stream exploded',
       severity: 'error'
     })
+    expect(capturedErrorOptions).toEqual({ terminal: true })
   })
 
   it('routes live error items to runtime error timeline events without fatal stream errors', async () => {
@@ -310,6 +313,97 @@ describe('create_plan tool mapping', () => {
     if (block && block.kind === 'tool') {
       expect(block.status).toBe('error')
       expect(block.meta?.plan).toMatchObject({ error: expect.stringContaining('direct Markdown') })
+    } else {
+      throw new Error('expected tool block')
+    }
+  })
+
+  it('lifts tool_result output attachments into tool block meta', () => {
+    const item: CoreTurnItemJson = {
+      id: 'item_img_1',
+      turnId: 'turn_1',
+      threadId: 'thr_1',
+      role: 'tool',
+      status: 'completed',
+      createdAt: '2024-01-01T00:00:00.000Z',
+      kind: 'tool_result',
+      toolName: 'generate_image',
+      callId: 'call_img_1',
+      output: {
+        files: [{ relativePath: '.deepseekgui-images/img-1.png' }],
+        attachments: [
+          { id: 'att_abc', name: 'img-1.png', mimeType: 'image/png', width: 1024, height: 576 },
+          { id: '   ' },
+          'not-an-object',
+          { name: 'missing-id.png' }
+        ],
+        endpoint: 'generations'
+      }
+    }
+    const block = chatBlockFromItem(item)
+    expect(block).not.toBeNull()
+    if (block && block.kind === 'tool') {
+      expect(block.meta?.attachments).toEqual([
+        { id: 'att_abc', name: 'img-1.png', mimeType: 'image/png', width: 1024, height: 576 }
+      ])
+      expect(block.meta?.generatedFiles).toEqual([
+        { relativePath: '.deepseekgui-images/img-1.png' }
+      ])
+    } else {
+      throw new Error('expected tool block')
+    }
+  })
+
+  it('lifts generated speech files from tool_result output into tool block meta', () => {
+    const item: CoreTurnItemJson = {
+      id: 'item_speech_1',
+      turnId: 'turn_1',
+      threadId: 'thr_1',
+      role: 'tool',
+      status: 'completed',
+      createdAt: '2024-01-01T00:00:00.000Z',
+      kind: 'tool_result',
+      toolName: 'generate_speech',
+      callId: 'call_speech_1',
+      output: {
+        files: [{
+          relativePath: '.deepseekgui-audio/speech.mp3',
+          absolutePath: '/tmp/project/.deepseekgui-audio/speech.mp3',
+          mimeType: 'audio/mpeg',
+          byteSize: 128
+        }]
+      }
+    }
+    const block = chatBlockFromItem(item)
+    expect(block).not.toBeNull()
+    if (block && block.kind === 'tool') {
+      expect(block.meta?.generatedFiles).toEqual([{
+        relativePath: '.deepseekgui-audio/speech.mp3',
+        absolutePath: '/tmp/project/.deepseekgui-audio/speech.mp3',
+        mimeType: 'audio/mpeg',
+        byteSize: 128
+      }])
+    } else {
+      throw new Error('expected tool block')
+    }
+  })
+
+  it('omits meta attachments when tool_result output has none worth showing', () => {
+    const item: CoreTurnItemJson = {
+      id: 'item_img_2',
+      turnId: 'turn_1',
+      threadId: 'thr_1',
+      role: 'tool',
+      status: 'completed',
+      createdAt: '2024-01-01T00:00:00.000Z',
+      kind: 'tool_result',
+      toolName: 'generate_image',
+      callId: 'call_img_2',
+      output: { attachments: 'nope' }
+    }
+    const block = chatBlockFromItem(item)
+    if (block && block.kind === 'tool') {
+      expect(block.meta?.attachments).toBeUndefined()
     } else {
       throw new Error('expected tool block')
     }
@@ -817,8 +911,6 @@ describe('usage event mapping', () => {
           cacheHitTokens: 80,
           cacheMissTokens: 20,
           tokenEconomySavingsTokens: 4096,
-          tokenEconomySavingsUsd: 0.0018,
-          tokenEconomySavingsCny: 0.0126,
           turns: 1
         }
       },
@@ -834,8 +926,6 @@ describe('usage event mapping', () => {
       cacheMissTokens: 20,
       cacheHitRate: 0.8,
       tokenEconomySavingsTokens: 4096,
-      tokenEconomySavingsUsd: 0.0018,
-      tokenEconomySavingsCny: 0.0126,
       turns: 1
     })
   })

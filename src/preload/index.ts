@@ -1,14 +1,18 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { DsGuiApi } from '../shared/ds-gui-api'
+import type { KunGuiApi } from '../shared/kun-gui-api'
 
 const api = {
   platform: process.platform,
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (partial) =>
     ipcRenderer.invoke('settings:set', partial),
+  saveSettingsSilent: (partial) =>
+    ipcRenderer.invoke('settings:save-silent', partial),
   runtimeRequest: (path, method, body) =>
     ipcRenderer.invoke('runtime:request', { path, method, body }),
+  restartRuntime: () => ipcRenderer.invoke('runtime:restart'),
   fetchUpstreamModels: () => ipcRenderer.invoke('upstream:models'),
+  probeModelProvider: (payload) => ipcRenderer.invoke('provider:probe', payload),
   getClawStatus: () => ipcRenderer.invoke('claw:status'),
   runClawTask: (taskId) =>
     ipcRenderer.invoke('claw:task:run', taskId),
@@ -21,18 +25,28 @@ const api = {
     ipcRenderer.invoke('claw:im-install:poll', { provider, deviceCode }),
   pickWorkspaceDirectory: (defaultPath) =>
     ipcRenderer.invoke('workspace:pick-directory', defaultPath),
+  confirmDialog: (options) =>
+    ipcRenderer.invoke('dialog:confirm', options),
   listSkills: (workspaceRoot) =>
     ipcRenderer.invoke('skill:list', { workspaceRoot }),
   saveSkillFile: (rootPath, skillName, content) =>
     ipcRenderer.invoke('skill:save-file', { rootPath, skillName, content }),
   openSkillRoot: (rootPath) =>
     ipcRenderer.invoke('skill:open-root', rootPath),
-  getDeepseekConfigFile: () =>
-    ipcRenderer.invoke('deepseek:config:read'),
-  setDeepseekConfigFile: (content) =>
-    ipcRenderer.invoke('deepseek:config:write', content),
-  openDeepseekConfigDir: () =>
-    ipcRenderer.invoke('deepseek:config:open-dir'),
+  listUiPlugins: () =>
+    ipcRenderer.invoke('ui-plugin:list'),
+  installUiPlugin: () =>
+    ipcRenderer.invoke('ui-plugin:install'),
+  removeUiPlugin: (id) =>
+    ipcRenderer.invoke('ui-plugin:remove', { id }),
+  loadUiPlugin: (id) =>
+    ipcRenderer.invoke('ui-plugin:load', { id }),
+  getKunConfigFile: () =>
+    ipcRenderer.invoke('kun:config:read'),
+  setKunConfigFile: (content) =>
+    ipcRenderer.invoke('kun:config:write', content),
+  openKunConfigDir: () =>
+    ipcRenderer.invoke('kun:config:open-dir'),
   getGitBranches: (workspaceRoot) =>
     ipcRenderer.invoke('git:branches', workspaceRoot),
   switchGitBranch: (workspaceRoot, branch) =>
@@ -50,6 +64,10 @@ const api = {
     ipcRenderer.invoke('file:read-workspace', options),
   readWorkspaceImage: (options) =>
     ipcRenderer.invoke('file:read-workspace-image', options),
+  readWorkspacePdf: (options) =>
+    ipcRenderer.invoke('file:read-workspace-pdf', options),
+  saveWorkspaceFileAs: (payload) =>
+    ipcRenderer.invoke('file:save-as', payload),
   writeWorkspaceFile: (payload) =>
     ipcRenderer.invoke('file:write-workspace', payload),
   createWorkspaceFile: (payload) =>
@@ -82,6 +100,16 @@ const api = {
     ipcRenderer.invoke('write:copy-rich-text', payload),
   requestWriteInlineCompletion: (payload) =>
     ipcRenderer.invoke('write:inline-completion', payload),
+  retrieveWriteContext: (payload) =>
+    ipcRenderer.invoke('write:retrieve-context', payload),
+  generateWriteInfographic: (payload) =>
+    ipcRenderer.invoke('write:generate-infographic', payload),
+  authorizeWritePrototype: (payload) =>
+    ipcRenderer.invoke('write:authorize-prototype', payload),
+  openWritePrototype: (payload) =>
+    ipcRenderer.invoke('write:open-prototype', payload),
+  transcribeSpeech: (payload) =>
+    ipcRenderer.invoke('speech:transcribe', payload),
   listWriteInlineCompletionDebugEntries: () =>
     ipcRenderer.invoke('write:inline-completion-debug:list'),
   clearWriteInlineCompletionDebugEntries: () =>
@@ -121,6 +149,14 @@ const api = {
     ipcRenderer.on('claw:channel-activity', wrapped)
     return () => ipcRenderer.removeListener('claw:channel-activity', wrapped)
   },
+  onRuntimeStatus: (handler) => {
+    const wrapped = (
+      _: Electron.IpcRendererEvent,
+      payload: Parameters<typeof handler>[0]
+    ) => handler(payload)
+    ipcRenderer.on('runtime:status', wrapped)
+    return () => ipcRenderer.removeListener('runtime:status', wrapped)
+  },
   mirrorClawChannelMessage: (threadId, text, direction) =>
     ipcRenderer.invoke('claw:channel:mirror', { threadId, text, direction }),
   mirrorClawChannelMessageToFeishu: (threadId, text, direction) =>
@@ -129,14 +165,19 @@ const api = {
     ipcRenderer.invoke('claw:task:create-from-text', {
       text,
       channelId: options?.channelId,
+      providerId: options?.providerId,
       modelHint: options?.modelHint,
+      reasoningEffort: options?.reasoningEffort,
       mode: options?.mode
     }),
   createScheduleTaskFromText: (text, options) =>
     ipcRenderer.invoke('schedule:task:create-from-text', {
       text,
       workspaceRoot: options?.workspaceRoot,
+      clawChannelId: options?.clawChannelId,
+      providerId: options?.providerId,
       modelHint: options?.modelHint,
+      reasoningEffort: options?.reasoningEffort,
       mode: options?.mode
     }),
   runDesktopCommand: (command) =>
@@ -163,6 +204,6 @@ const api = {
   getLogPath: () => ipcRenderer.invoke('log:get-path'),
   openLogDir: () => ipcRenderer.invoke('log:open-dir'),
   getPathForFile: (file: File) => webUtils.getPathForFile(file)
-} satisfies DsGuiApi
+} satisfies KunGuiApi
 
-contextBridge.exposeInMainWorld('dsGui', api)
+contextBridge.exposeInMainWorld('kunGui', api)

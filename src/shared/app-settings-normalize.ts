@@ -17,7 +17,10 @@ import {
   mergeKunRuntimeSettings,
   migrateLegacyAppSettings
 } from './app-settings-kun'
-import { normalizeModelProviderSettings } from './app-settings-provider'
+import {
+  defaultMiniMaxMediaGenerationKunPatch,
+  normalizeModelProviderSettings
+} from './app-settings-provider'
 import { normalizeDeepseekBaseUrl } from './app-settings-normalizers'
 import { normalizeClawSettings } from './app-settings-claw'
 import { normalizeScheduleSettings } from './app-settings-schedule'
@@ -37,7 +40,19 @@ export function normalizeAppSettings(settings: AppSettingsV1): AppSettingsV1 {
     schedule?: ScheduleSettingsPatchV1
     guiUpdate?: Partial<GuiUpdateConfigV1>
   }
+  const providerSettings = normalizeModelProviderSettings(maybeSettings.provider)
   const runtime = getKunRuntimeSettings(maybeSettings)
+  const rawKun = maybeSettings.agents?.kun
+  const rawMediaPatch: Parameters<typeof defaultMiniMaxMediaGenerationKunPatch>[0]['kunPatch'] = {
+    ...(rawKun?.textToSpeech !== undefined ? { textToSpeech: rawKun.textToSpeech } : {}),
+    ...(rawKun?.musicGeneration !== undefined ? { musicGeneration: rawKun.musicGeneration } : {}),
+    ...(rawKun?.videoGeneration !== undefined ? { videoGeneration: rawKun.videoGeneration } : {})
+  }
+  const miniMaxMediaDefaults = defaultMiniMaxMediaGenerationKunPatch({
+    providers: providerSettings.providers,
+    currentKun: runtime,
+    kunPatch: rawMediaPatch
+  })
   return {
     ...migrated,
     version: 1,
@@ -52,10 +67,11 @@ export function normalizeAppSettings(settings: AppSettingsV1): AppSettingsV1 {
       maybeSettings.uiFontScale === 'large'
         ? maybeSettings.uiFontScale
         : 'small',
-    provider: normalizeModelProviderSettings(maybeSettings.provider),
+    provider: providerSettings,
     agents: kunSettingsEnvelope(mergeKunRuntimeSettings(defaultKunRuntimeSettings(), {
       ...runtime,
-      baseUrl: runtime.baseUrl.trim() ? normalizeDeepseekBaseUrl(runtime.baseUrl) : ''
+      baseUrl: runtime.baseUrl.trim() ? normalizeDeepseekBaseUrl(runtime.baseUrl) : '',
+      ...(miniMaxMediaDefaults ?? {})
     })),
     workspaceRoot: typeof maybeSettings.workspaceRoot === 'string' ? maybeSettings.workspaceRoot : '',
     log: {

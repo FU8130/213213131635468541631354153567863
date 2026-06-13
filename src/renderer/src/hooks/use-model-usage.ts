@@ -4,7 +4,7 @@ import {
   type DailyUsageRange,
   defaultDailyUsageRange
 } from './use-daily-usage'
-import { parseUsageResponse } from './usage-response'
+import { parseUsageResponse, withUsageRequestTimeout } from './usage-response'
 
 export type ModelUsageBucket = Omit<DailyUsageBucket, 'date'> & {
   model: string
@@ -39,11 +39,7 @@ type RawUsageCounters = {
   total_tokens?: unknown
   cost_usd?: unknown
   cost_cny?: unknown
-  cache_savings_usd?: unknown
-  cache_savings_cny?: unknown
   token_economy_savings_tokens?: unknown
-  token_economy_savings_usd?: unknown
-  token_economy_savings_cny?: unknown
   turns?: unknown
   thread_count?: unknown
   cache_hit_rate?: unknown
@@ -92,11 +88,7 @@ function normalizeCounters(raw: RawUsageCounters): Omit<DailyUsageBucket, 'date'
     totalTokens,
     costUsd: usageNumber(raw.cost_usd),
     costCny: usageOptionalNumber(raw.cost_cny),
-    cacheSavingsUsd: usageNumber(raw.cache_savings_usd),
-    cacheSavingsCny: usageOptionalNumber(raw.cache_savings_cny),
     tokenEconomySavingsTokens: usageNumber(raw.token_economy_savings_tokens),
-    tokenEconomySavingsUsd: usageNumber(raw.token_economy_savings_usd),
-    tokenEconomySavingsCny: usageOptionalNumber(raw.token_economy_savings_cny),
     turns: usageNumber(raw.turns),
     threadCount: usageNumber(raw.thread_count),
     cacheHitRate: usageRate(raw.cache_hit_rate)
@@ -156,8 +148,11 @@ export function normalizeModelUsageResponse(raw: RawModelUsageResponse): ModelUs
 }
 
 export async function loadModelUsage(range: DailyUsageRange): Promise<ModelUsageSummary | null> {
-  if (typeof window.dsGui?.runtimeRequest !== 'function') return null
-  const response = await window.dsGui.runtimeRequest(buildModelUsagePath(range), 'GET')
+  if (typeof window.kunGui?.runtimeRequest !== 'function') return null
+  const response = await withUsageRequestTimeout(
+    window.kunGui.runtimeRequest(buildModelUsagePath(range), 'GET'),
+    'model usage'
+  )
   if (!response.ok || !response.body.trim()) {
     throw new Error(`model usage request failed: ${response.status}`)
   }

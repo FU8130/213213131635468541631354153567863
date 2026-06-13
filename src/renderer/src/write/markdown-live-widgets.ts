@@ -4,6 +4,9 @@ import {
   highlightCodeHtml,
   renderFallbackCodeHtml
 } from '../lib/code-highlighting'
+import { isPendingInfographicActive } from './infographic-pending'
+import { createInfographicPendingElement } from './infographic-pending-dom'
+import { createHtmlEmbedElement } from './html-embed-dom'
 
 export type BlockRange = {
   from: number
@@ -163,17 +166,84 @@ export class ImageWidget extends WidgetType {
     })
     const image = document.createElement('img')
     image.className = 'cm-write-md-image'
-    image.src = this.src
+    if (this.src) image.src = this.src
     image.alt = this.alt
     image.loading = 'lazy'
     wrapper.appendChild(image)
-    if (this.localPath && typeof window.dsGui?.readWorkspaceImage === 'function') {
-      void window.dsGui.readWorkspaceImage({ path: this.localPath })
+    if (this.localPath && typeof window.kunGui?.readWorkspaceImage === 'function') {
+      void window.kunGui.readWorkspaceImage({ path: this.localPath })
         .then((result) => {
-          if (result.ok) image.src = result.dataUrl
+          if (result.ok) {
+            image.src = result.dataUrl
+            wrapper.classList.remove('cm-write-md-image-error')
+            return
+          }
+          image.removeAttribute('src')
+          wrapper.classList.add('cm-write-md-image-error')
+          wrapper.dataset.error = result.message
         })
-        .catch(() => undefined)
+        .catch((error) => {
+          image.removeAttribute('src')
+          wrapper.classList.add('cm-write-md-image-error')
+          wrapper.dataset.error = error instanceof Error ? error.message : String(error)
+        })
     }
+    return wrapper
+  }
+}
+
+export class InfographicPendingWidget extends WidgetType {
+  constructor(private id: string) {
+    super()
+  }
+
+  // Position is intentionally not part of identity: edits elsewhere in the
+  // document must reuse this DOM so the painting animation never restarts.
+  eq(other: InfographicPendingWidget): boolean {
+    return other.id === this.id && isPendingInfographicActive(this.id)
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const wrapper = document.createElement('span')
+    wrapper.className = 'cm-write-md-image-wrap'
+    wrapper.appendChild(createInfographicPendingElement(this.id))
+    wrapper.addEventListener('mousedown', (event) => {
+      if (!isPrimaryMouseDown(event)) return
+      preventEditorMouseHandling(event)
+      focusSourceAt(view, view.posAtDOM(wrapper, 0))
+    })
+    return wrapper
+  }
+}
+
+export class HtmlEmbedWidget extends WidgetType {
+  constructor(
+    private rawSrc: string,
+    private alt: string,
+    private filePath: string | null,
+    private workspaceRoot: string | null
+  ) {
+    super()
+  }
+
+  // Position is intentionally not part of identity: edits elsewhere in the
+  // document must reuse this DOM, both to avoid flicker and because an
+  // activated webview reloads from scratch on every reattach.
+  eq(other: HtmlEmbedWidget): boolean {
+    return other.rawSrc === this.rawSrc && other.filePath === this.filePath
+  }
+
+  toDOM(): HTMLElement {
+    const wrapper = document.createElement('span')
+    wrapper.className = 'cm-write-md-image-wrap'
+    wrapper.appendChild(
+      createHtmlEmbedElement({
+        rawSrc: this.rawSrc,
+        alt: this.alt,
+        filePath: this.filePath,
+        workspaceRoot: this.workspaceRoot
+      })
+    )
     return wrapper
   }
 }

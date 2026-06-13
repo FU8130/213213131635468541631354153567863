@@ -142,4 +142,20 @@ describe('WorkspaceModeTabs', () => {
     expect(html).toContain('role="tablist"')
     expect(html).toContain('Code / Write')
   })
+
+  it('does not render secondary switches in the sidebar mode tabs', () => {
+    const onCodeOpen = vi.fn()
+    const onWriteOpen = vi.fn()
+
+    const html = renderToStaticMarkup(
+      createElement(WorkspaceModeTabs, {
+        activeView: 'chat',
+        onCodeOpen,
+        onWriteOpen
+      })
+    )
+
+    expect(html).not.toContain('role="switch"')
+    expect(html.match(/role="tab"/g)?.length).toBe(2)
+  })
 })

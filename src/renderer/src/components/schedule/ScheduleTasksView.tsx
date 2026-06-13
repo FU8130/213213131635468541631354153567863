@@ -22,10 +22,18 @@ import {
 import {
   DEFAULT_SCHEDULE_MODEL,
   DEFAULT_SCHEDULE_REASONING_EFFORT,
-  SCHEDULE_MODEL_IDS,
+  SCHEDULE_REASONING_EFFORT_IDS,
+  getKunRuntimeSettings,
+  getModelProviderSettings,
+  isComposerChatModelId,
+  listNonTextModelIds,
   mergeScheduleSettings,
+  modelProfileSupportsTextChat,
+  modelProviderModelProfile,
   normalizeScheduleSettings,
   type AppSettingsV1,
+  type ClawImChannelV1,
+  type ModelProviderModelProfileV1,
   type ScheduleKind,
   type ScheduleReasoningEffort,
   type ScheduleRuntimeStatus,
@@ -33,6 +41,7 @@ import {
   type ScheduledTaskV1
 } from '@shared/app-settings'
 import { rendererRuntimeClient } from '../../agent/runtime-client'
+import { confirmDialog } from '../../lib/confirm-dialog'
 import { formatWorkspacePickerError } from '../../lib/format-workspace-picker-error'
 import { SidebarTitlebarToggleButton } from '../sidebar/SidebarPrimitives'
 import { ScheduleDefaultsDialog } from './ScheduleDefaultsDialog'
@@ -44,18 +53,130 @@ type Props = {
 }
 
 type TaskFilter = 'all' | 'enabled' | 'running' | 'done'
+type ScheduleClientMode = 'code' | 'im'
+type ScheduleModelProviderOption = {
+  providerId: string
+  label: string
+  modelIds: string[]
+  modelProfiles?: Record<string, ModelProviderModelProfileV1>
+}
 type TaskDialogState =
   | { mode: 'create'; draft: ScheduledTaskV1 }
   | { mode: 'edit'; taskId: string; draft: ScheduledTaskV1 }
 
 const SCHEDULE_FILTERS: TaskFilter[] = ['all', 'enabled', 'running', 'done']
 const SCHEDULE_KIND_OPTIONS: ScheduleKind[] = ['daily', 'at', 'interval', 'manual']
-const SCHEDULE_REASONING_OPTIONS: ScheduleReasoningEffort[] = ['off', 'low', 'medium', 'high', 'max']
+const SCHEDULE_REASONING_OPTIONS: ScheduleReasoningEffort[] = [...SCHEDULE_REASONING_EFFORT_IDS]
 const EMPTY_SCHEDULE_TASKS: ScheduledTaskV1[] = []
 const TIME_HOURS = Array.from({ length: 24 }, (_item, index) => String(index).padStart(2, '0'))
 const TIME_MINUTES = Array.from({ length: 60 }, (_item, index) => String(index).padStart(2, '0'))
 const RESULT_PREVIEW_CHAR_THRESHOLD = 360
 const RESULT_PREVIEW_LINE_THRESHOLD = 5
+
+function modelIdsEqual(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase()
+}
+
+function firstConcreteScheduleModel(modelIds: readonly string[], fallback = DEFAULT_SCHEDULE_MODEL): string {
+  return modelIds.find((model) => model.trim() && model.trim().toLowerCase() !== 'auto') ?? fallback
+}
+
+export function scheduleModelProviderOptions(settings: AppSettingsV1): ScheduleModelProviderOption[] {
+  const nonTextModelIds = listNonTextModelIds(settings)
+  return getModelProviderSettings(settings).providers
+    .map((provider) => {
+      const modelIds = provider.models
+        .map((model) => model.trim())
+        .filter((model) =>
+          isComposerChatModelId(model, nonTextModelIds) &&
+          modelProfileSupportsTextChat(modelProviderModelProfile(provider, model))
+        )
+      return {
+        providerId: provider.id,
+        label: provider.name.trim() || provider.id,
+        modelIds,
+        modelProfiles: provider.modelProfiles
+      }
+    })
+    .filter((provider) => provider.modelIds.length > 0)
+}
+
+export function resolveScheduleModelSelection(
+  providers: readonly ScheduleModelProviderOption[],
+  providerId: string | undefined,
+  model: string | undefined
+): { providerId: string; model: string } {
+  const requestedProviderId = providerId?.trim() ?? ''
+  const requestedModel = model?.trim() ?? ''
+  const providerById = providers.find((provider) => provider.providerId === requestedProviderId)
+  const providerByModel = requestedModel && requestedModel.toLowerCase() !== 'auto'
+    ? providers.find((provider) => provider.modelIds.some((id) => modelIdsEqual(id, requestedModel)))
+    : undefined
+  const provider = providerById ?? providerByModel ?? providers[0]
+  if (!provider) {
+    return {
+      providerId: requestedProviderId,
+      model: requestedModel && requestedModel.toLowerCase() !== 'auto' ? requestedModel : DEFAULT_SCHEDULE_MODEL
+    }
+  }
+  const selectedModel =
+    requestedModel &&
+    requestedModel.toLowerCase() !== 'auto' &&
+    provider.modelIds.some((id) => modelIdsEqual(id, requestedModel))
+      ? requestedModel
+      : firstConcreteScheduleModel(provider.modelIds)
+  return {
+    providerId: provider.providerId,
+    model: selectedModel
+  }
+}
+
+function preferredScheduleProviderId(
+  settings: AppSettingsV1,
+  providers: readonly ScheduleModelProviderOption[],
+  configuredProviderId: string | undefined
+): string {
+  const configured = configuredProviderId?.trim() ?? ''
+  if (providers.some((provider) => provider.providerId === configured)) return configured
+  const runtimeProviderId = getKunRuntimeSettings(settings).providerId.trim()
+  if (providers.some((provider) => provider.providerId === runtimeProviderId)) return runtimeProviderId
+  return providers[0]?.providerId ?? ''
+}
+
+function isScheduleReasoningEffort(value: string): value is ScheduleReasoningEffort {
+  return SCHEDULE_REASONING_OPTIONS.includes(value as ScheduleReasoningEffort)
+}
+
+function scheduleReasoningOptionsForModel(
+  profile: Pick<ModelProviderModelProfileV1, 'reasoning'> | undefined
+): ScheduleReasoningEffort[] {
+  const supported = profile?.reasoning?.supportedEfforts
+    .filter(isScheduleReasoningEffort) ?? []
+  if (supported.length === 0) return SCHEDULE_REASONING_OPTIONS
+  return SCHEDULE_REASONING_OPTIONS.filter((effort) => supported.includes(effort))
+}
+
+function resolveScheduleReasoningSelection(
+  value: ScheduleReasoningEffort | undefined,
+  profile: Pick<ModelProviderModelProfileV1, 'reasoning'> | undefined
+): ScheduleReasoningEffort {
+  const options = scheduleReasoningOptionsForModel(profile)
+  if (value && options.includes(value)) return value
+  const defaultEffort = profile?.reasoning?.defaultEffort
+  if (defaultEffort && isScheduleReasoningEffort(defaultEffort) && options.includes(defaultEffort)) {
+    return defaultEffort
+  }
+  return options.includes(DEFAULT_SCHEDULE_REASONING_EFFORT)
+    ? DEFAULT_SCHEDULE_REASONING_EFFORT
+    : options[0] ?? DEFAULT_SCHEDULE_REASONING_EFFORT
+}
+
+function scheduleModelProfileForSelection(
+  provider: ScheduleModelProviderOption | null | undefined,
+  model: string
+): ModelProviderModelProfileV1 | undefined {
+  return provider?.modelProfiles ? modelProviderModelProfile({ modelProfiles: provider.modelProfiles }, model) : undefined
+}
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -69,6 +190,8 @@ export function newScheduledTask(workspaceRoot: string, defaults?: Partial<Sched
     enabled: true,
     prompt: '',
     workspaceRoot,
+    clawChannelId: '',
+    providerId: '',
     model: DEFAULT_SCHEDULE_MODEL,
     reasoningEffort: DEFAULT_SCHEDULE_REASONING_EFFORT,
     schedule: {
@@ -135,6 +258,53 @@ function scheduleReasoningLabel(
   t: (key: string, values?: Record<string, unknown>) => string
 ): string {
   return t(`scheduleReasoning_${value}`)
+}
+
+function clawChannelDisplayName(channel: ClawImChannelV1): string {
+  return channel.agentProfile.name.trim() || channel.label.trim() || channel.provider
+}
+
+export function scheduleImProviderLabel(
+  channel: Pick<ClawImChannelV1, 'provider' | 'platformCredential'>,
+  t: (key: string, values?: Record<string, unknown>) => string
+): string {
+  if (channel.provider === 'weixin') return t('scheduleImProviderWeixin')
+  if (channel.platformCredential?.kind === 'feishu' && channel.platformCredential.domain === 'lark') {
+    return t('scheduleImProviderLark')
+  }
+  return t('scheduleImProviderFeishu')
+}
+
+export function scheduleImChannelOptionLabel(
+  channel: ClawImChannelV1,
+  t: (key: string, values?: Record<string, unknown>) => string
+): string {
+  return `${clawChannelDisplayName(channel)} (${scheduleImProviderLabel(channel, t)})`
+}
+
+function configuredScheduleImChannels(channels: ClawImChannelV1[]): ClawImChannelV1[] {
+  return channels.filter((channel) => channel.enabled)
+}
+
+export function preferredScheduleImChannel(channels: ClawImChannelV1[]): ClawImChannelV1 | null {
+  const configured = configuredScheduleImChannels(channels)
+  return configured.find((channel) => channel.provider === 'weixin') ??
+    configured.find((channel) => channel.provider === 'feishu') ??
+    configured[0] ??
+    null
+}
+
+export function scheduledTaskClawLabel(
+  task: Pick<ScheduledTaskV1, 'clawChannelId'>,
+  channels: ClawImChannelV1[],
+  t: (key: string, values?: Record<string, unknown>) => string
+): string {
+  const channelId = task.clawChannelId.trim()
+  if (!channelId) return ''
+  const channel = channels.find((item) => item.id === channelId)
+  return channel
+    ? t('scheduleClawAgentLabel', { name: scheduleImChannelOptionLabel(channel, t) })
+    : t('scheduleClawAgentMissing')
 }
 
 export function validateScheduledTaskDraft(
@@ -222,8 +392,8 @@ export function ScheduleTasksView({
     try {
       const [nextSettings, nextStatus] = await Promise.all([
         rendererRuntimeClient.getSettings({ forceRefresh: true }),
-        typeof window.dsGui?.getScheduleStatus === 'function'
-          ? window.dsGui.getScheduleStatus()
+        typeof window.kunGui?.getScheduleStatus === 'function'
+          ? window.kunGui.getScheduleStatus()
           : Promise.resolve(null)
       ])
       setSettings(nextSettings)
@@ -244,6 +414,11 @@ export function ScheduleTasksView({
 
   const schedule = settings ? normalizeScheduleSettings(settings.schedule) : null
   const tasks = schedule?.tasks ?? EMPTY_SCHEDULE_TASKS
+  const clawChannels = settings?.claw.channels ?? []
+  const modelProviders = useMemo(
+    () => settings ? scheduleModelProviderOptions(settings) : [],
+    [settings]
+  )
   const runningTaskIds = useMemo(() => new Set(status?.runningTaskIds ?? []), [status])
   const visibleTasks = useMemo(() => filterScheduledTasks(tasks, filter), [filter, tasks])
 
@@ -253,8 +428,8 @@ export function ScheduleTasksView({
     setSettings({ ...settings, schedule: nextSchedule })
     const saved = await rendererRuntimeClient.setSettings({ schedule: nextSchedule })
     setSettings(saved)
-    if (typeof window.dsGui?.getScheduleStatus === 'function') {
-      setStatus(await window.dsGui.getScheduleStatus())
+    if (typeof window.kunGui?.getScheduleStatus === 'function') {
+      setStatus(await window.kunGui.getScheduleStatus())
     }
   }
 
@@ -266,18 +441,35 @@ export function ScheduleTasksView({
 
   const openCreateDialog = (): void => {
     const workspaceRoot = resolveDialogWorkspaceRoot()
+    const selection = settings
+      ? resolveScheduleModelSelection(
+          modelProviders,
+          preferredScheduleProviderId(settings, modelProviders, schedule?.providerId),
+          schedule?.model || DEFAULT_SCHEDULE_MODEL
+        )
+      : { providerId: '', model: DEFAULT_SCHEDULE_MODEL }
+    const selectedProvider = modelProviders.find((provider) => provider.providerId === selection.providerId) ?? null
+    const selectedProfile = scheduleModelProfileForSelection(selectedProvider, selection.model)
     setDialog({ mode: 'create', draft: newScheduledTask(workspaceRoot, {
-      model: schedule?.model || DEFAULT_SCHEDULE_MODEL
+      providerId: selection.providerId,
+      model: selection.model,
+      reasoningEffort: resolveScheduleReasoningSelection(DEFAULT_SCHEDULE_REASONING_EFFORT, selectedProfile)
     }) })
     setDialogError(null)
   }
 
   const openEditDialog = (task: ScheduledTaskV1): void => {
+    const selection = resolveScheduleModelSelection(modelProviders, task.providerId, task.model)
+    const selectedProvider = modelProviders.find((provider) => provider.providerId === selection.providerId) ?? null
+    const selectedProfile = scheduleModelProfileForSelection(selectedProvider, selection.model)
     setDialog({
       mode: 'edit',
       taskId: task.id,
       draft: {
         ...task,
+        providerId: selection.providerId,
+        model: selection.model,
+        reasoningEffort: resolveScheduleReasoningSelection(task.reasoningEffort, selectedProfile),
         workspaceRoot: resolveDialogWorkspaceRoot(task.workspaceRoot),
         schedule: { ...task.schedule }
       }
@@ -288,10 +480,10 @@ export function ScheduleTasksView({
   const pickDialogWorkspace = async (): Promise<void> => {
     if (!dialog) return
     try {
-      if (typeof window.dsGui?.pickWorkspaceDirectory !== 'function') {
+      if (typeof window.kunGui?.pickWorkspaceDirectory !== 'function') {
         throw new Error(t('workspacePickerUnavailable'))
       }
-      const picked = await window.dsGui.pickWorkspaceDirectory(resolveDialogWorkspaceRoot(dialog.draft.workspaceRoot) || undefined)
+      const picked = await window.kunGui.pickWorkspaceDirectory(resolveDialogWorkspaceRoot(dialog.draft.workspaceRoot) || undefined)
       if (picked.canceled || !picked.path) return
       onDraftChangeInDialog({ workspaceRoot: picked.path })
       setDialogError(null)
@@ -313,11 +505,28 @@ export function ScheduleTasksView({
     }
     const now = nowIso()
     const workspaceRoot = resolveDialogWorkspaceRoot(dialog.draft.workspaceRoot)
+    const draftClawChannelId = dialog.draft.clawChannelId.trim()
+    const selection = resolveScheduleModelSelection(
+      modelProviders,
+      dialog.draft.providerId,
+      dialog.draft.model
+    )
+    const selectedProvider =
+      modelProviders.find((provider) => provider.providerId === selection.providerId) ?? null
+    const selectedProfile = scheduleModelProfileForSelection(selectedProvider, selection.model)
+    const configuredClawChannelId = configuredScheduleImChannels(clawChannels)
+      .some((channel) => channel.id === draftClawChannelId)
+      ? draftClawChannelId
+      : ''
     const task = {
       ...dialog.draft,
       title: dialog.draft.title.trim(),
       prompt: dialog.draft.prompt,
       workspaceRoot,
+      clawChannelId: configuredClawChannelId,
+      providerId: selection.providerId,
+      model: selection.model,
+      reasoningEffort: resolveScheduleReasoningSelection(dialog.draft.reasoningEffort, selectedProfile),
       mode: 'agent' as const,
       updatedAt: now,
       nextRunAt: ''
@@ -356,13 +565,13 @@ export function ScheduleTasksView({
 
   const deleteTask = async (taskId: string): Promise<void> => {
     if (!schedule) return
-    if (!window.confirm(t('scheduleDeleteConfirm'))) return
+    if (!(await confirmDialog(t('scheduleDeleteConfirm')))) return
     await persistSchedule({ tasks: schedule.tasks.filter((task) => task.id !== taskId) })
   }
 
   const runTask = async (taskId: string): Promise<void> => {
-    if (typeof window.dsGui?.runScheduleTask !== 'function') return
-    const result = await window.dsGui.runScheduleTask(taskId)
+    if (typeof window.kunGui?.runScheduleTask !== 'function') return
+    const result = await window.kunGui.runScheduleTask(taskId)
     if (!result.ok) {
       setError(result.message)
       return
@@ -483,6 +692,11 @@ export function ScheduleTasksView({
               {visibleTasks.map((task) => {
                 const running = runningTaskIds.has(task.id) || task.lastStatus === 'running'
                 const lastThreadId = scheduledTaskLastThreadId(task)
+                const clawLabel = scheduledTaskClawLabel(task, clawChannels, t)
+                const providerLabel = task.providerId
+                  ? modelProviders.find((provider) => provider.providerId === task.providerId)?.label
+                  : ''
+                const modelLabel = providerLabel ? `${providerLabel} / ${task.model}` : task.model
                 return (
                   <div
                     key={task.id}
@@ -502,7 +716,8 @@ export function ScheduleTasksView({
                           <span>{scheduleTaskSummary(task, t)}</span>
                           <span>{t('scheduleNextRun')}: {formatDateTime(task.nextRunAt, t('scheduleNotScheduled'))}</span>
                           <span>{t('scheduleLastRun')}: {formatDateTime(task.lastRunAt, t('scheduleNeverRun'))}</span>
-                          <span>{task.model} · {scheduleReasoningLabel(task.reasoningEffort, t)}</span>
+                          {clawLabel ? <span>{clawLabel}</span> : null}
+                          <span>{modelLabel} · {scheduleReasoningLabel(task.reasoningEffort, t)}</span>
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
@@ -612,6 +827,9 @@ export function ScheduleTasksView({
           onPickWorkspace={() => void pickDialogWorkspace()}
           onSubmit={() => void saveDialog()}
           onOpenSettings={() => setSettingsDialogOpen(true)}
+          clawChannels={clawChannels}
+          defaultClawWorkspaceRoot={settings?.claw.im.workspaceRoot.trim() || ''}
+          modelProviders={modelProviders}
           t={t}
         />
       ) : null}
@@ -619,6 +837,7 @@ export function ScheduleTasksView({
       {settingsDialogOpen && schedule ? (
         <ScheduleDefaultsDialog
           schedule={schedule}
+          modelProviders={modelProviders}
           onClose={() => setSettingsDialogOpen(false)}
           onSave={async (patch) => {
             await persistSchedule(patch)
@@ -639,6 +858,9 @@ function ScheduleTaskDialog({
   onPickWorkspace,
   onSubmit,
   onOpenSettings,
+  clawChannels,
+  defaultClawWorkspaceRoot,
+  modelProviders,
   t
 }: {
   dialog: TaskDialogState
@@ -648,6 +870,9 @@ function ScheduleTaskDialog({
   onPickWorkspace: () => void
   onSubmit: () => void
   onOpenSettings: () => void
+  clawChannels: ClawImChannelV1[]
+  defaultClawWorkspaceRoot: string
+  modelProviders: ScheduleModelProviderOption[]
   t: (key: string, values?: Record<string, unknown>) => string
 }): ReactElement {
   const draft = dialog.draft
@@ -656,6 +881,67 @@ function ScheduleTaskDialog({
   }
   const updateSchedule = (patch: Partial<ScheduledTaskV1['schedule']>): void => {
     onDraftChange({ ...draft, schedule: { ...draft.schedule, ...patch } })
+  }
+  const imChannels = configuredScheduleImChannels(clawChannels)
+  const preferredImChannel = preferredScheduleImChannel(clawChannels)
+  const selectedImChannel = imChannels.find((item) => item.id === draft.clawChannelId) ?? null
+  const selectedImDisplayChannel = selectedImChannel ?? preferredImChannel
+  const clientMode: ScheduleClientMode = selectedImChannel ? 'im' : 'code'
+  const modelSelection = resolveScheduleModelSelection(modelProviders, draft.providerId, draft.model)
+  const selectedModelProvider =
+    modelProviders.find((provider) => provider.providerId === modelSelection.providerId) ?? null
+  const selectedModelIds = selectedModelProvider?.modelIds ?? [modelSelection.model].filter(Boolean)
+  const selectedModelProfile = scheduleModelProfileForSelection(selectedModelProvider, modelSelection.model)
+  const reasoningOptions = scheduleReasoningOptionsForModel(selectedModelProfile)
+  const reasoningSelection = resolveScheduleReasoningSelection(draft.reasoningEffort, selectedModelProfile)
+  const updateModelProvider = (providerId: string): void => {
+    const selection = resolveScheduleModelSelection(modelProviders, providerId, '')
+    const provider = modelProviders.find((item) => item.providerId === selection.providerId) ?? null
+    const profile = scheduleModelProfileForSelection(provider, selection.model)
+    updateDraft({
+      providerId: selection.providerId,
+      model: selection.model,
+      reasoningEffort: resolveScheduleReasoningSelection(draft.reasoningEffort, profile)
+    })
+  }
+  const updateModel = (model: string): void => {
+    const selection = resolveScheduleModelSelection(modelProviders, modelSelection.providerId, model)
+    const provider = modelProviders.find((item) => item.providerId === selection.providerId) ?? null
+    const profile = scheduleModelProfileForSelection(provider, selection.model)
+    updateDraft({
+      providerId: selection.providerId,
+      model: selection.model,
+      reasoningEffort: resolveScheduleReasoningSelection(draft.reasoningEffort, profile)
+    })
+  }
+  const updateClawChannel = (channelId: string): void => {
+    const channel = imChannels.find((item) => item.id === channelId)
+    const selection = resolveScheduleModelSelection(
+      modelProviders,
+      draft.providerId,
+      channel?.model.trim() || draft.model
+    )
+    const provider = modelProviders.find((item) => item.providerId === selection.providerId) ?? null
+    const profile = scheduleModelProfileForSelection(provider, selection.model)
+    updateDraft({
+      clawChannelId: channel?.id ?? '',
+      providerId: selection.providerId,
+      model: selection.model,
+      reasoningEffort: resolveScheduleReasoningSelection(draft.reasoningEffort, profile),
+      ...(channel
+        ? {
+            workspaceRoot: channel.workspaceRoot.trim() || defaultClawWorkspaceRoot || draft.workspaceRoot
+          }
+        : {})
+    })
+  }
+  const updateClientMode = (mode: ScheduleClientMode): void => {
+    if (mode === 'code') {
+      updateDraft({ clawChannelId: '' })
+      return
+    }
+    if (selectedImChannel) return
+    if (preferredImChannel) updateClawChannel(preferredImChannel.id)
   }
   const promptCount = draft.prompt.length
   const title = dialog.mode === 'create' ? t('scheduleCreateTask') : t('scheduleEditTask')
@@ -674,7 +960,7 @@ function ScheduleTaskDialog({
           onSubmit()
         }}
         onMouseDown={(event) => event.stopPropagation()}
-        className="flex max-h-[calc(100vh-1rem)] w-full max-w-[760px] flex-col overflow-hidden rounded-[22px] border border-white/55 bg-ds-card shadow-[0_30px_90px_rgba(15,23,42,0.28)] dark:border-white/10"
+        className="flex max-h-[calc(100vh-1rem)] w-full max-w-[760px] flex-col overflow-hidden rounded-[22px] border border-white/55 bg-ds-card shadow-[0_30px_90px_rgba(20,47,95,0.28)] dark:border-white/10"
       >
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-ds-border-muted px-6 py-3">
           <div className="min-w-0">
@@ -736,32 +1022,107 @@ function ScheduleTaskDialog({
               icon={<Brain className="h-4 w-4" strokeWidth={1.8} />}
               title={t('scheduleTaskSectionModel')}
             >
-              <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-                <label className="grid gap-2">
-                  <FieldLabel required>{t('scheduleModel')}</FieldLabel>
-                  <select
-                    value={draft.model}
-                    onChange={(event) => updateDraft({ model: event.target.value })}
-                    className="h-10 w-full rounded-xl border border-ds-border bg-ds-main/55 px-3 text-[14px] text-ds-ink outline-none transition focus:border-accent/45 focus:ring-2 focus:ring-accent/15"
-                  >
-                    {SCHEDULE_MODEL_IDS.map((model) => (
-                      <option key={model} value={model}>{model}</option>
-                    ))}
-                  </select>
-                </label>
-
+              <div className="grid gap-4">
                 <div className="grid gap-2">
-                  <FieldLabel>{t('scheduleReasoning')}</FieldLabel>
-                  <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-                    {SCHEDULE_REASONING_OPTIONS.map((effort) => (
-                      <SegmentButton
-                        key={effort}
-                        selected={draft.reasoningEffort === effort}
-                        onClick={() => updateDraft({ reasoningEffort: effort })}
+                  <FieldLabel>{t('scheduleClientMode')}</FieldLabel>
+                  <div className="grid grid-cols-2 gap-2">
+                    <SegmentButton
+                      selected={clientMode === 'code'}
+                      onClick={() => updateClientMode('code')}
+                    >
+                      {t('scheduleClientModeCode')}
+                    </SegmentButton>
+                    <SegmentButton
+                      selected={clientMode === 'im'}
+                      disabled={imChannels.length === 0}
+                      onClick={() => updateClientMode('im')}
+                    >
+                      {t('scheduleClientModeIm')}
+                    </SegmentButton>
+                  </div>
+                  {imChannels.length === 0 ? (
+                    <p className="text-[12px] leading-5 text-ds-faint">{t('scheduleClientModeImUnavailable')}</p>
+                  ) : null}
+                </div>
+
+                {clientMode === 'im' ? (
+                  <label className="grid gap-2">
+                    <FieldLabel>{t('scheduleImClient')}</FieldLabel>
+                    <div className="relative">
+                      <select
+                        value={selectedImDisplayChannel?.id ?? ''}
+                        onChange={(event) => updateClawChannel(event.target.value)}
+                        aria-label={t('scheduleImClient')}
+                        title={selectedImDisplayChannel ? scheduleImChannelOptionLabel(selectedImDisplayChannel, t) : undefined}
+                        className="peer absolute inset-0 z-10 h-10 w-full cursor-pointer opacity-0"
                       >
-                        {scheduleReasoningLabel(effort, t)}
-                      </SegmentButton>
-                    ))}
+                        {imChannels.map((channel) => (
+                          <option key={channel.id} value={channel.id}>
+                            {scheduleImChannelOptionLabel(channel, t)}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="pointer-events-none flex h-10 w-full items-center gap-3 rounded-xl border border-ds-border bg-ds-main/55 px-3 pr-10 text-[14px] text-ds-ink outline-none transition peer-focus:border-accent/45 peer-focus:ring-2 peer-focus:ring-accent/15">
+                        <span className="min-w-0 flex-1 truncate">
+                          {selectedImDisplayChannel ? clawChannelDisplayName(selectedImDisplayChannel) : ''}
+                        </span>
+                        {selectedImDisplayChannel ? (
+                          <span className="shrink-0 rounded-lg border border-ds-border-muted bg-ds-subtle px-2 py-0.5 text-[12px] font-semibold text-ds-muted">
+                            {scheduleImProviderLabel(selectedImDisplayChannel, t)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <ChevronDown
+                        className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ds-faint"
+                        strokeWidth={1.8}
+                        aria-hidden="true"
+                      />
+                    </div>
+                  </label>
+                ) : null}
+
+                <div className="grid gap-4 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,2fr)]">
+                  <label className="grid gap-2">
+                    <FieldLabel required>{t('scheduleProvider')}</FieldLabel>
+                    <select
+                      value={modelSelection.providerId}
+                      onChange={(event) => updateModelProvider(event.target.value)}
+                      className="h-10 w-full rounded-xl border border-ds-border bg-ds-main/55 px-3 text-[14px] text-ds-ink outline-none transition focus:border-accent/45 focus:ring-2 focus:ring-accent/15"
+                    >
+                      {modelProviders.map((provider) => (
+                        <option key={provider.providerId} value={provider.providerId}>
+                          {provider.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="grid gap-2">
+                    <FieldLabel required>{t('scheduleModel')}</FieldLabel>
+                    <select
+                      value={modelSelection.model}
+                      onChange={(event) => updateModel(event.target.value)}
+                      className="h-10 w-full rounded-xl border border-ds-border bg-ds-main/55 px-3 text-[14px] text-ds-ink outline-none transition focus:border-accent/45 focus:ring-2 focus:ring-accent/15"
+                    >
+                      {selectedModelIds.map((model) => (
+                        <option key={model} value={model}>{model}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="grid gap-2">
+                    <FieldLabel>{t('scheduleReasoning')}</FieldLabel>
+                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+                      {reasoningOptions.map((effort) => (
+                        <SegmentButton
+                          key={effort}
+                          selected={reasoningSelection === effort}
+                          onClick={() => updateDraft({ reasoningEffort: effort })}
+                        >
+                          {scheduleReasoningLabel(effort, t)}
+                        </SegmentButton>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -948,21 +1309,26 @@ function FieldLabel({
 
 function SegmentButton({
   selected,
+  disabled = false,
   onClick,
   children
 }: {
   selected: boolean
+  disabled?: boolean
   onClick: () => void
   children: ReactNode
 }): ReactElement {
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={onClick}
       className={`h-9 min-w-0 rounded-xl border px-2.5 text-[12.5px] font-semibold transition ${
         selected
           ? 'border-accent/45 bg-accent/10 text-ds-ink shadow-sm'
-          : 'border-ds-border bg-ds-main/55 text-ds-muted hover:bg-ds-hover hover:text-ds-ink'
+          : disabled
+            ? 'cursor-not-allowed border-ds-border bg-ds-subtle text-ds-faint opacity-60'
+            : 'border-ds-border bg-ds-main/55 text-ds-muted hover:bg-ds-hover hover:text-ds-ink'
       }`}
     >
       <span className="block truncate">{children}</span>

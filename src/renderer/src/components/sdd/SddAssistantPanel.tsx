@@ -1,9 +1,9 @@
 import type { ReactElement } from 'react'
-import { FileQuestion, Lightbulb, PanelRightClose, Plus, Search, Sparkles } from 'lucide-react'
+import { FileQuestion, Lightbulb, ListChecks, PanelRightClose, Plus, Search, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { ChatBlock, RuntimeConnectionStatus } from '../../agent/types'
+import type { AttachmentReference, ChatBlock, RuntimeConnectionStatus } from '../../agent/types'
 import type { QueuedUserMessage } from '../../store/chat-store-types'
-import type { ModelProviderModelGroup } from '@shared/ds-gui-api'
+import type { ModelProviderModelGroup } from '@shared/kun-gui-api'
 import type { SddDraft } from '../../sdd/sdd-draft-store'
 import { MessageTimeline } from '../chat/MessageTimeline'
 import { FloatingComposer } from '../chat/FloatingComposer'
@@ -23,17 +23,26 @@ type Props = {
   liveReasoning: string
   liveAssistant: string
   composerModel: string
+  composerProviderId?: string
   composerPickList: string[]
   composerModelGroups?: ModelProviderModelGroup[]
   composerReasoningEffort: ComposerReasoningEffort
-  setComposerModel: (modelId: string) => void
+  setComposerModel: (modelId: string, providerId?: string) => void
   setComposerReasoningEffort: (effort: ComposerReasoningEffort) => void
   queuedMessages: QueuedUserMessage[]
   removeQueuedMessage: (id: string) => void
+  attachments?: AttachmentReference[]
+  attachmentUploadEnabled?: boolean
+  attachmentUploadBusy?: boolean
+  attachmentUploadError?: string | null
+  onPickAttachments?: (files: File[]) => void
+  onPasteClipboardImage?: (options?: { silentNoImage?: boolean }) => void | Promise<void>
+  onRemoveAttachment?: (id: string) => void
   onSend: () => void
   onInterrupt: (options?: { discard?: boolean }) => void
   onRetryConnection: () => void
   onOpenSettings: () => void
+  onConfigureProviders?: () => void
   onNewConversation: () => void
   onCollapse: () => void
   className?: string
@@ -52,6 +61,7 @@ export function SddAssistantPanel({
   liveReasoning,
   liveAssistant,
   composerModel,
+  composerProviderId,
   composerPickList,
   composerModelGroups = [],
   composerReasoningEffort,
@@ -59,10 +69,18 @@ export function SddAssistantPanel({
   setComposerReasoningEffort,
   queuedMessages,
   removeQueuedMessage,
+  attachments = [],
+  attachmentUploadEnabled = false,
+  attachmentUploadBusy = false,
+  attachmentUploadError = null,
+  onPickAttachments,
+  onPasteClipboardImage,
+  onRemoveAttachment,
   onSend,
   onInterrupt,
   onRetryConnection,
   onOpenSettings,
+  onConfigureProviders,
   onNewConversation,
   onCollapse,
   className = ''
@@ -169,6 +187,19 @@ export function SddAssistantPanel({
                   <span className="mt-0.5 block truncate text-[12px] text-ds-faint">{t('sddAssistantResearchSub')}</span>
                 </span>
               </button>
+              <button
+                type="button"
+                onClick={() => setAssistantPrompt(t('sddAssistantStructurePrompt'))}
+                className="sdd-assistant-action flex items-center gap-3 rounded-2xl border border-ds-border bg-ds-card px-3 py-3 text-left transition hover:border-accent/25 hover:bg-ds-hover"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-500/10 text-violet-600 dark:text-violet-300">
+                  <ListChecks className="h-4 w-4" strokeWidth={1.9} />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[13.5px] font-semibold text-ds-ink">{t('sddAssistantStructure')}</span>
+                  <span className="mt-0.5 block truncate text-[12px] text-ds-faint">{t('sddAssistantStructureSub')}</span>
+                </span>
+              </button>
             </div>
           </div>
         )}
@@ -186,6 +217,7 @@ export function SddAssistantPanel({
           runtimeReady={runtimeConnection === 'ready'}
           hasActiveThread={Boolean(activeThreadId)}
           composerModel={composerModel}
+          composerProviderId={composerProviderId}
           composerPickList={composerPickList}
           composerModelGroups={composerModelGroups}
           composerReasoningEffort={composerReasoningEffort}
@@ -194,8 +226,16 @@ export function SddAssistantPanel({
           modelPickerMode="combobox"
           queuedMessages={queuedMessages}
           onRemoveQueuedMessage={removeQueuedMessage}
+          attachments={attachments}
+          attachmentUploadEnabled={attachmentUploadEnabled}
+          attachmentUploadBusy={attachmentUploadBusy}
+          attachmentUploadError={attachmentUploadError}
+          onPickAttachments={onPickAttachments}
+          onPasteClipboardImage={onPasteClipboardImage}
+          onRemoveAttachment={onRemoveAttachment}
           onSend={onSend}
           onInterrupt={onInterrupt}
+          onConfigureProviders={onConfigureProviders}
         />
       </div>
     </aside>

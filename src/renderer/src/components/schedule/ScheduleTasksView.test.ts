@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import type { ScheduledTaskV1 } from '@shared/app-settings'
+import type { ClawImChannelV1, ScheduledTaskV1 } from '@shared/app-settings'
 import {
   filterScheduledTasks,
   newScheduledTask,
+  preferredScheduleImChannel,
+  scheduleImChannelOptionLabel,
+  scheduleImProviderLabel,
   scheduleTaskSummary,
+  scheduledTaskClawLabel,
   scheduledTaskLastThreadId,
   scheduledTaskResultIsExpandable,
   validateScheduledTaskDraft
@@ -11,6 +15,13 @@ import {
 
 const t = (key: string, values?: Record<string, unknown>): string =>
   values ? `${key}:${JSON.stringify(values)}` : key
+
+const displayT = (key: string, values?: Record<string, unknown>): string => {
+  if (key === 'scheduleImProviderFeishu') return 'Feishu'
+  if (key === 'scheduleImProviderLark') return 'Lark'
+  if (key === 'scheduleImProviderWeixin') return 'WeChat'
+  return t(key, values)
+}
 
 function task(id: string, patch: Partial<ScheduledTaskV1> = {}): ScheduledTaskV1 {
   return {
@@ -24,6 +35,30 @@ function task(id: string, patch: Partial<ScheduledTaskV1> = {}): ScheduledTaskV1
       ...newScheduledTask('/tmp/workspace').schedule,
       ...patch.schedule
     }
+  }
+}
+
+function channel(patch: Partial<ClawImChannelV1> = {}): ClawImChannelV1 {
+  return {
+    id: 'channel-1',
+    provider: 'feishu',
+    label: 'Feishu',
+    enabled: true,
+    model: 'auto',
+    threadId: '',
+    workspaceRoot: '/tmp/claw',
+    agentProfile: {
+      name: 'Ops Claw',
+      description: '',
+      identity: '',
+      personality: '',
+      userContext: '',
+      replyRules: ''
+    },
+    conversations: [],
+    createdAt: '2026-06-02T00:00:00.000Z',
+    updatedAt: '2026-06-02T00:00:00.000Z',
+    ...patch
   }
 }
 
@@ -99,6 +134,57 @@ describe('ScheduleTasksView helpers', () => {
   it('normalizes the task thread link shown in the list UI', () => {
     expect(scheduledTaskLastThreadId(task('never-ran'))).toBe('')
     expect(scheduledTaskLastThreadId(task('ran', { lastThreadId: '  thr_123  ' }))).toBe('thr_123')
+  })
+
+  it('shows selected Claw channel labels for scheduled tasks', () => {
+    const channels = [channel()]
+
+    expect(scheduledTaskClawLabel(task('plain'), channels, displayT)).toBe('')
+    expect(scheduledTaskClawLabel(task('claw', { clawChannelId: 'channel-1' }), channels, displayT))
+      .toBe('scheduleClawAgentLabel:{"name":"Ops Claw (Feishu)"}')
+    expect(scheduledTaskClawLabel(task('missing', { clawChannelId: 'missing' }), channels, displayT))
+      .toBe('scheduleClawAgentMissing')
+  })
+
+  it('shows the IM provider in scheduled IM channel options', () => {
+    expect(scheduleImProviderLabel(channel(), displayT)).toBe('Feishu')
+    expect(scheduleImProviderLabel(channel({
+      platformCredential: {
+        kind: 'feishu',
+        appId: 'cli_lark',
+        appSecret: 'secret',
+        domain: 'lark',
+        createdAt: '2026-06-02T00:00:00.000Z'
+      }
+    }), displayT)).toBe('Lark')
+    expect(scheduleImProviderLabel(channel({
+      provider: 'weixin',
+      agentProfile: { ...channel().agentProfile, name: 'Weixin Agent' }
+    }), displayT)).toBe('WeChat')
+    expect(scheduleImChannelOptionLabel(channel(), displayT)).toBe('Ops Claw (Feishu)')
+  })
+
+  it('prefers enabled WeChat IM channels for scheduled IM mode', () => {
+    const disabledWeixin = channel({
+      id: 'weixin-disabled',
+      provider: 'weixin',
+      enabled: false,
+      agentProfile: { ...channel().agentProfile, name: 'Disabled Weixin' }
+    })
+    const feishu = channel({
+      id: 'feishu-1',
+      provider: 'feishu',
+      agentProfile: { ...channel().agentProfile, name: 'Feishu Agent' }
+    })
+    const weixin = channel({
+      id: 'weixin-1',
+      provider: 'weixin',
+      agentProfile: { ...channel().agentProfile, name: 'Weixin Agent' }
+    })
+
+    expect(preferredScheduleImChannel([disabledWeixin, feishu, weixin])?.id).toBe('weixin-1')
+    expect(preferredScheduleImChannel([disabledWeixin, feishu])?.id).toBe('feishu-1')
+    expect(preferredScheduleImChannel([disabledWeixin])).toBeNull()
   })
 
   it('detects when a task result needs expansion', () => {

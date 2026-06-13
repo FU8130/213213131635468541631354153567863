@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   defaultClawSettings,
   defaultKeyboardShortcuts,
@@ -31,7 +31,8 @@ function settings(dataDir: string, model = 'settings-model'): AppSettingsV1 {
           apiKey: 'sk-custom',
           baseUrl: 'https://custom.example/v1',
           endpointFormat: 'responses',
-          models: ['custom-provider-model']
+          models: ['custom-provider-model'],
+          modelProfiles: {}
         }
       ]
     },
@@ -82,7 +83,6 @@ describe('upstream model picker list', () => {
     const ids = await readConfiguredKunModelIds(settings(dataDir))
 
     expect(ids).toEqual(expect.arrayContaining([
-      'auto',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
       'settings-model',
@@ -90,6 +90,7 @@ describe('upstream model picker list', () => {
       'custom-model',
       'vendor/custom-model'
     ]))
+    expect(ids).not.toContain('auto')
   })
 
   it('falls back to configured model ids when upstream cannot be queried', async () => {
@@ -114,6 +115,8 @@ describe('upstream model picker list', () => {
     if (result.ok) {
       expect(result.modelIds).toContain('local-only-model')
       expect(result.modelIds).toContain('custom-provider-model')
+      expect(result.modelIds).not.toContain('auto')
+      expect(result.defaultModelId).toBe('local-only-model')
       expect(result.modelGroups).toEqual(expect.arrayContaining([
         expect.objectContaining({
           providerId: 'custom-provider',
@@ -126,6 +129,119 @@ describe('upstream model picker list', () => {
           modelIds: expect.arrayContaining(['deepseek-chat', 'deepseek-reasoner'])
         })
       ]))
+    }
+  })
+
+  it('filters speech-only upstream models out of the composer picker', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'deepseek-gui-models-'))
+    await mkdir(dataDir, { recursive: true })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [
+          { id: 'chat-capable-model' },
+          { id: 'mimo-v2.5-asr' },
+          { id: 'whisper-1' }
+        ]
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const result = await fetchUpstreamModelIds(settings(dataDir), 'sk-custom')
+
+      expect(result).toMatchObject({ ok: true })
+      if (result.ok) {
+        expect(result.modelIds).toContain('chat-capable-model')
+        expect(result.modelIds).not.toContain('mimo-v2.5-asr')
+        expect(result.modelIds).not.toContain('whisper-1')
+        expect(result.modelIds).not.toContain('auto')
+        expect(result.defaultModelId).toBe('settings-model')
+        expect(result.modelGroups).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            providerId: 'custom-provider',
+            modelIds: expect.arrayContaining(['chat-capable-model'])
+          })
+        ]))
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('filters image-generation and other non-text models out of the composer picker', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'deepseek-gui-models-'))
+    await mkdir(dataDir, { recursive: true })
+    const base = settings(dataDir)
+    const imageCapableSettings: AppSettingsV1 = {
+      ...base,
+      provider: {
+        ...base.provider,
+        providers: base.provider.providers.map((provider) =>
+          provider.id === 'custom-provider'
+            ? {
+                ...provider,
+                models: [...provider.models, 'paint-house', 'banana-canvas'],
+                modelProfiles: {
+                  'banana-canvas': {
+                    inputModalities: ['text'],
+                    outputModalities: ['image'],
+                    supportsToolCalling: false,
+                    messageParts: ['text']
+                  }
+                },
+                image: {
+                  protocol: 'openai-images',
+                  baseUrl: 'https://custom.example/v1',
+                  models: ['paint-house']
+                }
+              }
+            : provider
+        )
+      }
+    }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [
+          { id: 'chat-capable-model' },
+          { id: 'paint-house' },
+          { id: 'banana-canvas' },
+          { id: 'dall-e-3' },
+          { id: 'seedream-4-0-250828' },
+          { id: 'text-embedding-3-large' },
+          { id: 'wan2.2-t2v-plus' }
+        ]
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const result = await fetchUpstreamModelIds(imageCapableSettings, 'sk-custom')
+
+      expect(result).toMatchObject({ ok: true })
+      if (result.ok) {
+        expect(result.modelIds).toContain('chat-capable-model')
+        expect(result.modelIds).not.toContain('paint-house')
+        expect(result.modelIds).not.toContain('banana-canvas')
+        expect(result.modelIds).not.toContain('dall-e-3')
+        expect(result.modelIds).not.toContain('seedream-4-0-250828')
+        expect(result.modelIds).not.toContain('text-embedding-3-large')
+        expect(result.modelIds).not.toContain('wan2.2-t2v-plus')
+        expect(result.modelGroups).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            providerId: 'custom-provider',
+            modelIds: expect.arrayContaining(['chat-capable-model'])
+          })
+        ]))
+        const customGroup = result.modelGroups?.find((group) => group.providerId === 'custom-provider')
+        expect(customGroup?.modelIds).not.toContain('paint-house')
+        expect(customGroup?.modelIds).not.toContain('banana-canvas')
+      }
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 })

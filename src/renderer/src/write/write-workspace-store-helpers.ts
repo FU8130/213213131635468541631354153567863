@@ -1,4 +1,5 @@
 import {
+  DEFAULT_KUN_MODEL,
   DEFAULT_WRITE_INLINE_COMPLETION_DEBOUNCE_MS,
   DEFAULT_WRITE_INLINE_COMPLETION_MAX_TOKENS,
   DEFAULT_WRITE_INLINE_COMPLETION_MIN_ACCEPT_SCORE,
@@ -8,11 +9,13 @@ import {
   DEFAULT_WRITE_INLINE_LONG_COMPLETION_MIN_ACCEPT_SCORE,
   DEFAULT_WRITE_WORKSPACE_ROOT,
   normalizeWriteInlineCompletionModel,
+  normalizeWriteSelectionAssistSettings,
   resolveWriteInlineCompletionApiKey,
   resolveWriteInlineCompletionBaseUrl,
   resolveWriteInlineCompletionModel,
   type AppSettingsV1,
   type WriteInlineCompletionSettingsV1,
+  type WriteSelectionAssistSettingsV1,
   type WriteSettingsV1
 } from '@shared/app-settings'
 import type { WorkspaceEntry } from '@shared/workspace-file'
@@ -26,14 +29,17 @@ import {
 } from '../lib/browser-storage'
 import type { WritePreviewMode, WriteWorkspaceState } from './write-workspace-store-types'
 
-export const WRITE_PREVIEW_MODE_KEY = 'deepseekgui.write.preview-mode'
-export const WRITE_ASSISTANT_OPEN_KEY = 'deepseekgui.write.assistant-open'
-export const WRITE_ASSISTANT_MODEL_KEY = 'deepseekgui.write.assistant-model'
-const DEFAULT_WRITE_ASSISTANT_MODEL = 'auto'
+export const WRITE_PREVIEW_MODE_KEY = 'kun.write.preview-mode'
+export const WRITE_ASSISTANT_OPEN_KEY = 'kun.write.assistant-open'
+export const WRITE_ASSISTANT_MODEL_KEY = 'kun.write.assistant-model'
+export const WRITE_ASSISTANT_PROVIDER_KEY = 'kun.write.assistant-provider'
+const DEFAULT_WRITE_ASSISTANT_MODEL = DEFAULT_KUN_MODEL
 
 export function readStoredPreviewMode(): WritePreviewMode {
   const raw = readBrowserStorageItem(WRITE_PREVIEW_MODE_KEY)
-  return raw === 'source' || raw === 'live' || raw === 'split' || raw === 'preview' ? raw : 'live'
+  return raw === 'rich' || raw === 'source' || raw === 'live' || raw === 'split' || raw === 'preview'
+    ? raw
+    : 'rich'
 }
 
 export function readStoredAssistantOpen(): boolean {
@@ -41,7 +47,23 @@ export function readStoredAssistantOpen(): boolean {
 }
 
 export function readStoredAssistantModel(): string {
-  return readBrowserStorageItem(WRITE_ASSISTANT_MODEL_KEY)?.trim() || DEFAULT_WRITE_ASSISTANT_MODEL
+  const stored = readBrowserStorageItem(WRITE_ASSISTANT_MODEL_KEY)
+  const normalized = normalizeWriteAssistantModel(stored)
+  if (stored !== null && stored.trim() !== normalized) {
+    writeBrowserStorageItem(WRITE_ASSISTANT_MODEL_KEY, normalized)
+  }
+  return normalized
+}
+
+export function readStoredAssistantProviderId(): string {
+  return readBrowserStorageItem(WRITE_ASSISTANT_PROVIDER_KEY)?.trim() ?? ''
+}
+
+export function normalizeWriteAssistantModel(model: string | null | undefined): string {
+  const normalized = model?.trim() ?? ''
+  return !normalized || normalized.toLowerCase() === 'auto'
+    ? DEFAULT_WRITE_ASSISTANT_MODEL
+    : normalized
 }
 
 export function normalizePath(value: string): string {
@@ -77,6 +99,7 @@ export function normalizeWriteSettings(settings?: Partial<WriteSettingsV1> | nul
   activeWorkspaceRoot: string
   workspaces: string[]
   inlineCompletion: WriteInlineCompletionSettingsV1
+  selectionAssist: WriteSelectionAssistSettingsV1
 } {
   const defaultWorkspaceRoot = normalizePath(settings?.defaultWorkspaceRoot || DEFAULT_WRITE_WORKSPACE_ROOT)
   const activeWorkspaceRoot = normalizePath(settings?.activeWorkspaceRoot || defaultWorkspaceRoot)
@@ -102,6 +125,10 @@ export function normalizeWriteSettings(settings?: Partial<WriteSettingsV1> | nul
       enabled: rawInlineCompletion.enabled !== false,
       retrievalEnabled: rawInlineCompletion.retrievalEnabled !== false,
       longCompletionEnabled: rawInlineCompletion.longCompletionEnabled !== false,
+      inheritProvider: typeof rawInlineCompletion.inheritProvider === 'boolean'
+        ? rawInlineCompletion.inheritProvider
+        : !rawInlineCompletion.providerId?.trim(),
+      providerId: rawInlineCompletion.providerId?.trim() || '',
       apiKey: rawInlineCompletion.apiKey?.trim() || '',
       baseUrl: rawInlineCompletion.baseUrl?.trim() || '',
       inheritModel: typeof rawInlineCompletion.inheritModel === 'boolean'
@@ -126,7 +153,8 @@ export function normalizeWriteSettings(settings?: Partial<WriteSettingsV1> | nul
       longMaxTokens: Number.isFinite(longMaxTokens)
         ? Math.max(64, Math.min(1_024, Math.round(longMaxTokens)))
         : DEFAULT_WRITE_INLINE_LONG_COMPLETION_MAX_TOKENS
-    }
+    },
+    selectionAssist: normalizeWriteSelectionAssistSettings(settings?.selectionAssist)
   }
 }
 
@@ -136,6 +164,7 @@ export function withResolvedInlineCompletionSettings(
     activeWorkspaceRoot: string
     workspaces: string[]
     inlineCompletion: WriteInlineCompletionSettingsV1
+    selectionAssist: WriteSelectionAssistSettingsV1
   },
   settings: Pick<AppSettingsV1, 'provider' | 'agents' | 'write'>
 ): {
@@ -143,6 +172,7 @@ export function withResolvedInlineCompletionSettings(
   activeWorkspaceRoot: string
   workspaces: string[]
   inlineCompletion: WriteInlineCompletionSettingsV1
+  selectionAssist: WriteSelectionAssistSettingsV1
 } {
   return {
     ...write,
@@ -182,7 +212,7 @@ export function writeRelativeToWorkspace(workspaceRoot: string, filePath: string
 }
 
 export function activeFileStorageKey(workspaceRoot: string): string {
-  return `deepseekgui.write.active-file:${normalizePath(workspaceRoot)}`
+  return `kun.write.active-file:${normalizePath(workspaceRoot)}`
 }
 
 export function rememberActiveFile(workspaceRoot: string, nextPath: string | null): void {
@@ -244,6 +274,9 @@ export function initialState(): Pick<
   | 'fileContent'
   | 'imageDataUrl'
   | 'imageMimeType'
+  | 'pdfDataBase64'
+  | 'pdfMimeType'
+  | 'pdfMtimeMs'
   | 'fileSize'
   | 'fileTruncated'
   | 'fileError'
@@ -265,6 +298,9 @@ export function initialState(): Pick<
     fileContent: '',
     imageDataUrl: '',
     imageMimeType: '',
+    pdfDataBase64: '',
+    pdfMimeType: '',
+    pdfMtimeMs: 0,
     fileSize: 0,
     fileTruncated: false,
     fileError: null,

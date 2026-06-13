@@ -5,6 +5,7 @@ import {
   loadDailyUsage,
   normalizeDailyUsageResponse
 } from './use-daily-usage'
+import { USAGE_REQUEST_TIMEOUT_MS } from './usage-response'
 
 type RuntimeRequest = (path: string, method?: string) => Promise<{ ok: boolean; status: number; body: string }>
 
@@ -12,7 +13,7 @@ function setRuntimeRequest(runtimeRequest: RuntimeRequest): void {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
-      dsGui: {
+      kunGui: {
         runtimeRequest
       }
     }
@@ -20,6 +21,7 @@ function setRuntimeRequest(runtimeRequest: RuntimeRequest): void {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   Reflect.deleteProperty(globalThis, 'window')
 })
@@ -85,18 +87,12 @@ describe('daily usage helpers', () => {
       inputTokens: 100,
       outputTokens: 30,
       totalTokens: 130,
-      cacheSavingsUsd: 0.006,
-      cacheSavingsCny: 0.0432,
       tokenEconomySavingsTokens: 2048,
-      tokenEconomySavingsUsd: 0.0009,
-      tokenEconomySavingsCny: 0.0063,
       turns: 2,
       threadCount: 1,
       cacheHitRate: 0.5
     })
-    expect(normalized.totals.cacheSavingsUsd).toBe(0.006)
     expect(normalized.totals.tokenEconomySavingsTokens).toBe(2048)
-    expect(normalized.totals.tokenEconomySavingsUsd).toBe(0.0009)
     expect(normalized.totals.activeDays).toBe(1)
   })
 
@@ -159,6 +155,20 @@ describe('daily usage helpers', () => {
     await expect(
       loadDailyUsage({ from: '2026-05-01', to: '2026-05-01', timezone: 'UTC' })
     ).rejects.toThrow('daily usage request failed: 400')
+  })
+
+  it('times out when the runtime bridge does not settle', async () => {
+    vi.useFakeTimers()
+    setRuntimeRequest(() => new Promise<never>(() => undefined))
+
+    const pending = loadDailyUsage({ from: '2026-05-01', to: '2026-05-01', timezone: 'UTC' }).catch(
+      (error: unknown) => error
+    )
+    await vi.advanceTimersByTimeAsync(USAGE_REQUEST_TIMEOUT_MS)
+    const error = await pending
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe(`daily usage request timed out after ${USAGE_REQUEST_TIMEOUT_MS}ms`)
   })
 
   it('reports invalid JSON daily usage responses with a stable error', async () => {

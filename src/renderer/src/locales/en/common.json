@@ -924,6 +924,7 @@
   "composerExecutionLabel": "Execution",
   "composerApprovalShort": "Approval",
   "composerAccessShort": "Access",
+  "composerAccessCommandsHint": "Only Full access can run terminal commands (bash).",
   "composerExecutionApplying": "Applying…",
   "composerExecutionBypass": "Bypass",
   "composerChangedFilesTitle": "{{count}} files changed",

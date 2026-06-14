@@ -684,7 +684,7 @@
   "approvalNever": "Do not run tools",
   "permissionsBehaviorHint": "Full access only controls which files and commands the AI assistant may reach. Confirmation is separate. By default, full access + automatic execution auto-allows approval requests.",
   "sandboxMode": "File access range",
-  "sandboxModeDesc": "Limit which local files the AI assistant can read or change. Changes apply on the next turn.",
+  "sandboxModeDesc": "Controls which local files the AI assistant can read or change, and whether it can run terminal commands. Only \"Can access all files\" runs shell commands like bash — \"Can only read files\" and \"Can edit workspace\" block them. Changes apply on the next turn.",
   "sandboxWorkspaceWrite": "Can edit workspace",
   "sandboxReadOnly": "Can only read files",
   "sandboxFullAccess": "Can access all files",

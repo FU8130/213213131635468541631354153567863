@@ -1802,6 +1802,27 @@ describe('AgentLoop', () => {
     expect(compactor.shouldCompact(tinyHistory, { promptTokens: 120 })).toBe(true)
   })
 
+  it('adds per-request overhead to the estimate-only compaction trigger', () => {
+    const compactor = new ContextCompactor({ softThreshold: 100, hardThreshold: 200 })
+    const tinyHistory = [
+      makeUserItem({
+        id: 'tiny_history',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'short'
+      })
+    ]
+
+    // Item text alone is far below the soft threshold and would skip
+    // compaction when no provider usage count is available.
+    expect(compactor.shouldCompact(tinyHistory)).toBe(false)
+    // The system prompt + tool schemas sent every turn (overheadTokens)
+    // are added as a floor, so the estimate-only path still triggers.
+    expect(compactor.shouldCompact(tinyHistory, { overheadTokens: 500 })).toBe(true)
+    expect(compactor.planCompaction(tinyHistory, { overheadTokens: 500 })?.reason)
+      .toContain('estimated prompt tokens')
+  })
+
   it('plans normal, aggressive, and force compaction levels', () => {
     const compactor = new ContextCompactor({ softThreshold: 100, hardThreshold: 200 })
     const tinyHistory = [

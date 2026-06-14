@@ -684,7 +684,7 @@
   "approvalNever": "不执行工具",
   "permissionsBehaviorHint": "“完全访问”只决定 AI 助手可访问哪些文件和命令；“工具执行前确认”单独决定是否弹出审批。默认是完全访问 + 自动执行，审批请求会自动允许。",
   "sandboxMode": "文件访问范围",
-  "sandboxModeDesc": "限制 AI 助手可以读取或修改哪些本地文件。修改后会在下一轮对话生效。",
+  "sandboxModeDesc": "控制 AI 助手能读取/修改哪些本地文件，以及能否执行终端命令。只有“可访问所有文件”才能运行 bash 等终端命令，“只能读取文件”和“可修改工作目录”会禁用命令执行。修改后会在下一轮对话生效。",
   "sandboxWorkspaceWrite": "可修改工作目录",
   "sandboxReadOnly": "只能读取文件",
   "sandboxFullAccess": "可访问所有文件",

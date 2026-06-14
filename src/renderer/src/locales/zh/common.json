@@ -924,6 +924,7 @@
   "composerExecutionLabel": "执行",
   "composerApprovalShort": "审批",
   "composerAccessShort": "权限",
+  "composerAccessCommandsHint": "仅“完全访问”可执行终端命令（bash）。",
   "composerExecutionApplying": "应用中…",
   "composerExecutionBypass": "Bypass",
   "composerChangedFilesTitle": "{{count}} 个文件已更改",

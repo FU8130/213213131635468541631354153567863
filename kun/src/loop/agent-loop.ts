@@ -63,7 +63,7 @@ import {
   type TokenEconomyConfig
 } from './token-economy.js'
 import { applyRequestHistoryHygiene } from './request-history-hygiene.js'
-import { estimateModelRequestInputTokens } from './model-request-estimator.js'
+import { estimateModelRequestInputTokens, estimateRequestOverheadTokens } from './model-request-estimator.js'
 import {
   recentAutoRouterContext,
   resolveAutoModelRoute,
@@ -424,6 +424,8 @@ export class AgentLoop {
   private readonly opts: AgentLoopOptions
   private readonly autoModelRoutes = new Map<string, AutoModelRouteSelection>()
   private readonly promptTokenPressure = new Map<string, { model: string; promptTokens: number }>()
+  /** Threads for which a one-time pressure hydration from persisted usage was already attempted. */
+  private readonly hydratedPressureThreads = new Set<string>()
   private readonly toolStormBreakers = new Map<string, ToolStormBreaker>()
   private readonly toolCatalogSnapshots = new Map<string, ToolCatalogSnapshot>()
   private readonly lastNoToolTextByTurn = new Map<string, string>()
@@ -933,7 +935,11 @@ export class AgentLoop {
       createPlanSatisfied,
       stepIndex
     })
-    const history = await this.compactIfNeeded(items, model, signal, { threadId, turnId })
+    const history = await this.compactIfNeeded(items, model, signal, {
+      threadId,
+      turnId,
+      toolSpecs: effectiveToolSpecs
+    })
     if (signal.aborted) return 'aborted'
     await this.recordPipelineStage(threadId, turnId, 'input_compressed', {
       historyItems: history.length
@@ -1788,11 +1794,25 @@ export class AgentLoop {
     items: TurnItem[],
     model: string,
     signal: AbortSignal,
-    context: { threadId: string; turnId: string }
+    context: { threadId: string; turnId: string; toolSpecs?: readonly ModelToolSpec[] }
   ): Promise<TurnItem[]> {
+    // Restore the accurate provider token count after a process restart,
+    // when the in-memory pressure map is empty. Without this the next
+    // line falls back to the item-only estimator, which under-counts and
+    // can silently skip compaction until the context overruns the window.
+    await this.hydratePromptPressureIfCold(context.threadId, model)
     const pressure = this.consumePromptPressure(context.threadId, model)
     const thresholdModel = pressure?.model || model
-    const plan = this.opts.compactor.planCompaction(items, { model: thresholdModel, promptTokens: pressure?.promptTokens })
+    const overheadTokens = estimateRequestOverheadTokens({
+      systemPrompt: this.opts.prefix.systemPrompt,
+      prefix: this.opts.prefix.fewShots,
+      tools: context.toolSpecs
+    })
+    const plan = this.opts.compactor.planCompaction(items, {
+      model: thresholdModel,
+      promptTokens: pressure?.promptTokens,
+      overheadTokens
+    })
     if (!plan) return items
     const threadId = context.threadId
     const turnId = context.turnId
@@ -2015,6 +2035,42 @@ export class AgentLoop {
     const current = this.promptTokenPressure.get(threadId)
     if (current && current.promptTokens >= promptTokens) return
     this.promptTokenPressure.set(threadId, { model, promptTokens })
+  }
+
+  /**
+   * Seed `promptTokenPressure` from persisted usage the first time a thread
+   * is touched in this process. The pressure map is in-memory only, so after
+   * a restart the compaction trigger would otherwise rely on the item-only
+   * estimator (which omits the system prompt and tool schemas) and could
+   * skip compaction for an already-oversized thread. `loadUsageRecords`
+   * returns per-request deltas ordered oldest-first, so the last positive
+   * entry is the most recent request's prompt size — the best available
+   * proxy for the current context pressure. Best-effort: any failure leaves
+   * the estimator (plus overhead floor) as the fallback.
+   */
+  private async hydratePromptPressureIfCold(threadId: string, fallbackModel: string): Promise<void> {
+    if (!threadId) return
+    if (this.promptTokenPressure.has(threadId)) return
+    if (this.hydratedPressureThreads.has(threadId)) return
+    this.hydratedPressureThreads.add(threadId)
+    const loadUsageRecords = this.opts.sessionStore.loadUsageRecords
+    if (typeof loadUsageRecords !== 'function') return
+    try {
+      const records = await loadUsageRecords.call(this.opts.sessionStore, { threadId })
+      let restored: { model: string; promptTokens: number } | undefined
+      for (const record of records) {
+        if (record.threadId !== threadId) continue
+        const promptTokens = Math.floor(record.usage?.promptTokens ?? 0)
+        if (promptTokens > 0) {
+          restored = { model: record.model || fallbackModel, promptTokens }
+        }
+      }
+      if (restored && !this.promptTokenPressure.has(threadId)) {
+        this.promptTokenPressure.set(threadId, restored)
+      }
+    } catch {
+      // Best-effort restore; the estimator + overhead floor still applies.
+    }
   }
 
   private async recordToolCatalogDrift(input: {

@@ -348,7 +348,6 @@ export function Workbench(): ReactElement {
     disabledSkillIds,
     setComposerModel,
     setThreadSearch,
-    setShowArchivedThreads,
     renameThread,
     archiveThread,
     deleteThread,
@@ -406,7 +405,6 @@ export function Workbench(): ReactElement {
       disabledSkillIds: s.disabledSkillIds,
       setComposerModel: s.setComposerModel,
       setThreadSearch: s.setThreadSearch,
-      setShowArchivedThreads: s.setShowArchivedThreads,
       renameThread: s.renameThread,
       archiveThread: s.archiveThread,
       deleteThread: s.deleteThread,
@@ -2283,7 +2281,6 @@ export function Workbench(): ReactElement {
               threadSearch={threadSearch}
               showArchivedThreads={showArchivedThreads}
               onThreadSearchChange={setThreadSearch}
-              onShowArchivedThreadsChange={setShowArchivedThreads}
               onSelectThread={openThread}
               onRenameThread={renameThread}
               onArchiveThread={(id) => archiveThread(id, true)}

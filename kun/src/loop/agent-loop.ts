@@ -270,6 +270,7 @@ function goalContinuationInstruction(goal: ThreadGoal | undefined): string | nul
 const GOAL_NO_TOOL_REPEAT_SIMILARITY = 0.85
 const GOAL_NO_TOOL_REPEAT_MIN_LENGTH = 12
 const GOAL_NO_TOOL_REPEAT_MAX_RECOVERY_STEPS = 3
+const EMPTY_POST_TOOL_MAX_RECOVERY_STEPS = 1
 
 function goalNoToolRecoveryInstruction(recoveryStep: number): string {
   return [
@@ -279,6 +280,15 @@ function goalNoToolRecoveryInstruction(recoveryStep: number): string {
     `- If the objective is actually achieved, call ${UPDATE_GOAL_TOOL_NAME} with status "complete" after verifying the current state.`,
     `- If the strict blocked audit is satisfied, call ${UPDATE_GOAL_TOOL_NAME} with status "blocked".`,
     '- Otherwise, continue with new substantive work or call an available tool to make concrete progress.'
+  ].join('\n')
+}
+
+function emptyPostToolRecoveryInstruction(): string {
+  return [
+    'Tool continuation recovery:',
+    '- The previous model response ended without a final answer after tool execution.',
+    '- Continue the task now: inspect the tool result, call additional tools if needed, or provide a clear final answer.',
+    '- Do not stop with an empty response.'
   ].join('\n')
 }
 
@@ -504,6 +514,7 @@ export class AgentLoop {
   private readonly toolCatalogSnapshots = new Map<string, ToolCatalogSnapshot>()
   private readonly lastNoToolTextByTurn = new Map<string, string>()
   private readonly goalNoToolRecoveryStepsByTurn = new Map<string, number>()
+  private readonly emptyPostToolRecoveryStepsByTurn = new Map<string, number>()
   private readonly turnFailures = new Map<string, TurnFailure>()
   /** Turns that executed at least one real (non-goal-status) tool call. */
   private readonly turnMadeProgress = new Set<string>()
@@ -641,6 +652,7 @@ export class AgentLoop {
       this.lastNoToolTextByTurn.delete(turnId)
       this.goalNoToolRecoveryStepsByTurn.delete(turnId)
       this.turnMadeProgress.delete(turnId)
+      this.emptyPostToolRecoveryStepsByTurn.delete(turnId)
       this.turnFailures.delete(turnId)
       await this.runTurnEndHooks(threadId, turnId, finalStatus ?? 'failed', finalError)
     }
@@ -1161,6 +1173,9 @@ export class AgentLoop {
         ? [goalRecoveryInstruction]
         : []),
       ...(activeTodoInstruction ? [activeTodoInstruction] : []),
+      ...((this.emptyPostToolRecoveryStepsByTurn.get(turnId) ?? 0) > 0
+        ? [emptyPostToolRecoveryInstruction()]
+        : []),
       ...memoryInstructions(memories),
       ...skillResolution.instructions,
       ...(userInputDisabled ? [userInputUnavailableInstruction()] : []),
@@ -1488,6 +1503,52 @@ export class AgentLoop {
         )
         return 'failed'
       }
+      const hasCurrentTurnFileChange = historyItems.some(
+        (item) =>
+          item.turnId === turnId &&
+          item.kind === 'tool_call' &&
+          item.toolKind === 'file_change' &&
+          item.toolName !== CREATE_PLAN_TOOL_NAME
+      )
+      if (
+        stopReason === 'stop' &&
+        !textAccumulator.value.trim() &&
+        hasCurrentTurnFileChange
+      ) {
+        const recoverySteps = (this.emptyPostToolRecoveryStepsByTurn.get(turnId) ?? 0) + 1
+        if (recoverySteps <= EMPTY_POST_TOOL_MAX_RECOVERY_STEPS) {
+          this.emptyPostToolRecoveryStepsByTurn.set(turnId, recoverySteps)
+          return 'continue'
+        }
+
+        const message =
+          'Model stopped without a final answer after tool execution, including after a recovery retry.'
+        this.rememberTurnFailure(turnId, {
+          error: message,
+          code: 'empty_post_tool_continuation',
+          severity: 'error'
+        })
+        await this.opts.events.record({
+          kind: 'error',
+          threadId,
+          turnId,
+          message,
+          code: 'empty_post_tool_continuation',
+          severity: 'error'
+        })
+        await this.opts.turns.applyItem(
+          threadId,
+          makeErrorItem({
+            id: this.opts.ids.next('item_error'),
+            turnId,
+            threadId,
+            message,
+            code: 'empty_post_tool_continuation',
+            severity: 'error'
+          })
+        )
+        return 'failed'
+      }
       if (stopReason === 'stop' && activeGoalInstruction) {
         const previousText = this.lastNoToolTextByTurn.get(turnId)
         if (isRepeatedNoToolAssistantText(previousText, textAccumulator.value)) {
@@ -1532,6 +1593,7 @@ export class AgentLoop {
     // repetition window so unrelated later status texts are not compared.
     this.lastNoToolTextByTurn.delete(turnId)
     this.goalNoToolRecoveryStepsByTurn.delete(turnId)
+    this.emptyPostToolRecoveryStepsByTurn.delete(turnId)
     const dispatched = await this.dispatchToolCalls({
       calls: completedToolCalls,
       threadId,

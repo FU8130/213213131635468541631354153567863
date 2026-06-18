@@ -148,8 +148,14 @@ export function estimateBlockTokens(block: ChatBlock): number {
     case 'system':
       return estimateTokensFromText(block.text ?? '') + estimateDetailTokens(block.detail ?? '')
     case 'tool':
-    case 'compaction':
       return estimateDetailTokens(block.detail ?? '')
+    case 'compaction':
+      // After compaction the runtime drops the folded history and re-sends the
+      // `summary` as a system message — that summary IS the post-compaction
+      // conversation, so it is what occupies the window. `detail` is only the
+      // short pinned-constraints line; counting it alone collapses the whole
+      // conversation to a handful of tokens (the "消息: 7" surprise).
+      return estimateDetailTokens(block.summary ?? '')
     default:
       return 0
   }

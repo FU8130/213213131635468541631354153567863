@@ -132,6 +132,22 @@ describe('estimateBlockTokens', () => {
     ).toBeGreaterThan(0)
   })
 
+  it('counts the compaction summary (re-sent to the model), not just the pinned constraints', () => {
+    // Regression: a compaction block's `detail` is only the short
+    // pinned-constraints line (~a handful of tokens), but the runtime re-sends
+    // the much larger `summary` as a system message. The gauge must count the
+    // summary, else "消息" collapses to ~7 after compaction.
+    const summary = 'Conversation and work summary:\n' + 'point. '.repeat(400)
+    const tokens = estimateBlockTokens({
+      kind: 'compaction',
+      id: 'c1',
+      status: 'success',
+      summary,
+      detail: 'user: preserve recent turns'
+    } as unknown as ChatBlock)
+    expect(tokens).toBeGreaterThan(300)
+  })
+
   it('discounts base64 screenshot payloads instead of counting them as text', () => {
     // A computer_use screenshot tool result: detail is JSON.stringify(output)
     // carrying a huge base64 image. Counting it as text would read as ~100k+

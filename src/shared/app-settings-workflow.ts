@@ -164,14 +164,22 @@ export function normalizeWorkflowNode(value: unknown, index: number): WorkflowNo
   const config = record(n.config)
   switch (kind) {
     case 'manual-trigger':
-      return { ...base, type: 'manual-trigger', config: {} }
+      return { ...base, type: 'manual-trigger', config: { workspaceRoot: asTrimmed(config.workspaceRoot) } }
     case 'schedule-trigger':
-      return { ...base, type: 'schedule-trigger', config: { schedule: normalizeWorkflowSchedule(config.schedule) } }
+      return {
+        ...base,
+        type: 'schedule-trigger',
+        config: { schedule: normalizeWorkflowSchedule(config.schedule), workspaceRoot: asTrimmed(config.workspaceRoot) }
+      }
     case 'webhook-trigger':
       return {
         ...base,
         type: 'webhook-trigger',
-        config: { path: normalizeWebhookPath(config.path), method: normalizeWebhookMethod(config.method) }
+        config: {
+          path: normalizeWebhookPath(config.path),
+          method: normalizeWebhookMethod(config.method),
+          workspaceRoot: asTrimmed(config.workspaceRoot)
+        }
       }
     case 'ai-agent':
       return {

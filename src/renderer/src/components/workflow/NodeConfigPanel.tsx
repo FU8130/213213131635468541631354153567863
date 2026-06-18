@@ -212,6 +212,23 @@ export function NodeConfigPanel({
           />
         </Field>
 
+        {node.type === 'manual-trigger' || node.type === 'schedule-trigger' || node.type === 'webhook-trigger' ? (
+          <Field label={t('workflowTriggerWorkspace')}>
+            <input
+              className={INPUT_CLASS}
+              value={node.config.workspaceRoot ?? ''}
+              placeholder={settings.workspaceRoot || '~/project'}
+              onChange={(event) =>
+                onChange({
+                  ...node,
+                  config: { ...node.config, workspaceRoot: event.target.value }
+                } as WorkflowNodeV1)
+              }
+            />
+            <span className="mt-1 text-[11px] leading-4 text-ds-faint">{t('workflowTriggerWorkspaceHint')}</span>
+          </Field>
+        ) : null}
+
         {node.type === 'schedule-trigger' ? (
           <>
             <Field label={t('workflowScheduleKind')}>

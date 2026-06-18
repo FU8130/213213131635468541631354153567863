@@ -866,7 +866,8 @@ const workflowLoopConfigSchema = z
 const workflowWebhookTriggerConfigSchema = z
   .object({
     path: z.string().max(256).optional(),
-    method: z.enum(['ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE']).optional()
+    method: z.enum(['ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE']).optional(),
+    workspaceRoot: defaultPathSchema
   })
   .strict()
 
@@ -878,12 +879,21 @@ const workflowNodeBaseShape = {
 }
 
 const workflowNodePatchSchema = z.discriminatedUnion('type', [
-  z.object({ ...workflowNodeBaseShape, type: z.literal('manual-trigger'), config: z.object({}).strict().optional() }).strict(),
+  z
+    .object({
+      ...workflowNodeBaseShape,
+      type: z.literal('manual-trigger'),
+      config: z.object({ workspaceRoot: defaultPathSchema }).strict().optional()
+    })
+    .strict(),
   z
     .object({
       ...workflowNodeBaseShape,
       type: z.literal('schedule-trigger'),
-      config: z.object({ schedule: workflowScheduleSchema.optional() }).strict().optional()
+      config: z
+        .object({ schedule: workflowScheduleSchema.optional(), workspaceRoot: defaultPathSchema })
+        .strict()
+        .optional()
     })
     .strict(),
   z

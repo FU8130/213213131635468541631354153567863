@@ -142,6 +142,8 @@
   "workflowNode_http-request": "HTTP request",
   "workflowNode_delay": "Delay",
   "workflowNodeName": "Label",
+  "workflowTriggerWorkspace": "Working directory",
+  "workflowTriggerWorkspaceHint": "Default folder this workflow runs in (used by AI / image / code nodes). Empty uses the app workspace.",
   "workflowScheduleKind": "Trigger type",
   "workflowScheduleKind_manual": "Manual",
   "workflowScheduleKind_interval": "Interval",

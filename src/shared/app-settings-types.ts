@@ -611,10 +611,18 @@ export type WorkflowConditionOperator =
 
 export type WorkflowHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
-export type WorkflowManualTriggerConfigV1 = Record<string, never>
+/**
+ * Triggers carry the run's working directory. When a workflow fires from this
+ * trigger, `workspaceRoot` is the default cwd for AI / image / code nodes
+ * (empty inherits settings.workflow.defaultWorkspaceRoot, then the app workspace).
+ */
+export type WorkflowManualTriggerConfigV1 = {
+  workspaceRoot?: string
+}
 
 export type WorkflowScheduleTriggerConfigV1 = {
   schedule: WorkflowScheduleV1
+  workspaceRoot?: string
 }
 
 export type WorkflowWebhookMethod = 'ANY' | 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -623,6 +631,7 @@ export type WorkflowWebhookTriggerConfigV1 = {
   /** Path (leading slash) the local webhook listener matches, e.g. "/my-hook". */
   path: string
   method: WorkflowWebhookMethod
+  workspaceRoot?: string
 }
 
 export type WorkflowAiAgentConfigV1 = {

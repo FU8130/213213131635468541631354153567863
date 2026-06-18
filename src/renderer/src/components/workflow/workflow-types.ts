@@ -69,15 +69,18 @@ export function createWorkflowNode(
   const base = { id: uid('node'), name: '', position, disabled: false }
   switch (kind) {
     case 'manual-trigger':
-      return { ...base, type: 'manual-trigger', config: {} }
+      return { ...base, type: 'manual-trigger', config: { workspaceRoot: '' } }
     case 'schedule-trigger':
       return {
         ...base,
         type: 'schedule-trigger',
-        config: { schedule: { kind: 'interval', everyMinutes: 60, timeOfDay: '09:00', atTime: '', cron: '' } }
+        config: {
+          schedule: { kind: 'interval', everyMinutes: 60, timeOfDay: '09:00', atTime: '', cron: '' },
+          workspaceRoot: ''
+        }
       }
     case 'webhook-trigger':
-      return { ...base, type: 'webhook-trigger', config: { path: '/webhook', method: 'ANY' } }
+      return { ...base, type: 'webhook-trigger', config: { path: '/webhook', method: 'ANY', workspaceRoot: '' } }
     case 'ai-agent':
       return {
         ...base,

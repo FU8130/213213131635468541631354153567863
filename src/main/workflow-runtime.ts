@@ -555,6 +555,24 @@ export function checkWorkflowCode(language: WorkflowCodeLanguage, code: string):
 }
 
 /**
+ * The run's working directory: the firing trigger's workspaceRoot, else the
+ * workflow-settings default, else the app workspace. Used as the default cwd
+ * for AI / image / code nodes that don't set their own.
+ */
+function resolveRunWorkspace(workflow: WorkflowV1, settings: AppSettingsV1, triggerNodeId?: string): string {
+  const triggers = workflow.nodes.filter(
+    (node) =>
+      node.type === 'manual-trigger' || node.type === 'schedule-trigger' || node.type === 'webhook-trigger'
+  )
+  const trigger = (triggerNodeId ? triggers.find((node) => node.id === triggerNodeId) : undefined) ?? triggers[0]
+  const triggerWorkspace =
+    trigger && typeof (trigger.config as { workspaceRoot?: unknown }).workspaceRoot === 'string'
+      ? (trigger.config as { workspaceRoot: string }).workspaceRoot.trim()
+      : ''
+  return triggerWorkspace || settings.workflow.defaultWorkspaceRoot.trim() || settings.workspaceRoot
+}
+
+/**
  * Resolve where a generate-image node saves its file. Absolute paths are used
  * as-is; relative paths resolve against the workspace; empty defaults to
  * <workspace>/workflow-images.
@@ -746,7 +764,7 @@ export class WorkflowRuntime {
       const live = new Map<string, WorkflowNodeRunStatus>([[nodeId, 'running']])
       this.liveNodeStatus.set(workflowId, live)
       try {
-        await this.executeNode(node, { json: {}, text: '' }, settings)
+        await this.executeNode(node, { json: {}, text: '' }, settings, undefined, 0, resolveRunWorkspace(workflow, settings))
         live.set(nodeId, 'success')
       } catch {
         live.set(nodeId, 'error')
@@ -938,6 +956,7 @@ export class WorkflowRuntime {
     output: WorkflowPayload
   }> {
     const { settings } = ctx
+    const runWorkspace = resolveRunWorkspace(workflow, settings, triggerNodeId)
     const setLive = (nodeId: string, status: WorkflowNodeRunStatus): void => {
       if (ctx.statusWorkflowId) this.setLive(ctx.statusWorkflowId, nodeId, status)
     }
@@ -1034,7 +1053,14 @@ export class WorkflowRuntime {
           setLive(node.id, 'running')
           const nodeStartedAt = new Date()
           try {
-            const produced = await this.executeNode(node, primary, settings, inputs.length ? inputs : [primary], ctx.depth)
+            const produced = await this.executeNode(
+              node,
+              primary,
+              settings,
+              inputs.length ? inputs : [primary],
+              ctx.depth,
+              runWorkspace
+            )
             nodeResults.push({
               nodeId: node.id,
               status: 'success',
@@ -1093,7 +1119,8 @@ export class WorkflowRuntime {
     payload: WorkflowPayload,
     settings: AppSettingsV1,
     inputs: WorkflowPayload[] = [payload],
-    depth = 0
+    depth = 0,
+    runWorkspace = ''
   ): Promise<NodeOutcome> {
     switch (node.type) {
       case 'manual-trigger':
@@ -1113,6 +1140,7 @@ export class WorkflowRuntime {
         )
         const workspace =
           node.config.workspaceRoot.trim() ||
+          runWorkspace ||
           settings.workflow.defaultWorkspaceRoot.trim() ||
           settings.workspaceRoot
         const result = await runPromptViaRuntime(this.deps, settings, {
@@ -1140,7 +1168,11 @@ export class WorkflowRuntime {
         if (!imageGen.baseUrl.trim() || !imageGen.apiKey.trim() || !imageGen.model.trim()) {
           throw new Error('Image generation is missing a provider, API key, or model.')
         }
-        const workspace = (settings.workflow.defaultWorkspaceRoot.trim() || settings.workspaceRoot).trim()
+        const workspace = (
+          runWorkspace ||
+          settings.workflow.defaultWorkspaceRoot.trim() ||
+          settings.workspaceRoot
+        ).trim()
         const outputDir = resolveImageOutputDir(workspace, interpolate(node.config.outputDir, payload))
         // Lazy import keeps the kun image module out of the unit-test graph.
         const { createImageGenClient } = await import('../../kun/src/adapters/tool/image-gen-tool-provider.js')

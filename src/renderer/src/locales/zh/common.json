@@ -142,6 +142,8 @@
   "workflowNode_http-request": "HTTP 请求",
   "workflowNode_delay": "延时等待",
   "workflowNodeName": "标签",
+  "workflowTriggerWorkspace": "工作目录",
+  "workflowTriggerWorkspaceHint": "该工作流运行时的默认目录（AI／图片／代码节点会用到）。留空则使用应用的工作区。",
   "workflowScheduleKind": "触发方式",
   "workflowScheduleKind_manual": "手动",
   "workflowScheduleKind_interval": "间隔",

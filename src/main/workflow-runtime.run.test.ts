@@ -683,6 +683,49 @@ describe('WorkflowRuntime end-to-end execution', () => {
     runtime.stop()
   }, 20_000)
 
+  it('runForHook runs a bound workflow with the hook payload as {{json.*}}', async () => {
+    const workflow = buildWorkflow({
+      id: 'hk',
+      name: 'Hook',
+      enabled: true,
+      nodes: [
+        { id: 'm', type: 'manual-trigger', config: {} },
+        { id: 's', type: 'set-fields', config: { fields: [{ key: 'seen', value: '{{json.call.toolName}}' }], keepIncoming: false } }
+      ],
+      connections: [{ id: 'e1', source: 'm', sourceHandle: 'out', target: 's', targetHandle: 'in' }]
+    })
+    const store = createStore(settingsWithWorkflows([workflow]))
+    const runtime = createWorkflowRuntime({ store: store as never, runtimeRequest: vi.fn() as never, logError: vi.fn() })
+    const result = await runtime.runForHook('hk', { call: { toolName: 'write' } })
+    expect(result.skipped).toBe(false)
+    expect(result.status).toBe('success')
+    expect(result.output).toContain('write')
+    runtime.stop()
+  }, 15_000)
+
+  it('hook runs are reentrancy-guarded so a workflow can not loop via its own edits', async () => {
+    const workflow = buildWorkflow({
+      id: 'hkp',
+      name: 'HookPause',
+      enabled: true,
+      nodes: [
+        { id: 'm', type: 'manual-trigger', config: {} },
+        { id: 'a', type: 'human-approval', config: { title: 'x', instruction: '', timeoutMs: 0, onTimeout: 'rejected' } }
+      ],
+      connections: [{ id: 'e1', source: 'm', sourceHandle: 'out', target: 'a', targetHandle: 'in' }]
+    })
+    const store = createStore(settingsWithWorkflows([workflow]))
+    const runtime = createWorkflowRuntime({ store: store as never, runtimeRequest: vi.fn() as never, logError: vi.fn() })
+    const first = runtime.runForHook('hkp', {}) // pauses at the approval node
+    await waitFor(async () => (await runtime.status()).pendingApprovals.length > 0, 10_000)
+    const second = await runtime.runForHook('hkp', {}) // blocked: a hook run is already active
+    expect(second.skipped).toBe(true)
+    const token = (await runtime.status()).pendingApprovals[0].token
+    runtime.resolveApproval(token, 'approved')
+    await first
+    runtime.stop()
+  }, 20_000)
+
   it('redacts secret env values from the run-level error message and node error', async () => {
     const workflow = buildWorkflow({
       id: 'wf-secret',

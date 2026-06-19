@@ -801,6 +801,9 @@ export class WorkflowRuntime {
   private scheduler: ReturnType<typeof setInterval> | null = null
   private runningWorkflowIds = new Set<string>()
   private cancelRequested = new Set<string>()
+  /** Recursion guard: true while a hook-triggered workflow is running, so its own
+   * tool calls (via AI-agent nodes) don't re-trigger hooks and loop forever. */
+  private hookRunActive = false
   /** token -> paused human-approval node awaiting a decision. */
   private pendingApprovals = new Map<
     string,
@@ -881,8 +884,13 @@ export class WorkflowRuntime {
           return
         }
       }
-      // Internal endpoints used by the GUI-hosted workflow MCP server (agent tool).
-      if (pathname === '/workflow/internal/list' || pathname === '/workflow/internal/run') {
+      // Internal endpoints used by the GUI-hosted workflow MCP server (agent tool)
+      // and the kun hook bridge.
+      if (
+        pathname === '/workflow/internal/list' ||
+        pathname === '/workflow/internal/run' ||
+        pathname === '/workflow/internal/hook-run'
+      ) {
         await this.handleInternalRequest(pathname, req, res, settings)
         return
       }
@@ -968,6 +976,12 @@ export class WorkflowRuntime {
       return
     }
     const workspaceOverride = typeof parsed.workspaceRoot === 'string' ? parsed.workspaceRoot : undefined
+    if (pathname === '/workflow/internal/hook-run') {
+      // The hook payload (the kun invocation) is the workflow input; nodes read it via {{json.*}}.
+      const result = await this.runForHook(idOrName, parsed.payload ?? parsed.input, workspaceOverride)
+      writeJson(res, 200, result)
+      return
+    }
     const result = await this.runWorkflowForTool(idOrName, parsed.input, workspaceOverride)
     writeJson(res, result.ok ? 200 : 400, result)
   }
@@ -987,6 +1001,33 @@ export class WorkflowRuntime {
       return { ok: false, status: 'error', message: `No agent-callable workflow matches "${idOrName}".`, output: '', runId: '' }
     }
     return this.runResolved(workflow, input, workspaceOverride)
+  }
+
+  /**
+   * Run a workflow triggered by a kun agent hook. Resolves by id (no callableByAgent
+   * gate — the trigger binding is the gate). Reentrancy-guarded: while one hook run is
+   * in flight, further hook runs are skipped so a workflow that edits files can't loop.
+   */
+  async runForHook(
+    workflowId: string,
+    input: unknown,
+    workspaceOverride?: string
+  ): Promise<{ ok: boolean; status: WorkflowRunStatus; message: string; output: string; runId: string; skipped: boolean }> {
+    if (this.hookRunActive) {
+      return { ok: true, status: 'success', message: 'skipped (hook already running)', output: '', runId: '', skipped: true }
+    }
+    const settings = await this.deps.store.load()
+    const workflow = settings.workflow.workflows.find((item) => item.id === workflowId)
+    if (!workflow) {
+      return { ok: false, status: 'error', message: `Hook workflow "${workflowId}" not found.`, output: '', runId: '', skipped: false }
+    }
+    this.hookRunActive = true
+    try {
+      const result = await this.runResolved(workflow, input, workspaceOverride)
+      return { ...result, skipped: false }
+    } finally {
+      this.hookRunActive = false
+    }
   }
 
   /** Run any workflow by id or name (no callableByAgent gate) — for the local POST /workflow/run API. */

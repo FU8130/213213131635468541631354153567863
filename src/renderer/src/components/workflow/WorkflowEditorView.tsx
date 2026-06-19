@@ -245,23 +245,23 @@ function WorkflowEditorInner({
 
   const addConnectedNode = useCallback(
     (kind: WorkflowNodeKind) => {
-      setConnectMenu((menu) => {
-        if (!menu) return null
-        const node = createWorkflowNode(kind, menu.flowPos)
-        setRfNodes((nodes) => [...nodes, { id: node.id, type: node.type, position: node.position, data: { node } }])
-        setRfEdges(
-          (edges) =>
-            addEdge(
-              { source: menu.sourceId, sourceHandle: menu.sourceHandle, target: node.id, targetHandle: 'in' },
-              edges
-            ) as WorkflowFlowEdge[]
-        )
-        setSelectedNodeId(node.id)
-        setDirty(true)
-        return null
-      })
+      // Compute the node ONCE here, not inside a setState updater: React double-invokes
+      // updaters (StrictMode/concurrent), which would create the node + edge twice.
+      if (!connectMenu) return
+      const node = createWorkflowNode(kind, connectMenu.flowPos)
+      setRfNodes((nodes) => [...nodes, { id: node.id, type: node.type, position: node.position, data: { node } }])
+      setRfEdges(
+        (edges) =>
+          addEdge(
+            { source: connectMenu.sourceId, sourceHandle: connectMenu.sourceHandle, target: node.id, targetHandle: 'in' },
+            edges
+          ) as WorkflowFlowEdge[]
+      )
+      setSelectedNodeId(node.id)
+      setDirty(true)
+      setConnectMenu(null)
     },
-    []
+    [connectMenu]
   )
 
   const insertNode = useCallback((kind: WorkflowNodeKind, position: { x: number; y: number }) => {

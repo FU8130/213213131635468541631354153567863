@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Bot, Download, Pencil, Play, Plus, Power, Trash2, Upload, Workflow as WorkflowIcon, X, Zap } from 'lucide-react'
+import { Bot, Download, Pencil, Play, Plus, Power, Square, Trash2, Upload, Workflow as WorkflowIcon, X, Zap } from 'lucide-react'
 import {
   mergeWorkflowSettings,
   normalizeWorkflowSettings,
@@ -456,11 +456,15 @@ export function WorkflowView({ leftSidebarCollapsed, onToggleLeftSidebar }: Prop
                 return (
                   <div
                     key={workflow.id}
-                    className="flex flex-col gap-3 rounded-2xl border border-ds-border bg-ds-card px-4 py-4 shadow-sm"
+                    className="flex flex-col gap-3 rounded-2xl border border-ds-border bg-ds-card px-4 py-3.5 shadow-sm"
                   >
+                    {/* Title + status + the row's real actions (run / export / edit / delete). */}
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
+                          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-accent">
+                            <WorkflowIcon className="h-4 w-4" strokeWidth={1.9} />
+                          </span>
                           <h3 className="truncate text-[15px] font-semibold text-ds-ink">
                             {workflow.name || t('workflowUntitled')}
                           </h3>
@@ -468,59 +472,29 @@ export function WorkflowView({ leftSidebarCollapsed, onToggleLeftSidebar }: Prop
                             {t(`workflowStatus_${lastStatus}`)}
                           </span>
                         </div>
-                        <p className="mt-1 text-[12px] text-ds-faint">
+                        <p className="mt-1 pl-9 text-[12px] text-ds-faint">
                           {t('workflowNodeCount', { count: workflow.nodes.length })} ·{' '}
                           {t('workflowLastRun')}: {formatDateTime(workflow.lastRunAt, t('workflowNeverRun'))}
                         </p>
                       </div>
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => void handleToggleCallable(workflow.id, !workflow.callableByAgent)}
-                          className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition ${
-                            workflow.callableByAgent
-                              ? 'border-accent/40 bg-accent/10 text-accent'
-                              : 'border-ds-border text-ds-muted hover:bg-ds-hover'
-                          }`}
-                          title={t('workflowCallableByAgent')}
-                          aria-label={t('workflowCallableByAgent')}
-                        >
-                          <Bot className="h-4 w-4" strokeWidth={1.8} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleToggleEnabled(workflow.id, !workflow.enabled)}
-                          className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition ${
-                            workflow.enabled
-                              ? 'border-accent/40 bg-accent/10 text-accent'
-                              : 'border-ds-border text-ds-muted hover:bg-ds-hover'
-                          }`}
-                          title={t('workflowEnabled')}
-                          aria-label={t('workflowEnabled')}
-                        >
-                          <Power className="h-4 w-4" strokeWidth={1.8} />
-                        </button>
+                      <div className="flex shrink-0 items-center gap-1">
                         <button
                           type="button"
                           onClick={() => (running ? void handleStop(workflow.id) : requestRun(workflow))}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-ds-border bg-ds-card px-3 text-[12.5px] font-medium text-ds-ink transition hover:bg-ds-hover"
+                          className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[12.5px] font-semibold transition ${
+                            running
+                              ? 'bg-red-500/90 text-white hover:bg-red-500'
+                              : 'bg-ds-userbubble text-ds-userbubbleFg shadow-sm hover:opacity-90'
+                          }`}
                         >
-                          <Play className="h-3.5 w-3.5" strokeWidth={1.9} />
-                          {t('workflowRunNow')}
+                          {running ? <Square className="h-3.5 w-3.5" strokeWidth={2.2} /> : <Play className="h-3.5 w-3.5" strokeWidth={2} />}
+                          {running ? t('workflowStop') : t('workflowRunNow')}
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => handleExport(workflow)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ds-border text-ds-muted transition hover:bg-ds-hover hover:text-ds-ink"
-                          title={t('workflowExport')}
-                          aria-label={t('workflowExport')}
-                        >
-                          <Download className="h-4 w-4" strokeWidth={1.8} />
-                        </button>
+                        <span className="mx-0.5 h-5 w-px bg-ds-border" />
                         <button
                           type="button"
                           onClick={() => setEditingId(workflow.id)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ds-border text-ds-muted transition hover:bg-ds-hover hover:text-ds-ink"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-ds-muted transition hover:bg-ds-hover hover:text-ds-ink"
                           title={t('workflowEdit')}
                           aria-label={t('workflowEdit')}
                         >
@@ -528,8 +502,17 @@ export function WorkflowView({ leftSidebarCollapsed, onToggleLeftSidebar }: Prop
                         </button>
                         <button
                           type="button"
+                          onClick={() => handleExport(workflow)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-ds-muted transition hover:bg-ds-hover hover:text-ds-ink"
+                          title={t('workflowExport')}
+                          aria-label={t('workflowExport')}
+                        >
+                          <Download className="h-4 w-4" strokeWidth={1.8} />
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => void handleDelete(workflow.id)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ds-border text-ds-muted transition hover:bg-red-500/10 hover:text-red-600"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-ds-muted transition hover:bg-red-500/10 hover:text-red-600"
                           title={t('workflowDelete')}
                           aria-label={t('workflowDelete')}
                         >
@@ -537,6 +520,7 @@ export function WorkflowView({ leftSidebarCollapsed, onToggleLeftSidebar }: Prop
                         </button>
                       </div>
                     </div>
+
                     {workflow.lastMessage.trim() ? (
                       <p className="rounded-lg bg-ds-subtle px-3 py-2 text-[12.5px] text-ds-muted">
                         <span className="font-medium text-ds-faint">{t('workflowLastResult')}: </span>
@@ -545,6 +529,25 @@ export function WorkflowView({ leftSidebarCollapsed, onToggleLeftSidebar }: Prop
                           : workflow.lastMessage}
                       </p>
                     ) : null}
+
+                    {/* State switches — kept visually distinct from the actions above. */}
+                    <div className="flex flex-wrap items-center gap-x-1 gap-y-1 border-t border-ds-border pt-2.5">
+                      <WorkflowToggle
+                        on={workflow.enabled}
+                        onClick={() => void handleToggleEnabled(workflow.id, !workflow.enabled)}
+                        label={t('workflowEnableShort')}
+                        title={t('workflowEnableHint')}
+                        icon={<Power className="h-3.5 w-3.5" strokeWidth={1.9} />}
+                      />
+                      <WorkflowToggle
+                        on={workflow.callableByAgent}
+                        disabled={!workflow.enabled}
+                        onClick={() => void handleToggleCallable(workflow.id, !workflow.callableByAgent)}
+                        label={t('workflowCallableShort')}
+                        title={workflow.enabled ? t('workflowCallableHint') : t('workflowCallableNeedsEnable')}
+                        icon={<Bot className="h-3.5 w-3.5" strokeWidth={1.9} />}
+                      />
+                    </div>
                   </div>
                 )
               })}
@@ -574,6 +577,55 @@ export function WorkflowView({ leftSidebarCollapsed, onToggleLeftSidebar }: Prop
         />
       ) : null}
     </div>
+  )
+}
+
+/** A labelled on/off switch for a workflow's state flags (enabled / AI-callable). */
+function WorkflowToggle({
+  on,
+  onClick,
+  label,
+  title,
+  icon,
+  disabled = false
+}: {
+  on: boolean
+  onClick: () => void
+  label: string
+  title?: string
+  icon: ReactElement
+  disabled?: boolean
+}): ReactElement {
+  const active = on && !disabled
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className={`inline-flex items-center gap-2 rounded-lg px-2 py-1 transition ${
+        disabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-ds-hover'
+      }`}
+    >
+      <span
+        className={`flex h-[18px] w-8 shrink-0 items-center rounded-full p-0.5 transition-colors ${
+          active ? 'bg-accent' : 'bg-ds-border'
+        }`}
+      >
+        <span
+          className={`h-[14px] w-[14px] rounded-full bg-white shadow-sm transition-transform ${
+            on ? 'translate-x-[14px]' : 'translate-x-0'
+          }`}
+        />
+      </span>
+      <span className={`flex items-center gap-1 text-[12.5px] font-medium ${active ? 'text-ds-ink' : 'text-ds-muted'}`}>
+        {icon}
+        {label}
+      </span>
+    </button>
   )
 }
 

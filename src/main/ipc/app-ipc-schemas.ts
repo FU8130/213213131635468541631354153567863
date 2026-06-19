@@ -1126,6 +1126,14 @@ export const workflowRunNodePayloadSchema = z
   })
   .strict()
 
+export const workflowTestNodePayloadSchema = z
+  .object({
+    workflowId: trimmedString(MAX_ID_LENGTH),
+    nodeId: trimmedString(MAX_ID_LENGTH),
+    mockJson: z.string().max(MAX_BODY_BYTES)
+  })
+  .strict()
+
 export const workflowCodeCheckPayloadSchema = z
   .object({
     language: z.enum(['javascript', 'python', 'bash']),

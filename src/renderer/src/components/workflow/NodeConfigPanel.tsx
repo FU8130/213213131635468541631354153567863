@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Braces, Plus, Star, Trash2, X } from 'lucide-react'
+import { Braces, FlaskConical, Loader2, Plus, Star, Trash2, X } from 'lucide-react'
 import { ModelPicker } from './ModelPicker'
 import {
   SCHEDULE_REASONING_EFFORT_IDS,
@@ -73,6 +73,10 @@ type Props = {
   workflowName?: string
   /** Upstream nodes reachable from this one, for the {{$nodes.*}} variable picker. */
   upstreamNodes?: { id: string; name: string; type: WorkflowNodeV1['type'] }[]
+  /** Id of the workflow this node belongs to, for single-node testing. */
+  workflowId?: string
+  /** Persist the graph before a single-node test (so the test sees the latest config). */
+  onBeforeTest?: () => Promise<void>
 }
 
 function Field({
@@ -348,13 +352,16 @@ export function NodeConfigPanel({
   onDelete,
   onSavePreset,
   workflowName,
-  upstreamNodes = []
+  upstreamNodes = [],
+  workflowId,
+  onBeforeTest
 }: Props): ReactElement {
   const { t } = useTranslation('common')
 
   const [presetLabel, setPresetLabel] = useState('')
   const [presetSaved, setPresetSaved] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [testOpen, setTestOpen] = useState(false)
   // Tracks the most recently focused text field so the variable picker can splice a token at its caret.
   const lastFocused = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null)
 
@@ -419,6 +426,17 @@ export function NodeConfigPanel({
           {t(`workflowNode_${node.type}`)}
         </h2>
         <div className="flex items-center gap-1.5">
+          {!node.type.endsWith('-trigger') && workflowId ? (
+            <button
+              type="button"
+              onClick={() => setTestOpen(true)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ds-border text-ds-muted transition hover:bg-ds-hover hover:text-ds-ink"
+              title={t('workflowTestNode')}
+              aria-label={t('workflowTestNode')}
+            >
+              <FlaskConical className="h-4 w-4" strokeWidth={1.8} />
+            </button>
+          ) : null}
           {!node.type.endsWith('-trigger') ? (
             <div className="relative">
               <button
@@ -1779,6 +1797,118 @@ export function NodeConfigPanel({
             </pre>
           </div>
         ) : null}
+      </div>
+
+      {testOpen && workflowId ? (
+        <TestNodeDialog
+          workflowId={workflowId}
+          node={node}
+          initialMock={lastResult?.inputJson || '{}'}
+          onBeforeTest={onBeforeTest}
+          onClose={() => setTestOpen(false)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/** Run one node in isolation against a mock upstream payload and show its result. */
+function TestNodeDialog({
+  workflowId,
+  node,
+  initialMock,
+  onBeforeTest,
+  onClose
+}: {
+  workflowId: string
+  node: WorkflowNodeV1
+  initialMock: string
+  onBeforeTest?: () => Promise<void>
+  onClose: () => void
+}): ReactElement {
+  const { t } = useTranslation('common')
+  const [mock, setMock] = useState(initialMock)
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<WorkflowNodeRunResultV1 | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async (): Promise<void> => {
+    setRunning(true)
+    setError(null)
+    setResult(null)
+    try {
+      await onBeforeTest?.()
+      const response = await window.kunGui.testWorkflowNode(workflowId, node.id, mock)
+      if (response.ok) setResult(response.result)
+      else setError(response.message)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
+      <div
+        className="flex max-h-[80vh] w-[520px] flex-col overflow-hidden rounded-2xl border border-ds-border bg-ds-bg shadow-xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center justify-between border-b border-ds-border px-5 py-3.5">
+          <div className="flex items-center gap-2">
+            <FlaskConical className="h-4 w-4 text-ds-muted" strokeWidth={1.8} />
+            <span className="text-[14px] font-semibold text-ds-ink">{t('workflowTestNode')}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-ds-faint transition hover:bg-ds-hover hover:text-ds-ink"
+          >
+            <X className="h-4 w-4" strokeWidth={1.8} />
+          </button>
+        </header>
+        <div className="flex flex-col gap-3 overflow-y-auto px-5 py-4">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[12px] font-medium text-ds-muted">{t('workflowTestMock')}</span>
+            <span className="text-[11px] text-ds-faint">{t('workflowTestMockHint')}</span>
+            <textarea
+              className={`${INPUT_CLASS} min-h-[120px] resize-y font-mono text-[12px]`}
+              value={mock}
+              onChange={(event) => setMock(event.target.value)}
+              spellCheck={false}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => void run()}
+            disabled={running}
+            className="inline-flex items-center justify-center gap-2 self-start rounded-xl bg-ds-userbubble px-4 py-2 text-[13px] font-semibold text-ds-userbubbleFg shadow-sm transition hover:opacity-90 disabled:opacity-60"
+          >
+            {running ? <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} /> : <FlaskConical className="h-4 w-4" strokeWidth={1.9} />}
+            {t('workflowTestRun')}
+          </button>
+          {error ? (
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-red-500/10 px-3 py-2 text-[11.5px] leading-5 text-red-600">
+              {error}
+            </pre>
+          ) : null}
+          {result ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-[12px]">
+                <span
+                  className={`h-2 w-2 rounded-full ${result.status === 'error' ? 'bg-red-500' : 'bg-emerald-500'}`}
+                />
+                <span className="font-medium text-ds-ink">
+                  {result.status === 'error' ? t('workflowRunStatus_error') : t('workflowRunStatus_success')}
+                </span>
+                {result.message ? <span className="truncate text-ds-faint">{result.message}</span> : null}
+              </div>
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-ds-subtle px-3 py-2 font-mono text-[11.5px] leading-5 text-ds-muted">
+                {result.error || result.outputJson || result.message || '—'}
+              </pre>
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )

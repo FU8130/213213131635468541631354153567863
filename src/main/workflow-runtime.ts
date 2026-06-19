@@ -16,6 +16,7 @@ import type {
   WorkflowHttpRequestConfigV1,
   WorkflowInputFieldV1,
   WorkflowNodeRunResultV1,
+  WorkflowNodeTestResult,
   WorkflowNodeRunStatus,
   WorkflowNodeV1,
   WorkflowRunResult,
@@ -1087,6 +1088,81 @@ export class WorkflowRuntime {
       }
     })()
     return { ok: true, runId, status: 'running', message: 'Started' }
+  }
+
+  /** Run a single node in isolation against a mock upstream payload, returning its result (not persisted). */
+  async testNode(workflowId: string, nodeId: string, mockJson: string): Promise<WorkflowNodeTestResult> {
+    const settings = await this.deps.store.load()
+    const workflow = settings.workflow.workflows.find((item) => item.id === workflowId)
+    if (!workflow) return { ok: false, message: 'Workflow not found.' }
+    const node = workflow.nodes.find((item) => item.id === nodeId)
+    if (!node) return { ok: false, message: 'Node not found.' }
+    if (node.type.endsWith('-trigger')) return { ok: false, message: 'Trigger nodes cannot be tested.' }
+
+    let mockValue: unknown = {}
+    const trimmed = mockJson.trim()
+    if (trimmed) {
+      try {
+        mockValue = JSON.parse(trimmed)
+      } catch {
+        mockValue = trimmed
+      }
+    }
+    const payload: WorkflowPayload = {
+      json: mockValue,
+      text: typeof mockValue === 'string' ? mockValue : safeJson(mockValue)
+    }
+    const env = resolveEnv(workflow.env)
+    const secretValues = workflow.env
+      .filter((entry) => entry.type === 'secret' && entry.value.trim())
+      .map((entry) => entry.value)
+    const redact = (text: string): string => secretValues.reduce((acc, secret) => acc.split(secret).join('***'), text)
+    const scope: InterpScope = { nodes: {}, env, run: {} }
+    const startedAt = new Date()
+    const inputJson = redact(safeJson(payload.json))
+    try {
+      const outcome = await this.executeNode(
+        node,
+        payload,
+        settings,
+        [payload],
+        0,
+        resolveRunWorkspace(workflow, settings),
+        scope,
+        {}
+      )
+      return {
+        ok: true,
+        result: {
+          nodeId,
+          status: 'success',
+          startedAt: startedAt.toISOString(),
+          finishedAt: new Date().toISOString(),
+          message: redact(outcome.message),
+          outputJson: redact(safeJson(outcome.payload.json)),
+          inputJson,
+          retries: 0,
+          threadId: outcome.threadId ?? '',
+          error: ''
+        }
+      }
+    } catch (error) {
+      return {
+        ok: true,
+        result: {
+          nodeId,
+          status: 'error',
+          startedAt: startedAt.toISOString(),
+          finishedAt: new Date().toISOString(),
+          message: '',
+          outputJson: '',
+          inputJson,
+          retries: 0,
+          threadId: '',
+          error: redact(error instanceof Error ? error.message : String(error))
+        }
+      }
+    }
   }
 
   private startScheduler(): void {

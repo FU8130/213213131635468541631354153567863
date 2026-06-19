@@ -1006,6 +1006,11 @@ export type WorkflowNodeRunResultV1 = {
   error: string
 }
 
+/** Result of a single-node test run (not persisted to history). */
+export type WorkflowNodeTestResult =
+  | { ok: true; result: WorkflowNodeRunResultV1 }
+  | { ok: false; message: string }
+
 export type WorkflowRunV1 = {
   id: string
   /** 'manual' | 'schedule' | trigger node id. */

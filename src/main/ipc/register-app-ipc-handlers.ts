@@ -15,6 +15,7 @@ import {
   type ScheduleRuntimeStatus,
   type ScheduleTaskFromTextResult,
   type WorkflowCodeCheckResult,
+  type WorkflowNodeTestResult,
   type WorkflowRunResult,
   type WorkflowRuntimeStatus
 } from '../../shared/app-settings'
@@ -62,6 +63,7 @@ import {
   settingsPatchSchema,
   streamIdSchema,
   workflowRunNodePayloadSchema,
+  workflowTestNodePayloadSchema,
   workflowCodeCheckPayloadSchema,
   uiPluginIdPayloadSchema,
   workspaceDirectoryCreatePayloadSchema,
@@ -535,6 +537,13 @@ export function registerAppIpcHandlers(options: RegisterAppIpcHandlersOptions): 
     const workflowRuntime = getWorkflowRuntime()
     if (!workflowRuntime) return { ok: false, message: 'Workflow runtime is not initialized.' }
     return workflowRuntime.runSingleNode(request.workflowId, request.nodeId)
+  })
+
+  ipcMain.handle('workflow:node:test', async (_, payload: unknown): Promise<WorkflowNodeTestResult> => {
+    const request = parseIpcPayload('workflow:node:test', workflowTestNodePayloadSchema, payload)
+    const workflowRuntime = getWorkflowRuntime()
+    if (!workflowRuntime) return { ok: false, message: 'Workflow runtime is not initialized.' }
+    return workflowRuntime.testNode(request.workflowId, request.nodeId, request.mockJson)
   })
 
   ipcMain.handle('workflow:code:check', async (_, payload: unknown): Promise<WorkflowCodeCheckResult> => {

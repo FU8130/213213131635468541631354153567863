@@ -739,6 +739,8 @@ function WorkflowEditorInner({
             onSavePreset={handleSavePreset}
             workflowName={name}
             upstreamNodes={upstreamNodes}
+            workflowId={workflow.id}
+            onBeforeTest={handleSave}
           />
         </aside>
         ) : null}

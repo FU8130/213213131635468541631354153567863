@@ -9,9 +9,12 @@ import { promisify } from 'node:util'
 import {
   defaultKunTokenEconomySettings,
   isKunRuntimeInsecure,
+  getKunRuntimeSettings,
+  getModelProviderSettings,
   resolveModelProviderProxyUrl,
   resolveKunRuntimeSettings,
   type ModelProviderModelProfileV1,
+  type ModelProviderProfileV1,
   type KunRuntimeSettingsV1,
   type AppSettingsV1
 } from '../shared/app-settings'
@@ -432,11 +435,20 @@ export async function syncGuiManagedKunConfig(
   const mcpSearch = runtime.mcpSearch
   const skillCapability = await skillCapabilityConfigForRuntime(skills, options?.scheduleMcp?.settings)
   const workflowHookEntries = buildWorkflowHookEntries(options?.scheduleMcp?.settings.workflow)
+  // Mirror every configured GUI provider (apiKey + baseUrl + endpointFormat)
+  // into the kun config so the runtime's MultiProviderModelClient can route
+  // per-request `providerId` overrides (workflow / scheduled task / IM
+  // bridge) without restart. Empty when no GUI settings are reachable, in
+  // which case the runtime stays single-provider.
+  const providers = options?.scheduleMcp?.settings
+    ? providersConfigForRuntime(options.scheduleMcp.settings)
+    : undefined
   const next = {
     serve: {
       ...serve,
       storage,
-      tokenEconomy: tokenEconomyConfigForRuntime(runtime.tokenEconomy, existingTokenEconomy)
+      tokenEconomy: tokenEconomyConfigForRuntime(runtime.tokenEconomy, existingTokenEconomy),
+      ...(providers && Object.keys(providers).length ? { providers } : {})
     },
     models: modelConfigForRuntime(existingModels, runtime.modelProfiles),
     contextCompaction: contextCompactionConfigForRuntime(runtime.contextCompaction, existingContextCompaction),
@@ -714,6 +726,39 @@ function modelConfigProfilesFromProviderProfiles(
       messageParts: profile.messageParts,
       ...(profile.reasoning ? { reasoning: profile.reasoning } : {}),
       ...(profile.endpointFormat ? { endpointFormat: profile.endpointFormat } : {})
+    }
+  }
+  return out
+}
+
+/**
+ * Mirror every configured GUI provider (apiKey + baseUrl + endpointFormat
+ * + per-provider proxy) into the kun config's `serve.providers` map so the
+ * runtime's MultiProviderModelClient can route a workflow / scheduled-task
+ * / IM-bridge turn to a non-runtime provider per request. Skips entries
+ * whose baseUrl is empty — those couldn't be reached anyway.
+ *
+ * The kun runtime's own bound provider is included too; the wrapper's
+ * default client handles it identically, so duplicate entries are
+ * idempotent.
+ */
+function providersConfigForRuntime(settings: AppSettingsV1): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {}
+  const runtimeProviderId = getKunRuntimeSettings(settings).providerId.trim()
+  const proxyUrl = resolveModelProviderProxyUrl(settings)
+  for (const provider of getModelProviderSettings(settings).providers as ModelProviderProfileV1[]) {
+    const id = provider.id?.trim()
+    const baseUrl = provider.baseUrl?.trim()
+    if (!id || !baseUrl) continue
+    // The runtime's own provider is already wired via the default CLI args;
+    // skipping it keeps the map smaller and avoids paying twice for one
+    // provider that happens to be the active runtime binding.
+    if (id === runtimeProviderId) continue
+    out[id] = {
+      apiKey: provider.apiKey?.trim() ?? '',
+      baseUrl,
+      ...(provider.endpointFormat ? { endpointFormat: provider.endpointFormat } : {}),
+      ...(proxyUrl ? { modelProxyUrl: proxyUrl } : {})
     }
   }
   return out

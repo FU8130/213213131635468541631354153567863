@@ -1161,4 +1161,92 @@ describe('WorkflowRuntime end-to-end execution', () => {
     expect((JSON.parse(tpl.outputJson) as { text: string }).text).toBe('got hi')
     runtime.stop()
   }, 15_000)
+
+  it('ai-agent node forwards the picked providerId on POST /v1/threads', async () => {
+    // The workflow node UI lets the user pick a non-runtime provider per
+    // request. The runtime helper must put that providerId on the body so
+    // Kun's MultiProviderModelClient routes the turn to the matching
+    // per-provider HTTP client. Without this the runtime would silently
+    // fall back to its bound provider — the bug behind the original
+    // "Not supported model MiniMax-M3" report.
+    const captured: { body: Record<string, unknown> | null } = { body: null }
+    const runtimeRequest = vi.fn(async (
+      _settings: AppSettingsV1,
+      pathAndQuery: string,
+      init: { body?: string }
+    ) => {
+      if (pathAndQuery === '/v1/threads') {
+        captured.body = JSON.parse(init.body ?? '{}') as Record<string, unknown>
+        return { ok: true, status: 200, body: JSON.stringify({ id: 'thread-1' }) }
+      }
+      if (pathAndQuery.includes('/turns')) {
+        return { ok: true, status: 200, body: JSON.stringify({ turn: { id: 'turn-1' } }) }
+      }
+      if (pathAndQuery.startsWith('/v1/threads/')) {
+        return {
+          ok: true,
+          status: 200,
+          body: JSON.stringify({
+            turns: [
+              {
+                id: 'turn-1',
+                status: 'completed',
+                items: [{ kind: 'assistant_text', text: 'ok', turnId: 'turn-1' }]
+              }
+            ]
+          })
+        }
+      }
+      return { ok: false, status: 404, body: '{}' }
+    })
+
+    const baseSettings = settingsWithWorkflows([
+      buildWorkflow({
+        id: 'wf-mm',
+        name: 'MiniMaxThread',
+        enabled: true,
+        nodes: [
+          { id: 'm', type: 'manual-trigger', config: {} },
+          {
+            id: 'a',
+            type: 'ai-agent',
+            config: { prompt: 'say hi', model: 'MiniMax-M3', providerId: 'minimax-token-plan' }
+          }
+        ],
+        connections: [{ id: 'e1', source: 'm', sourceHandle: 'out', target: 'a', targetHandle: 'in' }]
+      })
+    ])
+    const settings: AppSettingsV1 = {
+      ...baseSettings,
+      provider: {
+        ...baseSettings.provider,
+        providers: [
+          ...baseSettings.provider.providers,
+          {
+            id: 'minimax-token-plan',
+            name: 'MiniMax Token Plan',
+            apiKey: 'sk-mm',
+            baseUrl: 'https://api.minimaxi.com/anthropic',
+            endpointFormat: 'messages',
+            models: ['MiniMax-M3'],
+            modelProfiles: {}
+          }
+        ]
+      }
+    }
+    const store = createStore(settings)
+    const runtime = createWorkflowRuntime({ store: store as never, runtimeRequest: runtimeRequest as never, logError: vi.fn() })
+
+    const runId = requireOk(await runtime.runWorkflow('wf-mm'))
+    await waitFor(async () => {
+      const run = (await store.load()).workflow.workflows[0].runs.find((entry) => entry.id === runId)
+      return Boolean(run && run.status !== 'running')
+    }, 10_000)
+
+    expect(captured.body).not.toBeNull()
+    expect(captured.body?.providerId).toBe('minimax-token-plan')
+    expect(captured.body?.model).toBe('MiniMax-M3')
+
+    runtime.stop()
+  }, 15_000)
 })

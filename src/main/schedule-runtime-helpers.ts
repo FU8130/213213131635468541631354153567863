@@ -73,6 +73,8 @@ export type RunPromptOptions = {
   title: string
   workspaceRoot: string
   model: string
+  /** Optional provider id; routed via Kun's MultiProviderModelClient. */
+  providerId?: string
   reasoningEffort: ScheduleReasoningEffort
   mode: ScheduleRunMode
   clawChannel?: ClawImChannelV1 | null
@@ -324,6 +326,14 @@ export type RunPromptViaRuntimeOptions = {
   /** Resolved workspace path (callers apply the default fallback). */
   workspaceRoot: string
   model: string
+  /**
+   * Optional provider id override. Forwarded to Kun's `POST /v1/threads` so
+   * the thread (and every turn on it) routes its model request through the
+   * kun-config `serve.providers[providerId]` HTTP client. Omitted or
+   * matching the runtime's bound provider → use the runtime default (no
+   * behavior change).
+   */
+  providerId?: string
   reasoningEffort: ScheduleReasoningEffort | ''
   mode: ScheduleRunMode
   waitForResult: boolean
@@ -340,12 +350,14 @@ export async function runPromptViaRuntime(
     await mkdir(workspace, { recursive: true })
   }
   const model = normalizeTaskModel(options.model) ?? (settings.agents.kun.model.trim() || DEFAULT_SCHEDULE_MODEL)
+  const providerId = options.providerId?.trim()
   const create = await deps.runtimeRequest(settings, '/v1/threads', {
     method: 'POST',
     body: JSON.stringify({
       workspace,
       model,
       mode: options.mode,
+      ...(providerId ? { providerId } : {}),
       ...(options.title.trim() ? { title: options.title.trim() } : {})
     })
   })

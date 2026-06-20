@@ -37,6 +37,12 @@ type LocalWhisperDownloadSource = (typeof LOCAL_WHISPER_DOWNLOAD_SOURCES)[number
 let downloadPromise: Promise<LocalWhisperModelDownloadResult> | null = null
 let progressEmitter: ((progress: LocalWhisperModelProgress) => void) | null = null
 let lastProgress: LocalWhisperModelProgress | null = null
+let activeDownload: {
+  modelId: LocalWhisperModelId
+  controller: AbortController
+  tempPath: string
+  canceled: boolean
+} | null = null
 
 type RunnerCommand = {
   command: string
@@ -55,6 +61,9 @@ export async function getLocalWhisperModelStatus(
   const model = localWhisperModelById(modelId)
   const diskStatus = await readLocalWhisperDiskStatus(model)
   if (diskStatus) return diskStatus
+  if (activeDownload?.modelId === model.id && activeDownload.canceled) {
+    return baseStatus(model.id, 'not_downloaded')
+  }
   if (downloadPromise && lastProgress?.modelId === model.id) {
     return baseStatus(model.id, 'downloading', {
       downloadedBytes: lastProgress.downloadedBytes,
@@ -94,6 +103,19 @@ export async function downloadLocalWhisperModel(
       lastProgress = null
     })
   return downloadPromise
+}
+
+export async function cancelLocalWhisperModel(
+  modelId: unknown = LOCAL_WHISPER_DEFAULT_MODEL_ID
+): Promise<LocalWhisperModelDownloadResult> {
+  const model = localWhisperModelById(modelId)
+  if (!activeDownload || activeDownload.modelId !== model.id) {
+    return { ok: true, status: await getLocalWhisperModelStatus(model.id) }
+  }
+  activeDownload.canceled = true
+  activeDownload.controller.abort()
+  await rm(activeDownload.tempPath, { force: true }).catch(() => undefined)
+  return { ok: true, status: baseStatus(model.id, 'not_downloaded') }
 }
 
 export async function checkLocalWhisperDownloadSources(
@@ -198,6 +220,12 @@ async function downloadModelFromSource(
   }
   try {
     await mkdir(dirname(target), { recursive: true })
+    activeDownload = {
+      modelId: model.id,
+      controller,
+      tempPath,
+      canceled: false
+    }
     connectTimer = setTimeout(() => {
       timeoutMessage = `local Whisper model download did not connect within ${Math.round(LOCAL_WHISPER_DOWNLOAD_CONNECT_TIMEOUT_MS / 1000)} seconds`
       controller.abort()
@@ -265,8 +293,12 @@ async function downloadModelFromSource(
     )
     return { ok: true, status: await getLocalWhisperModelStatus(model.id) }
   } catch (error) {
+    const canceled = activeDownload?.modelId === model.id && activeDownload.canceled
     clearTimers()
     await rm(tempPath, { force: true }).catch(() => undefined)
+    if (canceled) {
+      return { ok: true, status: baseStatus(model.id, 'not_downloaded') }
+    }
     const message = describeLocalWhisperDownloadError(error, timeoutMessage)
     return {
       ok: false,
@@ -274,6 +306,10 @@ async function downloadModelFromSource(
       status: baseStatus(model.id, 'error', {
         message: `${source.label}: ${message}`
       })
+    }
+  } finally {
+    if (activeDownload?.modelId === model.id && activeDownload.tempPath === tempPath) {
+      activeDownload = null
     }
   }
 }
@@ -489,5 +525,6 @@ export const _internals = {
     downloadPromise = progress
       ? Promise.resolve({ ok: false, message: 'test' })
       : null
+    activeDownload = null
   }
 }

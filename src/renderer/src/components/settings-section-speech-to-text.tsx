@@ -13,9 +13,10 @@ import {
   LOCAL_WHISPER_PROVIDER_ID,
   localWhisperModelById,
   type LocalWhisperDownloadSourceStatus,
+  type LocalWhisperModelId,
   type LocalWhisperModelStatus
 } from '@shared/local-whisper'
-import { Download, Loader2, PlugZap, Trash2 } from 'lucide-react'
+import { Download, Loader2, PlugZap, Square, Trash2 } from 'lucide-react'
 import {
   AdvancedSettingsDisclosure,
   InlineNoticeView,
@@ -84,8 +85,19 @@ function formatBytes(bytes: number | undefined): string {
   return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB`
 }
 
+function formatTransferBytes(bytes: number | undefined): string {
+  if (!bytes || bytes <= 0) return ''
+  if (bytes < 1024) return `${Math.max(1, Math.round(bytes))} B`
+  if (bytes < 1024 * 1024) {
+    const kb = bytes / 1024
+    return `${kb >= 10 ? Math.round(kb) : kb.toFixed(1)} KB`
+  }
+  const mb = bytes / 1024 / 1024
+  return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB`
+}
+
 function formatTransferRate(bytesPerSecond: number | undefined, pendingLabel: string): string {
-  const formatted = formatBytes(bytesPerSecond)
+  const formatted = formatTransferBytes(bytesPerSecond)
   return formatted ? `${formatted}/s` : pendingLabel
 }
 
@@ -113,6 +125,12 @@ function localWhisperSourceStatusText(
     source: status.label,
     message: status.message || (status.httpStatus ? `HTTP ${status.httpStatus}` : t('speechToTextLocalDownloadSourceUnknownError'))
   })
+}
+
+function localWhisperModelStateLabel(t: (key: string) => string, state: LocalWhisperModelStatus['state'] | undefined): string {
+  if (state === 'ready') return t('speechToTextLocalModelStateReady')
+  if (state === 'downloading') return t('speechToTextLocalModelStateDownloading')
+  return t('speechToTextLocalModelStateMissing')
 }
 
 export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> }): ReactElement {
@@ -153,10 +171,11 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
     : selectedProviderSpeech?.models ?? []
   const [showSpeechApiKey, setShowSpeechApiKey] = useState(false)
   const [testState, setTestState] = useState<'idle' | 'busy' | InlineNotice>('idle')
-  const [localWhisperStatus, setLocalWhisperStatus] = useState<LocalWhisperModelStatus | null>(null)
-  const [localWhisperBusy, setLocalWhisperBusy] = useState<'idle' | 'download' | 'delete'>('idle')
+  const [localWhisperStatuses, setLocalWhisperStatuses] = useState<Partial<Record<LocalWhisperModelId, LocalWhisperModelStatus>>>({})
+  const [localWhisperBusy, setLocalWhisperBusy] = useState<'idle' | 'download' | 'cancel' | 'delete'>('idle')
   const [localWhisperSourceStatuses, setLocalWhisperSourceStatuses] = useState<LocalWhisperDownloadSourceStatus[] | null>(null)
   const [localWhisperSourceCheckBusy, setLocalWhisperSourceCheckBusy] = useState(false)
+  const localWhisperStatus = localWhisperStatuses[selectedLocalWhisperModelId] ?? null
   const updateSpeechToText = (patch: Record<string, unknown>): void => {
     updateKun({
       speechToText: {
@@ -166,10 +185,29 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
     })
   }
 
-  const refreshLocalWhisperStatus = async (): Promise<void> => {
+  const setLocalWhisperModelStatus = (status: LocalWhisperModelStatus): void => {
+    setLocalWhisperStatuses((current) => ({
+      ...current,
+      [status.modelId]: status
+    }))
+  }
+
+  const refreshLocalWhisperStatus = async (modelId: LocalWhisperModelId = selectedLocalWhisperModelId): Promise<void> => {
     if (typeof window.kunGui?.getLocalWhisperModelStatus !== 'function') return
-    const status = await window.kunGui.getLocalWhisperModelStatus(selectedLocalWhisperModelId)
-    setLocalWhisperStatus(status)
+    const status = await window.kunGui.getLocalWhisperModelStatus(modelId)
+    setLocalWhisperModelStatus(status)
+  }
+
+  const refreshLocalWhisperModelStatuses = async (): Promise<void> => {
+    if (typeof window.kunGui?.getLocalWhisperModelStatus !== 'function') return
+    const statuses = await Promise.all(
+      LOCAL_WHISPER_MODELS.map((model) => window.kunGui.getLocalWhisperModelStatus(model.id))
+    )
+    setLocalWhisperStatuses((current) => {
+      const next = { ...current }
+      for (const status of statuses) next[status.modelId] = status
+      return next
+    })
   }
 
   const refreshLocalWhisperSourceStatuses = async (): Promise<void> => {
@@ -186,32 +224,42 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
 
   useEffect(() => {
     if (!usingLocalWhisper) return
-    void refreshLocalWhisperStatus().catch(() => undefined)
+    void refreshLocalWhisperModelStatuses().catch(() => undefined)
     void refreshLocalWhisperSourceStatuses().catch(() => undefined)
     if (typeof window.kunGui?.onLocalWhisperModelProgress !== 'function') return
     return window.kunGui.onLocalWhisperModelProgress((progress) => {
-      if (progress.modelId !== selectedLocalWhisperModelId) return
       const model = localWhisperModelById(progress.modelId)
-      setLocalWhisperStatus((current) => ({
-        modelId: progress.modelId,
-        label: current?.label ?? model.label,
-        fileName: current?.fileName ?? model.fileName,
-        source: current?.source ?? model.source,
-        license: current?.license ?? model.license,
-        sha256: current?.sha256 ?? model.sha256,
-        sizeBytes: current?.sizeBytes ?? model.sizeBytes,
-        maxBytes: current?.maxBytes ?? model.maxBytes,
-        resourceTier: current?.resourceTier ?? model.resourceTier,
-        resourceEstimate: current?.resourceEstimate ?? model.resourceEstimate,
-        qualityTier: current?.qualityTier ?? model.qualityTier,
-        recommended: current?.recommended ?? model.recommended,
-        state: 'downloading',
-        downloadedBytes: progress.downloadedBytes,
-        totalBytes: progress.totalBytes,
-        speedBytesPerSecond: progress.speedBytesPerSecond,
-        path: current?.path
-      }))
+      setLocalWhisperStatuses((current) => {
+        const existing = current[progress.modelId]
+        return {
+          ...current,
+          [progress.modelId]: {
+            modelId: progress.modelId,
+            label: existing?.label ?? model.label,
+            fileName: existing?.fileName ?? model.fileName,
+            source: existing?.source ?? model.source,
+            license: existing?.license ?? model.license,
+            sha256: existing?.sha256 ?? model.sha256,
+            sizeBytes: existing?.sizeBytes ?? model.sizeBytes,
+            maxBytes: existing?.maxBytes ?? model.maxBytes,
+            resourceTier: existing?.resourceTier ?? model.resourceTier,
+            resourceEstimate: existing?.resourceEstimate ?? model.resourceEstimate,
+            qualityTier: existing?.qualityTier ?? model.qualityTier,
+            recommended: existing?.recommended ?? model.recommended,
+            state: 'downloading',
+            downloadedBytes: progress.downloadedBytes,
+            totalBytes: progress.totalBytes,
+            speedBytesPerSecond: progress.speedBytesPerSecond,
+            path: existing?.path
+          }
+        }
+      })
     })
+  }, [usingLocalWhisper])
+
+  useEffect(() => {
+    if (!usingLocalWhisper) return
+    void refreshLocalWhisperStatus(selectedLocalWhisperModelId).catch(() => undefined)
   }, [usingLocalWhisper, selectedLocalWhisperModelId])
 
   const downloadLocalWhisper = async (): Promise<void> => {
@@ -222,7 +270,7 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
         modelId: selectedLocalWhisperModelId,
         sourceId: speechToText.localWhisperDownloadSource
       })
-      if (result.status) setLocalWhisperStatus(result.status)
+      if (result.status) setLocalWhisperModelStatus(result.status)
       if (!result.ok) {
         setTestState({ tone: 'error', message: t('speechToTextLocalDownloadFailed', { message: result.message }) })
       }
@@ -231,12 +279,27 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
     }
   }
 
+  const cancelLocalWhisper = async (): Promise<void> => {
+    if (typeof window.kunGui?.cancelLocalWhisperModel !== 'function') return
+    setLocalWhisperBusy('cancel')
+    try {
+      const result = await window.kunGui.cancelLocalWhisperModel(selectedLocalWhisperModelId)
+      if (result.status) setLocalWhisperModelStatus(result.status)
+      if (!result.ok) {
+        setTestState({ tone: 'error', message: t('speechToTextLocalCancelFailed', { message: result.message }) })
+      }
+    } finally {
+      setLocalWhisperBusy('idle')
+    }
+  }
+
   const deleteLocalWhisper = async (): Promise<void> => {
     if (typeof window.kunGui?.deleteLocalWhisperModel !== 'function') return
+    if (!window.confirm(t('speechToTextLocalDeleteConfirm', { model: selectedLocalWhisperModel.shortName }))) return
     setLocalWhisperBusy('delete')
     try {
       const result = await window.kunGui.deleteLocalWhisperModel(selectedLocalWhisperModelId)
-      if (result.status) setLocalWhisperStatus(result.status)
+      if (result.status) setLocalWhisperModelStatus(result.status)
       if (!result.ok) {
         setTestState({ tone: 'error', message: t('speechToTextLocalDeleteFailed', { message: result.message }) })
       }
@@ -467,16 +530,17 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
                   <div className="grid gap-2">
                     {LOCAL_WHISPER_MODELS.map((model) => {
                       const selected = model.id === selectedLocalWhisperModelId
+                      const modelStatus = localWhisperStatuses[model.id]
+                      const modelState = modelStatus?.state ?? 'not_downloaded'
                       return (
                         <button
                           key={model.id}
                           type="button"
                           onClick={() => {
                             if (selected) {
-                              void refreshLocalWhisperStatus().catch(() => undefined)
+                              void refreshLocalWhisperStatus(model.id).catch(() => undefined)
                               return
                             }
-                            setLocalWhisperStatus(null)
                             updateSpeechToText({ model: model.id })
                           }}
                           className={[
@@ -488,6 +552,18 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
                         >
                           <span className="flex min-w-0 flex-wrap items-center gap-2">
                             <span className="text-[13.5px] font-semibold">{model.label}</span>
+                            <span
+                              className={[
+                                'rounded-full px-2 py-0.5 text-[11px] font-medium',
+                                modelState === 'ready'
+                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                  : modelState === 'downloading'
+                                    ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300'
+                                    : 'bg-slate-500/15 text-slate-600 dark:text-slate-300'
+                              ].join(' ')}
+                            >
+                              {localWhisperModelStateLabel(t, modelState)}
+                            </span>
                             {model.recommended ? (
                               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
                                 {t('speechToTextLocalRecommended')}
@@ -535,15 +611,28 @@ export function SpeechToTextSettingsSection({ ctx }: { ctx: Record<string, any> 
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
-                      disabled={localWhisperBusy !== 'idle' || localWhisperStatus?.state === 'ready'}
+                      disabled={localWhisperBusy !== 'idle' || localWhisperStatus?.state === 'ready' || localWhisperStatus?.state === 'downloading'}
                       onClick={() => void downloadLocalWhisper()}
                       className="inline-flex h-9 items-center gap-1.5 rounded-full border border-ds-border bg-ds-card px-3 text-[12.5px] font-medium text-ds-muted shadow-sm transition hover:bg-ds-hover hover:text-ds-ink disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      {localWhisperBusy === 'download' || localWhisperStatus?.state === 'downloading'
+                      {localWhisperBusy === 'download'
                         ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.9} />
                         : <Download className="h-3.5 w-3.5" strokeWidth={1.9} />}
                       {t('speechToTextLocalModelDownload', { model: selectedLocalWhisperModel.shortName })}
                     </button>
+                    {localWhisperStatus?.state === 'downloading' || localWhisperBusy === 'cancel' ? (
+                      <button
+                        type="button"
+                        disabled={localWhisperBusy === 'cancel' || localWhisperBusy === 'delete'}
+                        onClick={() => void cancelLocalWhisper()}
+                        className="inline-flex h-9 items-center gap-1.5 rounded-full border border-ds-border bg-ds-card px-3 text-[12.5px] font-medium text-ds-muted shadow-sm transition hover:bg-ds-hover hover:text-ds-ink disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {localWhisperBusy === 'cancel'
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.9} />
+                          : <Square className="h-3.5 w-3.5" strokeWidth={1.9} />}
+                        {t('speechToTextLocalModelCancel')}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       disabled={localWhisperBusy !== 'idle' || localWhisperStatus?.state !== 'ready'}

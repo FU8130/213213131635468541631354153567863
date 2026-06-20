@@ -438,6 +438,7 @@ export type KunGuiApi = {
     modelId?: LocalWhisperModelId
     sourceId?: LocalWhisperDownloadSourceId
   }) => Promise<LocalWhisperModelDownloadResult>
+  cancelLocalWhisperModel: (modelId?: LocalWhisperModelId) => Promise<LocalWhisperModelDownloadResult>
   checkLocalWhisperDownloadSources: (payload?: {
     modelId?: LocalWhisperModelId
   }) => Promise<LocalWhisperDownloadSourceStatusResult>

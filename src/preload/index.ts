@@ -182,6 +182,8 @@ const api = {
     ipcRenderer.invoke('speech:local-whisper:status', modelId),
   downloadLocalWhisperModel: (payload) =>
     ipcRenderer.invoke('speech:local-whisper:download', payload),
+  cancelLocalWhisperModel: (modelId) =>
+    ipcRenderer.invoke('speech:local-whisper:cancel', modelId),
   checkLocalWhisperDownloadSources: (payload) =>
     ipcRenderer.invoke('speech:local-whisper:sources', payload),
   deleteLocalWhisperModel: (modelId) =>

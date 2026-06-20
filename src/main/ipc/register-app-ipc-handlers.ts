@@ -165,6 +165,7 @@ import { requestWriteInfographic } from '../services/write-infographic-service'
 import { authorizePrototypePath } from '../services/prototype-embed-registry'
 import { requestSpeechTranscription } from '../services/speech-to-text-service'
 import {
+  cancelLocalWhisperModel,
   deleteLocalWhisperModel,
   checkLocalWhisperDownloadSources,
   downloadLocalWhisperModel,
@@ -1237,6 +1238,9 @@ export function registerAppIpcHandlers(options: RegisterAppIpcHandlersOptions): 
       const payload = parseIpcPayload('speech:local-whisper:download', localWhisperDownloadPayloadSchema, modelId)
       return downloadLocalWhisperModel(payload.modelId, payload.sourceId)
     }
+  )
+  ipcMain.handle('speech:local-whisper:cancel', async (_, modelId: unknown) =>
+    cancelLocalWhisperModel(parseIpcPayload('speech:local-whisper:cancel', localWhisperModelIdPayloadSchema, modelId))
   )
   ipcMain.handle('speech:local-whisper:sources', async (_, payload: unknown) =>
     {

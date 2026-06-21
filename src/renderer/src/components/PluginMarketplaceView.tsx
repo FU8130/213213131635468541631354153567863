@@ -123,6 +123,42 @@ function isJsonRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Returns true only when `url` parses as an absolute `https://` URL. The URL
+ * constructor throws on malformed input, so it is guarded; any non-https scheme
+ * (http, file, javascript, data, …) is rejected. Remote MCP servers carry the
+ * `user` trust scope, so we never want to write a non-TLS endpoint into config.
+ */
+export function isHttpsUrl(url: unknown): boolean {
+  if (typeof url !== 'string' || !url.trim()) return false
+  try {
+    return new URL(url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/** Origins whose docs links the OAuth connector preview may open externally. */
+const OAUTH_DOCS_ALLOWED_ORIGINS: readonly string[] = [
+  'https://vercel.com',
+  'https://developers.google.com'
+]
+
+/**
+ * Validates that a connector docs URL is an https URL hosted on an allowlisted
+ * origin before it is handed to the OS "open external link" path. Returns false
+ * for malformed URLs, non-https schemes, or unexpected origins so the preview
+ * dialog can no-op instead of opening an attacker-influenced link.
+ */
+export function isAllowedDocsUrl(url: unknown): boolean {
+  if (!isHttpsUrl(url)) return false
+  try {
+    return OAUTH_DOCS_ALLOWED_ORIGINS.includes(new URL(url as string).origin)
+  } catch {
+    return false
+  }
+}
+
 function parseMcpJsonConfig(content: string): JsonRecord {
   const trimmed = content.trim()
   if (!trimmed) return {}
@@ -168,6 +204,11 @@ function buildStdioMcpServer(
 }
 
 function buildRemoteMcpServer(url: string): JsonRecord {
+  // Remote MCP servers are written with trustScope "user", so reject anything
+  // that is not an https:// endpoint before it lands in the config file.
+  if (!isHttpsUrl(url)) {
+    throw new Error(`Remote MCP server URL must be an https:// URL: ${url}`)
+  }
   return {
     enabled: true,
     transport: 'streamable-http',
@@ -1492,6 +1533,9 @@ function OAuthConnectorPreviewDialog({
   const title = itemTitle(item, t)
   const openDocs = (): void => {
     if (!oauth || typeof window.kunGui?.openExternal !== 'function') return
+    // Only open allowlisted https docs origins; ignore anything else so a
+    // malformed or unexpected docsUrl can never reach the OS link handler.
+    if (!isAllowedDocsUrl(oauth.docsUrl)) return
     void window.kunGui.openExternal(oauth.docsUrl).catch(() => undefined)
   }
 

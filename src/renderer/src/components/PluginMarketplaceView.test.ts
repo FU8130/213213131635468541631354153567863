@@ -4,6 +4,8 @@ import {
   buildMcpConfig,
   buildRemoteMcpConfig,
   customMcpConfigFragment,
+  isAllowedDocsUrl,
+  isHttpsUrl,
   mcpConfigHasServer,
   mcpConfigHasServers,
   mcpMarketplaceItemsFromConfigAndDiagnostics,
@@ -58,6 +60,18 @@ describe('PluginMarketplaceView MCP config helpers', () => {
         })
       }
     })
+  })
+
+  it('rejects non-https remote MCP server URLs', () => {
+    expect(() => buildRemoteMcpConfig({ evil: 'http://mcp.vercel.com' })).toThrow(/https/i)
+    expect(() => buildRemoteMcpConfig({ evil: 'file:///etc/passwd' })).toThrow(/https/i)
+    expect(() => buildRemoteMcpConfig({ evil: 'javascript:alert(1)' })).toThrow(/https/i)
+    expect(() => buildRemoteMcpConfig({ evil: 'not a url' })).toThrow(/https/i)
+    expect(() => buildRemoteMcpConfig({ evil: '' })).toThrow(/https/i)
+  })
+
+  it('still accepts valid https remote MCP server URLs', () => {
+    expect(() => buildRemoteMcpConfig({ vercel: 'https://mcp.vercel.com' })).not.toThrow()
   })
 
   it('merges recommended MCP servers into JSON config without dropping existing fields', () => {
@@ -383,5 +397,34 @@ describe('skillRootOptionsFromRoots', () => {
 
   it('returns an empty list when the backend reports no roots', () => {
     expect(skillRootOptionsFromRoots([], (key) => key)).toEqual([])
+  })
+})
+
+describe('URL validation guards', () => {
+  it('accepts only well-formed https URLs', () => {
+    expect(isHttpsUrl('https://mcp.vercel.com')).toBe(true)
+    expect(isHttpsUrl('https://developers.google.com/workspace')).toBe(true)
+    expect(isHttpsUrl('http://mcp.vercel.com')).toBe(false)
+    expect(isHttpsUrl('file:///etc/passwd')).toBe(false)
+    expect(isHttpsUrl('javascript:alert(1)')).toBe(false)
+    expect(isHttpsUrl('ftp://example.com')).toBe(false)
+    expect(isHttpsUrl('not a url')).toBe(false)
+    expect(isHttpsUrl('')).toBe(false)
+    expect(isHttpsUrl(undefined)).toBe(false)
+    expect(isHttpsUrl(null)).toBe(false)
+    expect(isHttpsUrl(42)).toBe(false)
+  })
+
+  it('opens docs only for allowlisted https origins', () => {
+    expect(isAllowedDocsUrl('https://vercel.com/docs/agent-resources/vercel-mcp.md')).toBe(true)
+    expect(isAllowedDocsUrl('https://developers.google.com/workspace/guides/configure-mcp-servers')).toBe(true)
+    // Non-https schemes are rejected even on an allowlisted host.
+    expect(isAllowedDocsUrl('http://vercel.com/docs')).toBe(false)
+    // Off-allowlist origins are rejected even over https.
+    expect(isAllowedDocsUrl('https://evil.example.com/docs')).toBe(false)
+    expect(isAllowedDocsUrl('https://vercel.com.evil.example.com/docs')).toBe(false)
+    expect(isAllowedDocsUrl('javascript:alert(1)')).toBe(false)
+    expect(isAllowedDocsUrl('')).toBe(false)
+    expect(isAllowedDocsUrl(undefined)).toBe(false)
   })
 })

@@ -66,6 +66,30 @@ type GitHubContentEntry = GitHubContentFile | GitHubContentDir
 
 const GITHUB_HOSTS = new Set(['github.com', 'www.github.com'])
 
+/**
+ * The only host we will fetch raw skill file contents from. `download_url`
+ * comes back inside the GitHub Contents API JSON and is normally a
+ * `raw.githubusercontent.com` link, but a tampered/MITM'd response could point
+ * it anywhere — so we never trust it blindly. Anything off this allowlist is
+ * discarded in favor of the URL we construct ourselves (SSRF guard).
+ */
+const RAW_GITHUB_HOST = 'raw.githubusercontent.com'
+
+/**
+ * Whether a `download_url` from the GitHub Contents API is safe to fetch:
+ * a well-formed https URL whose host is exactly raw.githubusercontent.com.
+ */
+function isTrustedDownloadUrl(downloadUrl: string | null | undefined): boolean {
+  if (!downloadUrl) return false
+  let parsed: URL
+  try {
+    parsed = new URL(downloadUrl)
+  } catch {
+    return false
+  }
+  return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === RAW_GITHUB_HOST
+}
+
 const TOOL_ALIAS_MAP: Record<string, string> = {
   bash: 'bash',
   shell: 'bash',
@@ -455,7 +479,12 @@ async function fetchTextFile(
   path: string,
   fetcher: GitHubFetcher
 ): Promise<string> {
-  const url = downloadUrl || githubRawUrl(owner, repo, ref, path)
+  // Only follow download_url if it points at raw.githubusercontent.com; a
+  // tampered Contents API response could otherwise redirect this fetch to an
+  // attacker-controlled host (SSRF). Fall back to the URL we build ourselves.
+  const url = isTrustedDownloadUrl(downloadUrl)
+    ? (downloadUrl as string)
+    : githubRawUrl(owner, repo, ref, path)
   const response = await fetcher(url)
   if (!response.ok) {
     throw new Error(await describeHttpError(response, `Failed to download GitHub file "${path}"`))

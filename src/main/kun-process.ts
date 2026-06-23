@@ -16,6 +16,7 @@ import {
   type ModelProviderModelProfileV1,
   type ModelProviderProfileV1,
   type KunRuntimeSettingsV1,
+  type KunSubagentsSettingsV1,
   type AppSettingsV1
 } from '../shared/app-settings'
 import {
@@ -479,6 +480,9 @@ export async function syncGuiManagedKunConfig(
         ...memory,
         enabled: runtime.memoryEnabled
       },
+      ...(runtime.subagents
+        ? { subagents: subagentProfilesForRuntime(runtime.subagents) }
+        : {}),
       mcp: {
         ...mcp,
         ...(options?.scheduleMcp || mcpSearch.enabled || hasImportedEnabledMcpServer
@@ -977,6 +981,23 @@ function qualityConfigForRuntime(
     ignoreFiles: [...quality.ignoreFiles],
     maxFindings: quality.maxFindings
   }
+}
+
+function subagentProfilesForRuntime(subagents: KunSubagentsSettingsV1): SubagentsCapabilityConfig {
+  const profiles: Record<string, unknown> = {}
+  for (const profile of subagents.profiles) {
+    if (!profile.enabled) continue
+    const { id: _id, enabled: _enabled, name, ...rest } = profile
+    profiles[profile.id] = { name, ...rest }
+  }
+  return SubagentsCapabilityConfig.parse({
+    enabled: subagents.enabled,
+    ...(subagents.maxParallel !== undefined ? { maxParallel: subagents.maxParallel } : {}),
+    ...(subagents.maxChildRuns !== undefined ? { maxChildRuns: subagents.maxChildRuns } : {}),
+    ...(subagents.defaultToolPolicy ? { defaultToolPolicy: subagents.defaultToolPolicy } : {}),
+    ...(subagents.defaultProfile ? { defaultProfile: subagents.defaultProfile } : {}),
+    profiles
+  })
 }
 
 async function readJsonObjectIfExists(path: string): Promise<Record<string, unknown> | null> {

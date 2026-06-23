@@ -188,6 +188,37 @@ export type ModelProviderSettingsPatchV1 = Partial<
   providers?: ModelProviderProfilePatchV1[]
 }
 
+export type KunSubagentProfileV1 = {
+  /** Stable key; becomes the Record key in kun SubagentsCapabilityConfig.profiles. */
+  id: string
+  enabled: boolean
+  name: string
+  description?: string
+  /** Hex color for the GUI avatar chip. */
+  color?: string
+  /** 'subagent' = delegate_task only; 'primary' = session persona only; 'all' = both. */
+  mode: 'subagent' | 'primary' | 'all'
+  model?: string
+  providerId?: string
+  /** Appended to the base system prompt (augment, not replace). */
+  systemPrompt?: string
+  /** Prepended to the user prompt body to steer the child without changing the system fingerprint. */
+  promptPreamble?: string
+  /** 'readOnly' restricts child to read/grep/find/ls; 'inherit' passes all tools. */
+  toolPolicy: 'readOnly' | 'inherit'
+  /** Explicit allow-list; overrides toolPolicy when set. */
+  allowedTools?: string[]
+}
+
+export type KunSubagentsSettingsV1 = {
+  enabled: boolean
+  maxParallel?: number
+  maxChildRuns?: number
+  defaultToolPolicy?: 'readOnly' | 'inherit'
+  defaultProfile?: string
+  profiles: KunSubagentProfileV1[]
+}
+
 export type KunRuntimeSettingsV1 = {
   binaryPath: string
   port: number
@@ -237,6 +268,8 @@ export type KunRuntimeSettingsV1 = {
   computerUse: KunComputerUseSettingsV1
   /** First-party design-quality linter applied to frontend output. */
   quality: KunDesignQualitySettingsV1
+  /** GUI-managed subagent profiles written into kun SubagentsCapabilityConfig. */
+  subagents?: KunSubagentsSettingsV1
 }
 
 export function kunToolPermissionModeSettings(

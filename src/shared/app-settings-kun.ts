@@ -458,7 +458,12 @@ export function mergeKunRuntimeSettings(
     modelProfiles: nextModelProfiles,
     memoryEnabled: patch?.memoryEnabled ?? current.memoryEnabled ?? false,
     computerUse: nextComputerUse,
-    quality: nextQuality
+    quality: nextQuality,
+    ...(patch?.subagents !== undefined
+      ? { subagents: patch.subagents }
+      : current.subagents !== undefined
+        ? { subagents: current.subagents }
+        : {})
   }
 }
 

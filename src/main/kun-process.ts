@@ -58,6 +58,7 @@ import { appendManagedLogLine } from './logger'
 import {
   comparableSkillRootPath,
   guiSkillManagedComparablePaths,
+  guiSkillWorkspaceRootsForRuntime,
   guiSkillRootsForRuntime,
   normalizeSkillRootPath
 } from './services/skill-service'
@@ -612,6 +613,7 @@ async function skillCapabilityConfigForRuntime(
     // skills. An explicit `true` still forces on even with no roots.
     enabled: roots.length > 0 || existing.enabled === true,
     roots,
+    workspaceRoots: guiSkillWorkspaceRootsForRuntime(settings),
     // #149: Pass global skill roots from settings (e.g. ~/.kun/skills)
     globalRoots: existing.globalRoots ?? [],
     legacySkillMd: existing.legacySkillMd === false ? false : true
@@ -1425,11 +1427,12 @@ async function waitForKunStartup(startedChild: ChildProcess, port?: number): Pro
     let stderrTail = ''
     let healthProbeInFlight = false
     let healthConfirmed = false
+    let readyMarkerSeen = false
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
       cleanup()
-      reject(new Error(describeKunStartupTimeout(stderrTail)))
+      reject(new Error(describeKunStartupTimeout(stderrTail, readyMarkerSeen && Boolean(port))))
     }, KUN_STARTUP_TIMEOUT_MS)
     // The stdout ready marker can lag behind the actual server (pipe
     // buffering) or get lost in unusual spawn environments; the HTTP
@@ -1485,6 +1488,7 @@ async function waitForKunStartup(startedChild: ChildProcess, port?: number): Pro
     const onStdout = (chunk: Buffer | string): void => {
       stdoutBuffer = appendTail(stdoutBuffer, String(chunk), STDERR_TAIL_MAX_CHARS * 2)
       if (!tryParseReady()) return
+      readyMarkerSeen = true
       if (healthConfirmed || !healthTimer) {
         settleReady()
       }
@@ -1522,8 +1526,11 @@ function describeKunExit(
   return `Kun exited during startup${suffix}`
 }
 
-function describeKunStartupTimeout(stderrTail: string): string {
+function describeKunStartupTimeout(stderrTail: string, sawReadyMarker = false): string {
   const suffix = stderrTail.trim() ? `\n${stderrTail.trim()}` : ''
+  if (sawReadyMarker) {
+    return `Kun reported ready but did not pass health checks within ${KUN_STARTUP_TIMEOUT_MS}ms${suffix}`
+  }
   return `Kun did not report ready within ${KUN_STARTUP_TIMEOUT_MS}ms${suffix}`
 }
 

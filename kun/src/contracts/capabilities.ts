@@ -183,6 +183,7 @@ export type WebCapabilityConfig = z.infer<typeof WebCapabilityConfig>
 
 export const SkillsCapabilityConfig = CapabilityToggleConfig.extend({
   roots: z.array(z.string().min(1)).default([]),
+  workspaceRoots: z.array(z.string().min(1)).default([]),
   /** Global skill roots (e.g. ~/.kun/skills). Scanned after project roots. */
   globalRoots: z.array(z.string().min(1)).default([]),
   legacySkillMd: z.boolean().default(true)

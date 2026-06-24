@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import type { ApprovalPolicy, AppSettingsV1, SandboxMode, WindowCloseAction } from '@shared/app-settings'
 import {
+  CHECKPOINT_CLEANUP_INTERVAL_DAYS,
   DEFAULT_CURSOR_SPOTLIGHT_COLOR,
   DEFAULT_WRITE_INLINE_COMPLETION_BASE_URL,
   DEFAULT_WRITE_INLINE_COMPLETION_MAX_TOKENS,
@@ -234,6 +235,7 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
   const closeAction = desktopBehavior.closeAction ?? (desktopBehavior.closeToTray ? 'tray' : 'ask')
   const closeActionOptions: WindowCloseAction[] = ['ask', 'tray', 'quit']
   const fontScaleOptions: AppSettingsV1['uiFontScale'][] = ['small', 'medium', 'large']
+  const checkpointCleanupIntervalOptions = Array.from(CHECKPOINT_CLEANUP_INTERVAL_DAYS)
   const selectedFontScaleIndex = fontScaleOptions.indexOf(form.uiFontScale)
   const fontScaleIndex = selectedFontScaleIndex >= 0 ? selectedFontScaleIndex : 0
   const currentFontScale = fontScaleOptions[fontScaleIndex]
@@ -448,6 +450,43 @@ export function GeneralSettingsSection({ ctx }: { ctx: Record<string, any> }): R
               </SettingsCard>
 
               <LegacySessionImportCard t={t} tCommon={tCommon} />
+
+              <SettingsCard title={t('gitCheckpointTitle')} className="mt-6">
+                <SettingRow
+                  title={t('checkpointCleanupEnabled')}
+                  description={t('checkpointCleanupEnabledDesc')}
+                  control={
+                    <Toggle
+                      checked={form.checkpointCleanup.enabled}
+                      onChange={(v) => update({ checkpointCleanup: { enabled: v } })}
+                    />
+                  }
+                />
+                <SettingRow
+                  title={t('checkpointCleanupInterval')}
+                  description={t('checkpointCleanupIntervalDesc')}
+                  control={
+                    <select
+                      className={selectControlClass}
+                      value={form.checkpointCleanup.intervalDays}
+                      disabled={!form.checkpointCleanup.enabled}
+                      onChange={(e) =>
+                        update({
+                          checkpointCleanup: {
+                            intervalDays: Number(e.target.value) as AppSettingsV1['checkpointCleanup']['intervalDays']
+                          }
+                        })
+                      }
+                    >
+                      {checkpointCleanupIntervalOptions.map((days) => (
+                        <option key={days} value={days}>
+                          {t(`checkpointCleanupInterval${days}`)}
+                        </option>
+                      ))}
+                    </select>
+                  }
+                />
+              </SettingsCard>
 
               <SettingsCard title={t('logTitle')} className="mt-6">
                 <SettingRow

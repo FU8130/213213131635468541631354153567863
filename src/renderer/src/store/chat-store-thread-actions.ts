@@ -990,8 +990,19 @@ export function createThreadActions(
           })
         }
       }
+      // Subscribe to the turn's event stream BEFORE the cosmetic title rename so
+      // a slow/blocked title write never delays the conversation. Title naming
+      // must not be a blocking point of the conversation flow.
+      set({ currentTurnId: turnId })
+      const ac = new AbortController()
+      sseAbortRef.current = ac
+      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal, sinceSeq: seqAtSend })
+      subscribeThreadEventsWithRecovery(p, activeThreadId, seqAtSend, sink, ac.signal, get)
+      armBusyWatchdog(set, get)
       if (shouldRenameThreadAfterSend) {
-        // Provisional first-message title; let the backend LLM titler upgrade it.
+        // Provisional first-message title; the backend LLM titler upgrades it
+        // later (fire-and-forget on the runtime). Awaited here only to land the
+        // title before refreshThreads re-reads the list — never blocks the stream.
         const renamed = await p.renameThread(activeThreadId, generatedTitle, true).then(() => true).catch(() => {
           /* keep message delivery successful even if auto-title update fails */
           return false
@@ -1004,12 +1015,6 @@ export function createThreadActions(
           }))
         }
       }
-      set({ currentTurnId: turnId })
-      const ac = new AbortController()
-      sseAbortRef.current = ac
-      const sink = buildThreadEventSink(set, get, { threadId: activeThreadId, signal: ac.signal, sinceSeq: seqAtSend })
-      subscribeThreadEventsWithRecovery(p, activeThreadId, seqAtSend, sink, ac.signal, get)
-      armBusyWatchdog(set, get)
       await get().refreshThreads()
       return true
     } catch (e) {

@@ -1112,6 +1112,7 @@ describe('syncGuiManagedKunConfig', () => {
         },
         'docs-mcp': {
           url: 'https://mcp.example.test/mcp',
+          workspaceRoots: ['D:\\Workspace\\docs-project'],
           headers: {
             Authorization: 'Bearer docs-token'
           }
@@ -1141,11 +1142,58 @@ describe('syncGuiManagedKunConfig', () => {
       enabled: true,
       transport: 'streamable-http',
       url: 'https://mcp.example.test/mcp',
+      workspaceRoots: ['D:\\Workspace\\docs-project'],
       headers: {
         Authorization: 'Bearer docs-token'
       },
       trustScope: 'user'
     })
+  })
+
+  it('imports workspace-local MCP servers with isolated workspace visibility', async () => {
+    if (!tempRoot) throw new Error('temp root not initialized')
+    const configPath = join(tempRoot, 'config.json')
+    const workspaceA = join(tempRoot, 'project-a')
+    const workspaceB = join(tempRoot, 'project-b')
+    mkdirSync(join(workspaceA, '.kun'), { recursive: true })
+    mkdirSync(join(workspaceB, '.kun'), { recursive: true })
+    writeFileSync(join(workspaceA, '.kun', 'mcp.json'), JSON.stringify({
+      servers: {
+        codegraph: {
+          command: 'node',
+          args: ['codegraph-a.js'],
+          workspaceRoots: [join(tempRoot, 'should-not-leak')],
+          trustScope: 'user'
+        }
+      }
+    }), 'utf8')
+    writeFileSync(join(workspaceB, '.kun', 'mcp.json'), JSON.stringify({
+      servers: {
+        codegraph: {
+          command: 'node',
+          args: ['codegraph-b.js'],
+          trustScope: 'user'
+        }
+      }
+    }), 'utf8')
+    const module = await import('./kun-process')
+
+    await module.syncGuiManagedKunConfig(tempRoot, defaultKunRuntimeSettings(), {
+      mcpConfigPath: join(tempRoot, 'missing-mcp.json'),
+      workspaceRoots: [workspaceA, workspaceB]
+    })
+
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as any
+    const localServers = Object.entries(parsed.capabilities.mcp.servers as Record<string, any>)
+      .filter(([serverId]) => serverId.startsWith('codegraph__'))
+    expect(localServers).toHaveLength(2)
+    expect(localServers.map(([, server]) => server.workspaceRoots)).toEqual(
+      expect.arrayContaining([[workspaceA], [workspaceB]])
+    )
+    expect(localServers.map(([, server]) => server.args)).toEqual(
+      expect.arrayContaining([['codegraph-a.js'], ['codegraph-b.js']])
+    )
+    expect(JSON.stringify(localServers)).not.toContain('should-not-leak')
   })
 
   it('replaces unparsable historical Kun config with a valid GUI-managed config', async () => {

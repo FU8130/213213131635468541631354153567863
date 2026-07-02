@@ -14,6 +14,7 @@ export const DESIGN_ASSISTANT_THREAD_TITLE = 'Design Assistant'
 const MAX_DESIGN_THREAD_IDS_PER_WORKSPACE = 20
 const MAX_DESIGN_REGISTRY_WORKSPACES = 80
 const DESIGN_THREAD_REGISTRY_KEY = 'kun.design.threadRegistry.v1'
+const LEGACY_DESIGN_ASSISTANT_THREAD_REGISTRY_KEY = 'kun.design-assistant.threadRegistry.v1'
 
 export type DesignThreadWorkspaceRecord = {
   activeThreadId: string
@@ -114,7 +115,8 @@ export function readDesignThreadRegistry(
   if (!storage) return emptyDesignThreadRegistry()
   try {
     const raw = storage.getItem(DESIGN_THREAD_REGISTRY_KEY)
-    return normalizeDesignThreadRegistry(raw ? JSON.parse(raw) : null)
+    const registry = normalizeDesignThreadRegistry(raw ? JSON.parse(raw) : null)
+    return mergeLegacyDesignAssistantThreads(registry, readLegacyDesignAssistantRegistry(storage))
   } catch {
     return emptyDesignThreadRegistry()
   }
@@ -140,6 +142,29 @@ export function designThreadIds(
     for (const id of record.threadIds) ids.add(id)
   }
   return ids
+}
+
+function mergeLegacyDesignAssistantThreads(
+  registry: DesignThreadRegistry,
+  raw: unknown
+): DesignThreadRegistry {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return registry
+  let next = registry
+  for (const [workspaceRoot, value] of Object.entries(raw as Record<string, unknown>)) {
+    const threadId = typeof value === 'string' ? value.trim() : ''
+    if (!threadId) continue
+    next = markDesignThread(workspaceRoot, '', threadId, next)
+  }
+  return next
+}
+
+function readLegacyDesignAssistantRegistry(storage: BrowserStorageLike): unknown {
+  try {
+    const raw = storage.getItem(LEGACY_DESIGN_ASSISTANT_THREAD_REGISTRY_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
 }
 
 export function isDesignThreadId(

@@ -27,7 +27,12 @@ import {
   saveThreadForkRegistry
 } from '../lib/thread-fork-registry'
 import { workspaceLabelFromPath } from '../lib/workspace-label'
-import { isConversationWorkspacePath, isInternalTemporaryWorkspace, normalizeWorkspaceRoot } from '../lib/workspace-path'
+import {
+  isConversationWorkspacePath,
+  isInternalDeepSeekGuiWorkspace,
+  isInternalTemporaryWorkspace,
+  normalizeWorkspaceRoot
+} from '../lib/workspace-path'
 import { resolveProjectWorkspacePath } from '../lib/worktree-project-path'
 import { readThreadWorktreeRegistry } from '../lib/thread-worktree-registry'
 import { buildClawRuntimePrompt, getActiveAgentApiKey } from '@shared/app-settings'
@@ -128,15 +133,18 @@ export function createNavigationActions(
   return {
   openCode: async () => {
     const state = get()
+    const designRegistry = readDesignThreadRegistry()
     const activeThread = state.activeThreadId
       ? state.threads.find((thread) => thread.id === state.activeThreadId) ?? null
       : null
-    if (activeThread && isCodeThread(activeThread, state.clawChannels)) {
+    if (activeThread && isCodeThread(activeThread, state.clawChannels, undefined, designRegistry)) {
       set({ route: 'chat' })
       return
     }
 
-    const codeThreads = state.threads.filter((thread) => isCodeThread(thread, state.clawChannels))
+    const codeThreads = state.threads.filter((thread) =>
+      isCodeThread(thread, state.clawChannels, undefined, designRegistry)
+    )
     const selectedWorkspace = normalizeWorkspaceRoot(state.workspaceRoot)
     const target =
       latestThread(codeThreads.filter((thread) => threadBelongsToWorkspace(thread, selectedWorkspace))) ??
@@ -805,6 +813,7 @@ export function createNavigationActions(
         workspace: normalizeWorkspaceRoot(thread.workspace)
       }))
       const sddThreadRegistry = readSddThreadRegistry()
+      const designRegistry = readDesignThreadRegistry()
       const sidebarThreads = (await filterThreadsForSidebar(threads, p))
         .filter((thread) => !isSddAssistantThread(thread, sddThreadRegistry))
       const forkRegistry = hydrateThreadForkRegistry(sidebarThreads, readThreadForkRegistry())
@@ -872,7 +881,7 @@ export function createNavigationActions(
         ...threads,
         ...displayThreads
       ]
-        .filter((thread) => isCodeThread(thread, get().clawChannels, writeRegistry))
+        .filter((thread) => isCodeThread(thread, get().clawChannels, writeRegistry, designRegistry))
         .map((thread) => {
           const record = threadWorktreeRegistry[thread.id]
           if (record?.projectPath?.trim()) return record.projectPath.trim()
@@ -898,7 +907,8 @@ export function createNavigationActions(
         activeThread != null &&
         (isWriteThreadId(activeThread.id, writeRegistry) ||
           isClawThread(activeThread, get().clawChannels) ||
-          isDesignThreadId(activeThread.id))
+          isDesignThreadId(activeThread.id, designRegistry) ||
+          isInternalDeepSeekGuiWorkspace(activeThread.workspace))
       const shouldClearSelection =
         activeThreadId != null && !displayThreads.some((thread) => thread.id === activeThreadId)
       if (shouldClearSelection) {

@@ -826,10 +826,11 @@ function modelConfigForRuntime(
     const defaultProfile = objectValue(profileDefaults[modelId])
     const existingProfile = objectValue(existingProfiles[modelId])
     const guiProfile = objectValue(guiProfiles[modelId])
+    const baseProfile = Object.prototype.hasOwnProperty.call(guiProfiles, modelId)
+      ? { ...defaultProfile, ...guiProfile }
+      : { ...defaultProfile, ...existingProfile }
     profiles[modelId] = {
-      ...defaultProfile,
-      ...existingProfile,
-      ...guiProfile,
+      ...baseProfile,
       contextCompaction: {
         ...objectValue(defaultProfile.contextCompaction),
         ...objectValue(existingProfile.contextCompaction),

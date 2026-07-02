@@ -724,6 +724,61 @@ describe('syncGuiManagedKunConfig', () => {
     expect(KunConfigSchema.safeParse(parsed).success).toBe(true)
   })
 
+  it('replaces stale GUI-managed model profile fields while preserving compaction overrides', async () => {
+    if (!tempRoot) throw new Error('temp root not initialized')
+    const configPath = join(tempRoot, 'config.json')
+    const module = await import('./kun-process')
+    writeFileSync(configPath, JSON.stringify({
+      models: {
+        profiles: {
+          'gpt-5.5': {
+            contextWindowTokens: 128000,
+            maxOutputTokens: 16000,
+            inputModalities: ['text', 'image'],
+            outputModalities: ['text'],
+            supportsToolCalling: true,
+            messageParts: ['text', 'image_url'],
+            endpointFormat: 'responses',
+            contextCompaction: { softThreshold: 900000 }
+          },
+          'user-model': {
+            contextWindowTokens: 96000,
+            endpointFormat: 'messages',
+            contextCompaction: { softThreshold: 86000 }
+          }
+        }
+      }
+    }), 'utf8')
+
+    await module.syncGuiManagedKunConfig(tempRoot, {
+      ...defaultKunRuntimeSettings(),
+      modelProfiles: {
+        'gpt-5.5': {
+          contextWindowTokens: 1_000_000,
+          inputModalities: ['text', 'image'],
+          outputModalities: ['text'],
+          supportsToolCalling: true,
+          messageParts: ['text', 'image_url']
+        }
+      }
+    })
+
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as any
+    expect(parsed.models.profiles['gpt-5.5']).toMatchObject({
+      contextWindowTokens: 1_000_000,
+      inputModalities: ['text', 'image'],
+      contextCompaction: { softThreshold: 900000 }
+    })
+    expect(parsed.models.profiles['gpt-5.5'].endpointFormat).toBeUndefined()
+    expect(parsed.models.profiles['gpt-5.5'].maxOutputTokens).toBeUndefined()
+    expect(parsed.models.profiles['user-model']).toMatchObject({
+      contextWindowTokens: 96000,
+      endpointFormat: 'messages',
+      contextCompaction: { softThreshold: 86000 }
+    })
+    expect(KunConfigSchema.safeParse(parsed).success).toBe(true)
+  })
+
   it('keeps the config stable across repeated syncs with imageGen configured', async () => {
     if (!tempRoot) throw new Error('temp root not initialized')
     const configPath = join(tempRoot, 'config.json')

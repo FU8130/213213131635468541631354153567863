@@ -61,6 +61,26 @@ describe('design-thread-registry', () => {
     ).toBe('thread-design-1')
   })
 
+  it('recognizes legacy design assistant thread records', () => {
+    const storage = new MemoryStorage()
+    storage.setItem(
+      'kun.design-assistant.threadRegistry.v1',
+      JSON.stringify({ '/Users/zxy/project': 'thread-legacy-design' })
+    )
+
+    const restored = readDesignThreadRegistry(storage)
+
+    expect(isDesignThreadId('thread-legacy-design', restored)).toBe(true)
+    expect(
+      activeDesignThreadForWorkspace(
+        '/Users/zxy/project',
+        '',
+        [thread('thread-legacy-design')],
+        restored
+      )?.id
+    ).toBe('thread-legacy-design')
+  })
+
   it('keeps design documents in the same workspace scoped to separate conversations', () => {
     const registry = markDesignThread(
       '/Users/zxy/project',

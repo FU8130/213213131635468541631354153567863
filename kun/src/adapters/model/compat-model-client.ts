@@ -441,7 +441,7 @@ export class CompatModelClient implements ModelClient {
   }
 
   private async classifyHttpError(status: number, text: string): Promise<{ message: string; code: string }> {
-    const body = text
+    const body = summarizeHttpErrorBody(text)
     if (status === 404) {
       const prefix = body ? `${body} ` : ''
       return {
@@ -1999,6 +1999,21 @@ function redactUrlForLog(url: string): string {
 
 function summarizeForLog(text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
+  return normalized.length > 1_000 ? `${normalized.slice(0, 1_000)}...` : normalized
+}
+
+function summarizeHttpErrorBody(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  if (/<html[\s>]/i.test(normalized)) {
+    if (/Enable JavaScript and cookies to continue/i.test(normalized)) {
+      return 'provider returned an HTML challenge page (Enable JavaScript and cookies to continue). Check provider authentication/session and Endpoint format.'
+    }
+    const title = /<title[^>]*>(.*?)<\/title>/i.exec(normalized)?.[1]?.trim()
+    return title
+      ? `provider returned an HTML response (${title})`
+      : 'provider returned an HTML response'
+  }
   return normalized.length > 1_000 ? `${normalized.slice(0, 1_000)}...` : normalized
 }
 

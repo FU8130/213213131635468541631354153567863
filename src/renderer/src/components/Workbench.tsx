@@ -3306,7 +3306,7 @@ export function Workbench(): ReactElement {
 
   const openDesignMode = (): void => {
     setConnectPhoneSidebarOpen(false)
-    setDesignAssistantOpen(false)
+    setDesignAssistantOpen(true)
     openDesign()
   }
 

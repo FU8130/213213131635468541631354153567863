@@ -83,6 +83,7 @@ export function DesignSidebar({
   const designSystemHash = useDesignWorkspaceStore((s) => s.designSystemHash)
   const closeImplementPanel = useDesignWorkspaceStore((s) => s.closeImplementPanel)
   const setDesignIntentMode = useDesignWorkspaceStore((s) => s.setDesignIntentMode)
+  const setCanvasAssistantOpen = useDesignWorkspaceStore((s) => s.setCanvasAssistantOpen)
   const activeArtifact = artifacts.find((a) => a.id === activeArtifactId) ?? null
 
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -146,6 +147,7 @@ export function DesignSidebar({
   const handleNewDocument = (): void => {
     closeImplementPanel()
     setDesignIntentMode('generate')
+    setCanvasAssistantOpen(true)
     useCanvasSelectionStore.getState().clearSelection()
     createDocument()
     focusComposer()

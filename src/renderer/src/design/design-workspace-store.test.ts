@@ -241,6 +241,34 @@ describe('design workspace store', () => {
     expect(state.activeArtifactId).toBeNull()
   })
 
+  it('opens the canvas assistant by default unless the user collapsed it', async () => {
+    const storage = new Map<string, string>()
+    const localStorage = {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        storage.set(key, value)
+      }),
+      removeItem: vi.fn((key: string) => {
+        storage.delete(key)
+      })
+    }
+    vi.stubGlobal('window', { kunGui: { writeWorkspaceFile }, localStorage })
+    vi.stubGlobal('localStorage', localStorage)
+
+    vi.resetModules()
+    const { useDesignWorkspaceStore: freshStore } = await import('./design-workspace-store')
+
+    expect(freshStore.getState().canvasAssistantOpen).toBe(true)
+
+    freshStore.getState().setCanvasAssistantOpen(false)
+    expect(storage.get('kun.design.canvasAssistantOpen.v1')).toBe('0')
+
+    vi.resetModules()
+    const { useDesignWorkspaceStore: collapsedStore } = await import('./design-workspace-store')
+
+    expect(collapsedStore.getState().canvasAssistantOpen).toBe(false)
+  })
+
   it('new 画布 nest under the active 设计稿 directory', () => {
     const id = useDesignWorkspaceStore.getState().createDocument('Second')
     const { artifactId, relativePath } = useDesignWorkspaceStore.getState().prepareHtmlTurn('A landing page')

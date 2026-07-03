@@ -3,9 +3,19 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ChatBlock, NormalizedThread, ToolBlock } from '../../agent/types'
 import { useChatStore } from '../../store/chat-store'
-import { MessageTimeline, goalTimelinePaddingClass, liveTurnProgressClass, summarizeToolBlock } from './MessageTimeline'
+import {
+  MessageTimeline,
+  goalTimelinePaddingClass,
+  liveTurnProgressClass,
+  summarizeToolBlock
+} from './MessageTimeline'
 import { GeneratedFilesPanel, MessageBubble } from './message-timeline-bubbles'
 import { ProcessSectionRow } from './message-timeline-process'
+import {
+  TimelineFilePreviewWorkspaceProvider,
+  timelineFilePreviewWorkspaceRoot,
+  useTimelineFilePreviewWorkspaceRoot
+} from './timeline-file-preview-workspace'
 
 const labels: Record<string, string> = {
   toolActionCommand: 'Ran command',
@@ -43,6 +53,36 @@ function toolBlock(overrides: Partial<ToolBlock>): ToolBlock {
 }
 
 describe('MessageTimeline tool summaries', () => {
+  function WorkspaceConsumer() {
+    return createElement('span', null, useTimelineFilePreviewWorkspaceRoot())
+  }
+
+  it('uses the active thread workspace for file previews before falling back to the global workspace', () => {
+    expect(timelineFilePreviewWorkspaceRoot(
+      { workspace: ' /tmp/thread-workspace ' },
+      '/tmp/global-workspace'
+    )).toBe('/tmp/thread-workspace')
+
+    expect(timelineFilePreviewWorkspaceRoot(
+      { workspace: '   ' },
+      '/tmp/global-workspace'
+    )).toBe('/tmp/global-workspace')
+  })
+
+  it('provides the timeline workspace through context instead of the global active thread', () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        TimelineFilePreviewWorkspaceProvider,
+        {
+          workspaceRoot: '/tmp/embedded-thread',
+          children: createElement(WorkspaceConsumer)
+        }
+      )
+    )
+
+    expect(html).toContain('/tmp/embedded-thread')
+  })
+
   it('summarizes built-in read/write/edit tools with their file path', () => {
     expect(
       summarizeToolBlock(
@@ -378,6 +418,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-tool_1', kind: 'execution', blocks: [block] },
         processing: false,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -404,6 +445,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-tool_1', kind: 'execution', blocks: [block] },
         processing: true,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -429,6 +471,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-tool_error', kind: 'execution', blocks: [block] },
         processing: false,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -457,6 +500,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-tool_error', kind: 'execution', blocks: [block] },
         processing: true,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -478,6 +522,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'reasoning', kind: 'reasoning', blocks: [block] },
         processing: true,
         singleReasoningSection: true,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -508,6 +553,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-batch', kind: 'execution', blocks: [readBlock, grepBlock] },
         processing: false,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -553,6 +599,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-batch', kind: 'execution', blocks: [readBlock, inputBlock] },
         processing: true,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -585,6 +632,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-batch', kind: 'execution', blocks: [readBlock, approvalBlock] },
         processing: true,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -619,6 +667,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-input', kind: 'execution', blocks: [inputBlock] },
         processing: true,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )
@@ -654,6 +703,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
         section: { id: 'execution-input', kind: 'execution', blocks: [inputBlock] },
         processing: true,
         singleReasoningSection: false,
+        workspaceRoot: '/tmp/project',
         viewportRef: { current: null }
       })
     )

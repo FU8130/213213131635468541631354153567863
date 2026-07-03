@@ -8,9 +8,9 @@ import { parseFileReferenceHref, rehypeFileReferences } from '../../lib/file-ref
 import { useValidatedFileReference } from '../../lib/file-reference-validation'
 import { openWorkspacePathInEditor } from '../../lib/open-workspace-path'
 import { previewWorkspaceFile } from '../../lib/workspace-file-preview'
-import { useChatStore } from '../../store/chat-store'
 import { sanitizeAssistantCanvasToolDisplay } from '../../design/canvas/strip-canvas-tool-display'
 import { StreamdownCode } from './StreamdownCode'
+import { useTimelineFilePreviewWorkspaceRoot } from './timeline-file-preview-workspace'
 import { createMathPlugin } from '@streamdown/math'
 import 'katex/dist/katex.min.css'
 
@@ -137,7 +137,7 @@ function StreamdownLink({
   className,
   title
 }: StreamdownLinkProps): ReactElement {
-  const workspaceRoot = useChatStore((s) => s.workspaceRoot)
+  const workspaceRoot = useTimelineFilePreviewWorkspaceRoot()
   const fileTarget = parseFileReferenceHref(href)
   const validation = useValidatedFileReference(fileTarget, workspaceRoot)
   const isExternal = href ? /^(https?:|mailto:)/i.test(href) : false

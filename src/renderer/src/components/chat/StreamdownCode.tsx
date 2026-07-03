@@ -33,7 +33,7 @@ import {
   highlightCodeHtml,
   renderFallbackCodeHtml
 } from '../../lib/code-highlighting'
-import { useChatStore } from '../../store/chat-store'
+import { useTimelineFilePreviewWorkspaceRoot } from './timeline-file-preview-workspace'
 
 const LANGUAGE_REGEX = /language-([^\s]+)/
 const TRAILING_NEWLINES_REGEX = /\n+$/
@@ -154,7 +154,7 @@ function InlineFileReferenceCode({
   target: FileReferenceTarget
   className?: string
 }): ReactNode {
-  const workspaceRoot = useChatStore((s) => s.workspaceRoot)
+  const workspaceRoot = useTimelineFilePreviewWorkspaceRoot()
   const validation = useValidatedFileReference(target, workspaceRoot)
 
   if (validation.status !== 'valid') {

@@ -32,6 +32,10 @@ import {
 import { extractPlanMetadataFromBlock } from '../../plan/plan-tool'
 import { InjectedMemoryLookupProvider } from './injected-memory-lookup'
 import { planDisplayNameFromRelativePath } from '../../plan/plan-path'
+import {
+  TimelineFilePreviewWorkspaceProvider,
+  timelineFilePreviewWorkspaceRoot
+} from './timeline-file-preview-workspace'
 
 export { summarizeToolBlock } from './message-timeline-process'
 
@@ -263,6 +267,7 @@ export function MessageTimeline({
     typeof activeThread?.forkedFromTurnCount === 'number'
       ? Math.max(0, activeThread.forkedFromTurnCount)
       : undefined
+  const filePreviewWorkspaceRoot = timelineFilePreviewWorkspaceRoot(activeThread, workspaceRoot)
 
   useEffect(() => {
     const container = containerRef.current
@@ -314,6 +319,7 @@ export function MessageTimeline({
   }
 
   return (
+    <TimelineFilePreviewWorkspaceProvider workspaceRoot={filePreviewWorkspaceRoot}>
     <InjectedMemoryLookupProvider workspaceRoot={workspaceRoot}>
     <div ref={containerRef} className="ds-no-drag relative flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
       {visibleTurnAnchors.length > 2 ? (
@@ -418,6 +424,7 @@ export function MessageTimeline({
                 onBuildPlan={onBuildPlan}
                 onOpenPlan={onOpenPlan}
                 onOpenChildThread={onOpenChildThread}
+                filePreviewWorkspaceRoot={filePreviewWorkspaceRoot}
                 viewportRef={containerRef}
                 compactCards={compactCards}
               />
@@ -452,6 +459,7 @@ export function MessageTimeline({
             liveReasoning={liveReasoning}
             live={live}
             devPreviewCard={devPreviewCard}
+            filePreviewWorkspaceRoot={filePreviewWorkspaceRoot}
             viewportRef={containerRef}
             onOpenChildThread={onOpenChildThread}
             compactCards={compactCards}
@@ -473,6 +481,7 @@ export function MessageTimeline({
       </div>
     </div>
     </InjectedMemoryLookupProvider>
+    </TimelineFilePreviewWorkspaceProvider>
   )
 }
 
@@ -488,6 +497,7 @@ function MessageTurn({
   onBuildPlan,
   onOpenPlan,
   onOpenChildThread,
+  filePreviewWorkspaceRoot,
   viewportRef,
   compactCards = false
 }: {
@@ -502,10 +512,10 @@ function MessageTurn({
   onBuildPlan?: () => void
   onOpenPlan?: () => void
   onOpenChildThread?: OpenChildThreadHandler
+  filePreviewWorkspaceRoot: string
   viewportRef: RefObject<HTMLDivElement | null>
   compactCards?: boolean
 }): ReactElement {
-  const workspaceRoot = useChatStore((s) => s.workspaceRoot)
   const activeThreadGoal = useChatStore((s) => s.activeThreadGoal)
   const forkThreadFromTurn = useChatStore((s) => s.forkThreadFromTurn)
   const rollbackWorkspaceToCheckpoint = useChatStore((s) => s.rollbackWorkspaceToCheckpoint)
@@ -535,9 +545,9 @@ function MessageTurn({
         isProcessing,
         liveProcessText,
         liveContent,
-        workspaceRoot
+        workspaceRoot: filePreviewWorkspaceRoot
       }),
-    [turn, isProcessing, liveProcessText, liveContent, workspaceRoot]
+    [turn, isProcessing, liveProcessText, liveContent, filePreviewWorkspaceRoot]
   )
   const compactionBlocks = useMemo(
     () => processBlocks.filter((block): block is CompactionTimelineBlock => block.kind === 'compaction'),
@@ -640,6 +650,7 @@ function MessageTurn({
                   processing={isProcessing}
                   reasoningDurationMs={reasoningDurationMs}
                   singleReasoningSection={reasoningSectionCount === 1}
+                  workspaceRoot={filePreviewWorkspaceRoot}
                   viewportRef={viewportRef}
                   onOpenChildThread={onOpenChildThread}
                 />

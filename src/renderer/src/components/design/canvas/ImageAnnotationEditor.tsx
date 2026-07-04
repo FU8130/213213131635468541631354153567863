@@ -21,6 +21,8 @@ type AnnotationOp =
   | { kind: 'rect'; color: string; width: number; from: Point; to: Point }
   | { kind: 'text'; color: string; x: number; y: number; text: string; fontSize: number }
 
+export type ImageAnnotationTextDraft = { cssX: number; cssY: number; x: number; y: number }
+
 export type ImageAnnotationResult = {
   /** Base64 PNG bytes of the flattened picture + markup (no `data:` prefix). */
   dataBase64: string
@@ -57,6 +59,31 @@ const TOOLS: { tool: AnnotationTool; label: string; Icon: typeof Pencil }[] = [
   { tool: 'rect', label: '方框', Icon: Square },
   { tool: 'text', label: '文字', Icon: Type }
 ]
+
+export function createImageAnnotationTextOp(
+  draft: ImageAnnotationTextDraft | null,
+  rawValue: string,
+  color: string,
+  fontSize: number
+): Extract<AnnotationOp, { kind: 'text' }> | null {
+  const text = rawValue.trim()
+  if (!draft || !text) return null
+  return { kind: 'text', color, x: draft.x, y: draft.y, text, fontSize }
+}
+
+export function imageAnnotationTextNotes(ops: readonly AnnotationOp[]): string[] {
+  return ops
+    .filter((op): op is Extract<AnnotationOp, { kind: 'text' }> => op.kind === 'text')
+    .map((op) => op.text)
+}
+
+export function shouldCommitImageAnnotationTextKey(
+  key: string,
+  nativeIsComposing: boolean,
+  activeComposition: boolean
+): boolean {
+  return key === 'Enter' && !nativeIsComposing && !activeComposition
+}
 
 export const IMAGE_ANNOTATION_ROOT_CLASS =
   'ds-no-drag fixed inset-0 z-[200] flex flex-col bg-black/75 backdrop-blur-sm'
@@ -152,10 +179,9 @@ export function ImageAnnotationEditor({
   /** Longest natural edge of the loaded picture; drives stroke/font scaling. */
   const [naturalLongest, setNaturalLongest] = useState(0)
   const [instruction, setInstruction] = useState('')
-  const [textDraft, setTextDraft] = useState<{ cssX: number; cssY: number; x: number; y: number } | null>(
-    null
-  )
+  const [textDraft, setTextDraft] = useState<ImageAnnotationTextDraft | null>(null)
   const [textValue, setTextValue] = useState('')
+  const textCompositionRef = useRef(false)
 
   // Live drag state for the in-progress shape (rubber-band preview).
   const dragRef = useRef<{ op: AnnotationOp } | null>(null)
@@ -278,38 +304,44 @@ export function ImageAnnotationEditor({
     setOps((prev) => [...prev, op])
   }, [rerender])
 
+  const pendingTextOp = useMemo(
+    () => createImageAnnotationTextOp(textDraft, textValue, color, fontSize),
+    [color, fontSize, textDraft, textValue]
+  )
+
   const commitText = useCallback(() => {
-    const draft = textDraft
-    const value = textValue.trim()
+    const op = createImageAnnotationTextOp(textDraft, textValue, color, fontSize)
     setTextDraft(null)
     setTextValue('')
-    if (!draft || !value) return
-    setOps((prev) => [...prev, { kind: 'text', color, x: draft.x, y: draft.y, text: value, fontSize }])
+    textCompositionRef.current = false
+    if (!op) return
+    setOps((prev) => [...prev, op])
   }, [color, fontSize, textDraft, textValue])
 
   const undo = useCallback(() => setOps((prev) => prev.slice(0, -1)), [])
   const clearAll = useCallback(() => setOps([]), [])
 
-  const textNotes = useMemo(
-    () => ops.filter((op): op is Extract<AnnotationOp, { kind: 'text' }> => op.kind === 'text').map((op) => op.text),
-    [ops]
-  )
-
   const apply = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !loaded || busy) return
+    const appliedOps = pendingTextOp ? [...ops, pendingTextOp] : ops
     // Repaint once without any in-progress drag so the export is committed-only.
     const ctx = canvas.getContext('2d')
     const img = imageRef.current
     if (ctx && img) {
       ctx.clearRect(0, 0, canvas.width, canvas.height)
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-      for (const op of ops) paintOp(ctx, op)
+      for (const op of appliedOps) paintOp(ctx, op)
     }
     const dataUrl = canvas.toDataURL('image/png')
     const dataBase64 = dataUrl.replace(/^data:image\/png;base64,/, '')
-    onApply({ dataBase64, mimeType: 'image/png', textNotes, instruction: instruction.trim() })
-  }, [busy, instruction, loaded, onApply, ops, textNotes])
+    onApply({
+      dataBase64,
+      mimeType: 'image/png',
+      textNotes: imageAnnotationTextNotes(appliedOps),
+      instruction: instruction.trim()
+    })
+  }, [busy, instruction, loaded, onApply, ops, pendingTextOp])
 
   // Esc cancels (unless typing a text annotation, where Esc cancels the draft).
   useEffect(() => {
@@ -328,7 +360,7 @@ export function ImageAnnotationEditor({
   }, [busy, onCancel, textDraft])
 
   // Apply needs *some* instruction — drawn markup, or at least a typed note.
-  const canApply = ops.length > 0 || Boolean(dragRef.current) || instruction.trim().length > 0
+  const canApply = ops.length > 0 || Boolean(dragRef.current) || Boolean(pendingTextOp) || instruction.trim().length > 0
 
   return (
     <div className={IMAGE_ANNOTATION_ROOT_CLASS}>
@@ -379,9 +411,22 @@ export function ImageAnnotationEditor({
               autoFocus
               value={textValue}
               onChange={(e) => setTextValue(e.target.value)}
+              onCompositionStart={() => {
+                textCompositionRef.current = true
+              }}
+              onCompositionEnd={(e) => {
+                textCompositionRef.current = false
+                setTextValue(e.currentTarget.value)
+              }}
               onBlur={commitText}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
+                if (
+                  shouldCommitImageAnnotationTextKey(
+                    e.key,
+                    e.nativeEvent.isComposing,
+                    textCompositionRef.current
+                  )
+                ) {
                   e.preventDefault()
                   commitText()
                 }

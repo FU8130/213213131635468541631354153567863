@@ -702,8 +702,6 @@ export function Workbench(): ReactElement {
             rightPanelMode,
             onToggleRightPanelMode: toggleRightPanelMode,
             planPanelEnabled: Boolean(activeGuiPlan),
-            terminalOpen,
-            onToggleTerminal: toggleTerminal,
             onToggleFileTree: toggleFileTreeSidePanel
           }
         }}

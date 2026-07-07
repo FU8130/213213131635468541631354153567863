@@ -2,7 +2,32 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import i18n from '../../i18n'
-import { WorkbenchSideRail } from './WorkbenchTopBar'
+import { WorkbenchSideRail, WorkbenchTopActions } from './WorkbenchTopBar'
+
+describe('WorkbenchTopActions', () => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('en')
+  })
+
+  it('renders editor and terminal actions for the top bar', () => {
+    const html = renderToStaticMarkup(
+      createElement(WorkbenchTopActions, {
+        terminalOpen: false,
+        onToggleTerminal: vi.fn()
+      })
+    )
+
+    expect(html).toContain(`data-tooltip="Choose default editor"`)
+    expect(html).toContain(`aria-label="Choose default editor"`)
+    expect(html).toContain(`data-tooltip="Terminal"`)
+    expect(html).toContain(`aria-label="Terminal"`)
+    expect(html).not.toContain(`title="Choose default editor"`)
+    expect(html).not.toContain(`title="Terminal"`)
+    expect(html.indexOf('data-tooltip="Choose default editor"')).toBeLessThan(
+      html.indexOf('data-tooltip="Terminal"')
+    )
+  })
+})
 
 describe('WorkbenchSideRail', () => {
   beforeEach(async () => {
@@ -16,8 +41,6 @@ describe('WorkbenchSideRail', () => {
         onToggleRightPanelMode: vi.fn(),
         planPanelEnabled: true,
         canvasEnabled: true,
-        terminalOpen: false,
-        onToggleTerminal: vi.fn(),
         sideChatCount: 0,
         sideChatRunningCount: 0,
         sideChatOpen: false,
@@ -30,21 +53,23 @@ describe('WorkbenchSideRail', () => {
     )
 
     for (const label of [
-      'Choose default editor',
       'Open branch conversation',
       'Todo',
       'Plan',
       'Changes',
-      'Terminal',
       'Preview',
       'Whiteboard',
       'Subagents',
       'Files'
     ]) {
       expect(html).toContain(`data-tooltip="${label}"`)
-      expect(html).toContain(`title="${label}"`)
+      expect(html).toContain(`aria-label="${label}"`)
+      expect(html).not.toContain(`title="${label}"`)
     }
 
-    expect(html.match(/ds-side-rail-button/g)?.length).toBeGreaterThanOrEqual(10)
+    expect(html).not.toContain(`data-tooltip="Choose default editor"`)
+    expect(html).not.toContain(`data-tooltip="Terminal"`)
+
+    expect(html.match(/ds-side-rail-button/g)?.length).toBeGreaterThanOrEqual(8)
   })
 })

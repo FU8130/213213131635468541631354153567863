@@ -181,6 +181,10 @@ describe('kun defaults', () => {
       approvalPolicy: 'on-request',
       sandboxMode: 'workspace-write'
     })
+    expect(kunToolPermissionModeSettings('trusted-workspace')).toEqual({
+      approvalPolicy: 'auto',
+      sandboxMode: 'workspace-write'
+    })
     expect(kunToolPermissionModeSettings('bypass')).toEqual({
       approvalPolicy: 'auto',
       sandboxMode: 'danger-full-access'
@@ -198,6 +202,10 @@ describe('kun defaults', () => {
       approvalPolicy: 'on-request',
       sandboxMode: 'workspace-write'
     })).toBe('workspace-write')
+    expect(kunToolPermissionModeFromSettings({
+      approvalPolicy: 'auto',
+      sandboxMode: 'workspace-write'
+    })).toBe('trusted-workspace')
   })
 
   it('defaults token economy mode to off', () => {
@@ -659,8 +667,20 @@ describe('mergeKunRuntimeSettings', () => {
     expect(kunToolPermissionModeFromSettings(next)).toBe('workspace-write')
   })
 
+  it('preserves trusted workspace when normalizing unified tool permission settings', () => {
+    const current = defaultKunRuntimeSettings()
+    const next = mergeKunRuntimeSettings(current, {
+      approvalPolicy: 'auto',
+      sandboxMode: 'workspace-write'
+    })
+
+    expect(next.approvalPolicy).toBe('auto')
+    expect(next.sandboxMode).toBe('workspace-write')
+    expect(kunToolPermissionModeFromSettings(next)).toBe('trusted-workspace')
+  })
+
   it('preserves non-UI approval/sandbox combinations instead of canonicalizing them', () => {
-    // The unified 5-mode selector cannot represent every approvalPolicy/sandboxMode
+    // The unified 6-mode selector cannot represent every approvalPolicy/sandboxMode
     // combination. mergeKunRuntimeSettings must NOT snap these to a canonical mode,
     // otherwise it would silently weaken a user's saved security posture.
     const current = defaultKunRuntimeSettings()

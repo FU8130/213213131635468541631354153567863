@@ -3164,6 +3164,73 @@ pre {
   color: #111827;
 }
 
+.ds-workbench-top-actions {
+  z-index: 30;
+  margin-right: clamp(4.5rem, 14cqw, 12rem);
+}
+
+.ds-topbar-action-button {
+  position: relative;
+}
+
+.ds-topbar-action-button::before,
+.ds-topbar-action-button::after {
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  z-index: 80;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.ds-topbar-action-button::before {
+  content: '';
+  top: calc(100% + 3px);
+  right: 11px;
+  border: 5px solid transparent;
+  border-bottom-color: rgba(15, 23, 42, 0.9);
+}
+
+.ds-topbar-action-button::after {
+  content: attr(data-tooltip);
+  top: calc(100% + 12px);
+  max-width: min(260px, calc(100vw - 2rem));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.94);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 7px 9px;
+}
+
+.ds-topbar-action-button:hover::before,
+.ds-topbar-action-button:hover::after,
+.ds-topbar-action-button:focus-visible::before,
+.ds-topbar-action-button:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+[data-theme='dark'] .ds-topbar-action-button::before {
+  border-bottom-color: rgba(248, 250, 252, 0.92);
+}
+
+[data-theme='dark'] .ds-topbar-action-button::after {
+  border-color: rgba(15, 23, 42, 0.14);
+  background: rgba(248, 250, 252, 0.95);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+  color: #111827;
+}
+
 .session-header-compact-meta {
   overflow: hidden;
 }
@@ -3176,6 +3243,10 @@ pre {
   .chat-topbar-actions {
     width: 100%;
     overflow-x: auto;
+  }
+
+  .ds-workbench-top-actions {
+    margin-right: 0;
   }
 }
 
@@ -3417,6 +3488,7 @@ pre {
   .ds-composer-toolbar-actions .ds-composer-model-picker {
     max-width: min(180px, 40vw);
   }
+
 }
 
 @container (max-width: 620px) {

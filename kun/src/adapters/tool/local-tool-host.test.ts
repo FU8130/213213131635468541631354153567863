@@ -58,6 +58,39 @@ describe('LocalToolHost approval policy', () => {
     expect(await artifactStore.get(artifactId)).toHaveLength(140 * 1024)
   })
 
+  it('runs workspace file-change tools without approval when policy is auto', async () => {
+    const awaitApproval = vi.fn(async () => 'allow' as const)
+    const host = new LocalToolHost({ tools: [LocalToolHost.defineTool({
+      name: 'touch_workspace_file',
+      description: 'simulates a workspace file change',
+      inputSchema: { type: 'object' },
+      toolKind: 'file_change',
+      policy: 'on-request',
+      execute: async () => ({ output: { ok: true } })
+    })] })
+
+    const result = await host.execute(
+      { callId: 'call_write', toolName: 'touch_workspace_file', arguments: {} },
+      {
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspace: '/tmp/workspace',
+        approvalPolicy: 'auto',
+        sandboxMode: 'workspace-write',
+        abortSignal: new AbortController().signal,
+        awaitApproval
+      }
+    )
+
+    expect(awaitApproval).not.toHaveBeenCalled()
+    expect(result.approved).toBe(true)
+    expect(result.item).toMatchObject({
+      kind: 'tool_result',
+      toolName: 'touch_workspace_file',
+      output: { ok: true }
+    })
+  })
+
   it('keeps user input tools advertised without a GUI gate but rejects execution', async () => {
     const host = new LocalToolHost({ tools: [echoTool, userInputTool] })
     const context = {

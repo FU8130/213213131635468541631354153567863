@@ -27,7 +27,14 @@ export {
   DEFAULT_TOOL_OUTPUT_MAX_LINES,
   type ToolOutputLimitsConfig
 } from '../../kun/src/contracts/tool-output-limits.js'
-export const KUN_TOOL_PERMISSION_MODES = ['always-ask', 'read-only', 'sensitive-ask', 'workspace-write', 'bypass'] as const
+export const KUN_TOOL_PERMISSION_MODES = [
+  'always-ask',
+  'read-only',
+  'sensitive-ask',
+  'workspace-write',
+  'trusted-workspace',
+  'bypass'
+] as const
 export type KunToolPermissionMode = (typeof KUN_TOOL_PERMISSION_MODES)[number]
 /**
  * Overall UI text scale factor (applied as `zoom` on the app shell).
@@ -406,6 +413,8 @@ export function kunToolPermissionModeSettings(
       return { approvalPolicy: 'untrusted', sandboxMode: 'danger-full-access' }
     case 'workspace-write':
       return { approvalPolicy: 'on-request', sandboxMode: 'workspace-write' }
+    case 'trusted-workspace':
+      return { approvalPolicy: 'auto', sandboxMode: 'workspace-write' }
     case 'bypass':
       return { approvalPolicy: 'auto', sandboxMode: 'danger-full-access' }
   }
@@ -421,6 +430,12 @@ export function kunToolPermissionModeFromSettings(
     settings.sandboxMode === 'danger-full-access'
   ) {
     return 'bypass'
+  }
+  if (
+    settings.approvalPolicy === 'auto' &&
+    settings.sandboxMode === 'workspace-write'
+  ) {
+    return 'trusted-workspace'
   }
   if (settings.sandboxMode === 'workspace-write') return 'workspace-write'
   return 'read-only'

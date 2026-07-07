@@ -495,10 +495,10 @@ export function mergeKunRuntimeSettings(
   const nextRoleModelSlots = mergeOptionalModelSlot(current, patch)
   const nextRoleReasoningSlots = mergeOptionalReasoningSlot(current, patch)
   // NOTE: approvalPolicy/sandboxMode are merged through verbatim from the patch.
-  // The unified 5-mode UI selector already resolves a mode to its concrete
+  // The unified 6-mode UI selector already resolves a mode to its concrete
   // {approvalPolicy, sandboxMode} pair via kunToolPermissionModeSettings before
   // dispatching the patch. We must NOT re-canonicalize here: the mode->settings
-  // mapping is lossy (only 5 of the 6x4 policy/sandbox combos are representable),
+  // mapping is lossy (only 6 of the 6x4 policy/sandbox combos are representable),
   // so round-tripping would silently rewrite valid non-UI values — e.g. demote
   // approvalPolicy 'never'/'suggest' to 'on-request', or escalate a 'read-only'/
   // 'external-sandbox' sandbox to 'danger-full-access' — on every settings merge.

@@ -43,6 +43,8 @@ export type ThreadServiceOptions = {
   events: RuntimeEventRecorder
   ids: IdGenerator
   nowIso: () => string
+  defaultApprovalPolicy?: ApprovalPolicy
+  defaultSandboxMode?: SandboxMode
   onDeleted?: (threadId: string) => void
 }
 
@@ -79,6 +81,8 @@ export class ThreadService {
   private readonly events: RuntimeEventRecorder
   private readonly ids: IdGenerator
   private readonly nowIso: () => string
+  private defaultApprovalPolicy: ApprovalPolicy | undefined
+  private defaultSandboxMode: SandboxMode | undefined
   private readonly onDeleted?: (threadId: string) => void
 
   constructor(options: ThreadServiceOptions) {
@@ -87,7 +91,14 @@ export class ThreadService {
     this.events = options.events
     this.ids = options.ids
     this.nowIso = options.nowIso
+    this.defaultApprovalPolicy = options.defaultApprovalPolicy
+    this.defaultSandboxMode = options.defaultSandboxMode
     this.onDeleted = options.onDeleted
+  }
+
+  updateRuntimeDefaults(input: { approvalPolicy: ApprovalPolicy; sandboxMode: SandboxMode }): void {
+    this.defaultApprovalPolicy = input.approvalPolicy
+    this.defaultSandboxMode = input.sandboxMode
   }
 
   async list(options: ListThreadsOptions = {}): Promise<ThreadSummary[]> {
@@ -137,8 +148,8 @@ export class ThreadService {
       ...(request.agentId?.trim() ? { agentId: request.agentId.trim() } : {}),
       ...(request.systemPrompt?.trim() ? { systemPrompt: request.systemPrompt.trim() } : {}),
       mode: request.mode,
-      approvalPolicy: request.approvalPolicy,
-      sandboxMode: request.sandboxMode,
+      approvalPolicy: request.approvalPolicy ?? this.defaultApprovalPolicy,
+      sandboxMode: request.sandboxMode ?? this.defaultSandboxMode,
       ...(request.costBudgetUsd !== undefined ? { costBudgetUsd: request.costBudgetUsd } : {}),
       ...(options.relation ? { relation: options.relation } : {}),
       ...(options.parentThreadId ? { parentThreadId: options.parentThreadId } : {}),

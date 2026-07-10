@@ -213,6 +213,8 @@ export async function createKunServeRuntime(
     events,
     ids,
     nowIso,
+    defaultApprovalPolicy: activeOptions.approvalPolicy,
+    defaultSandboxMode: activeOptions.sandboxMode,
     onDeleted: (threadId) => {
       usageService.reset(threadId)
       events.clearThread(threadId)
@@ -859,6 +861,10 @@ export async function createKunServeRuntime(
 	      defaultModel: activeOptions.model,
 	      contextCompaction: activeOptions.contextCompaction,
 	      model: modelClient
+	    })
+	    threadService.updateRuntimeDefaults({
+	      approvalPolicy: activeOptions.approvalPolicy,
+	      sandboxMode: activeOptions.sandboxMode
 	    })
 	    reviewService.updateRuntimeConfig({
 	      defaultModel: activeOptions.model,

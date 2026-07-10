@@ -44,6 +44,31 @@ function withId(item: TurnItem, id: string): TurnItem {
   return { ...item, id }
 }
 
+describe('ThreadService runtime defaults', () => {
+  it('uses the runtime approval and sandbox defaults when an HTTP create request omits them', async () => {
+    const bus = new InMemoryEventBus()
+    const threadStore = new InMemoryThreadStore()
+    const sessionStore = new InMemorySessionStore()
+    const service = new ThreadService({
+      threadStore,
+      sessionStore,
+      events: new RuntimeEventRecorder({
+        eventBus: bus,
+        sessionStore,
+        allocateSeq: (threadId) => bus.allocateSeq(threadId),
+        nowIso: () => '2026-07-10T00:00:00.000Z'
+      }),
+      ids: new SequentialIdGenerator(),
+      nowIso: () => '2026-07-10T00:00:00.000Z',
+      defaultApprovalPolicy: 'never',
+      defaultSandboxMode: 'read-only'
+    })
+
+    const thread = await service.create({ workspace: '/tmp', model: 'm', mode: 'agent' })
+    expect(thread).toMatchObject({ approvalPolicy: 'never', sandboxMode: 'read-only' })
+  })
+})
+
 async function seedParentWithTurns(
   service: ThreadService,
   threadStore: InMemoryThreadStore,

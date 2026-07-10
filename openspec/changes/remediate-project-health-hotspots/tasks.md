@@ -24,7 +24,7 @@
 
 ## 3. Compatible model protocol boundaries
 
-- [ ] 3.1 Capture representative Chat Completions, Responses, and Anthropic Messages
+- [x] 3.1 Capture representative Chat Completions, Responses, and Anthropic Messages
   request/header/stream/usage transcripts.
 - [x] 3.2 Extract shared stream resource budgeting and tool-call aggregation.
 - [ ] 3.3 Extract Chat Completions request codec and stream decoder.

@@ -53,3 +53,15 @@ baseline until concurrent work restores the full suite.
 Line count is an observation, not the completion criterion. Completion requires
 one state owner per domain, removal of duplicated active paths, characterization
 coverage, and compatibility evidence.
+
+## Model protocol characterization matrix
+
+| Family | Request/header evidence | Stream/tool evidence | Usage evidence |
+| --- | --- | --- | --- |
+| Chat Completions | endpoint-format and custom-full-endpoint tests capture URL/body/auth/tool ordering | streaming-tool-calls tests cover fragmented calls, finish reasons, truncation, CRLF, limits | native DeepSeek hit/miss case in `compat-usage-normalizer.test.ts` |
+| OpenAI Responses | Codex Responses Lite test captures internal header, developer instructions, tools, reasoning, and input | shared streaming tests cover Responses fragmented calls and argument limits | `input_tokens_details.cached_tokens` characterization |
+| Anthropic Messages | per-model endpoint/header test captures `/messages`, `x-api-key`, version, max tokens, and image/tool-result layout | streaming tests cover interrupted `tool_use` recovery and common limits | cache read/write plus exclusive `input_tokens` characterization |
+
+Retry, HTML challenge diagnostics, credential redaction, and provider guidance are
+captured independently so later endpoint-family extraction can compare the wire
+transcript without coupling those shared policies to a decoder implementation.

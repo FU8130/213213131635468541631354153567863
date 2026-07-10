@@ -514,7 +514,7 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
     const block: ChatBlock = {
       kind: 'reasoning',
       id: 'live-reasoning',
-      text: 'current reasoning summary'
+      text: '**current reasoning summary**\n\n<!-- -->'
     }
 
     const html = renderToStaticMarkup(
@@ -530,6 +530,8 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
     expect(html).toContain('ds-shiny-text')
     expect(html).not.toContain('ds-work-logo')
     expect(html).toContain('current reasoning summary')
+    expect(html).not.toContain('&lt;!-- --&gt;')
+    expect(block.text).toContain('<!-- -->')
   })
 
   it('keeps same-batch tool calls collapsed by default', () => {

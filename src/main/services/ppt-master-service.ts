@@ -24,6 +24,22 @@ const MAX_COMMAND_OUTPUT = 24_000
 const INSTALL_METADATA_FILE = '.kun-ppt-master.json'
 const UPSTREAM_ENTRY_FILE = 'PPT_MASTER_UPSTREAM.md'
 const MANAGED_BY = 'kun-gui'
+// The Write integration exposes only Markdown -> SVG -> PPTX. Installing the
+// upstream catch-all requirements would also pull PDF, EPUB, notebook, web,
+// narration, image-generation, and preview-server stacks (including a ~24 MB
+// PDF runtime) on the first click even though none can be invoked here.
+const WRITE_PIP_REQUIREMENTS = [
+  'python-pptx>=0.6.21',
+  'Pillow>=9.0.0',
+  'svglib>=1.5.0',
+  'reportlab>=4.0.0'
+] as const
+const WRITE_DEPENDENCY_PROBE = [
+  'import pptx',
+  'from PIL import Image',
+  'from svglib.svglib import svg2rlg',
+  'from reportlab.graphics import renderPM'
+].join('; ')
 
 let installPromise: Promise<PptMasterEnsureResult> | null = null
 
@@ -97,14 +113,21 @@ async function ensurePptMasterOnce(options: {
       installed = true
     }
 
-    const requirements = join(skillDir, 'requirements.txt')
-    const pip = await runCommand(
-      venvPython,
-      ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '-r', requirements],
-      skillDir
-    )
-    if (pip.code !== 0) {
-      return { ok: false, message: `Could not install PPT Master dependencies: ${formatCommandOutput(pip.output)}` }
+    const ready = await runCommand(venvPython, ['-c', WRITE_DEPENDENCY_PROBE], skillDir, 30_000)
+    if (ready.code !== 0) {
+      const pip = await runCommand(
+        venvPython,
+        ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', ...WRITE_PIP_REQUIREMENTS],
+        skillDir
+      )
+      if (pip.code !== 0) {
+        return { ok: false, message: `Could not install PPT Master dependencies: ${formatCommandOutput(pip.output)}` }
+      }
+      const verified = await runCommand(venvPython, ['-c', WRITE_DEPENDENCY_PROBE], skillDir, 30_000)
+      if (verified.code !== 0) {
+        return { ok: false, message: `PPT Master dependencies installed but could not be loaded: ${formatCommandOutput(verified.output)}` }
+      }
+      installed = true
     }
     return { ok: true, skillPath: skillDir, pythonPath: venvPython, installed }
   } catch (error) {

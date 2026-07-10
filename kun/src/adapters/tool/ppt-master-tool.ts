@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, readFile, realpath, stat } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { LocalToolHost, type LocalTool } from './local-tool-host.js'
 import { resolveWorkspacePath, withToolBoundary } from './builtin-tool-utils.js'
 import { assertCanWritePath } from './sandbox-policy.js'
@@ -278,14 +278,35 @@ export function createPptMasterRunTool(
       const command = await commandForAction(action, args, context, skillDir)
       if ('error' in command) return { output: { error: command.error }, isError: true }
       const result = await run(python, command.args, skillDir, context.abortSignal)
-      if (result.exitCode === 0 && action === 'export' && command.outputPath && !await isNonEmptyFile(command.outputPath)) {
-        return {
-          output: {
-            action,
-            error: `PPT Master export completed but did not create ${command.outputPath}.`,
-            output: result.output
-          },
-          isError: true
+      if (action === 'export' && command.outputPath && command.temporaryOutputPath) {
+        if (result.exitCode !== 0) {
+          await rm(command.temporaryOutputPath, { force: true }).catch(() => undefined)
+        } else if (!await isNonEmptyFile(command.temporaryOutputPath)) {
+          await rm(command.temporaryOutputPath, { force: true }).catch(() => undefined)
+          return {
+            output: {
+              action,
+              error: `PPT Master export completed but did not create a new ${command.outputPath}.`,
+              output: result.output
+            },
+            isError: true
+          }
+        } else {
+          try {
+            await publishPresentation(command.temporaryOutputPath, command.outputPath)
+          } finally {
+            await rm(command.temporaryOutputPath, { force: true }).catch(() => undefined)
+          }
+          if (!await isNonEmptyFile(command.outputPath)) {
+            return {
+              output: {
+                action,
+                error: `PPT Master could not publish ${command.outputPath}.`,
+                output: result.output
+              },
+              isError: true
+            }
+          }
         }
       }
       const createdProjectPath = action === 'init_project'
@@ -329,7 +350,12 @@ async function commandForAction(
   args: Record<string, unknown>,
   context: ToolHostContext,
   skillDir: string
-): Promise<{ args: string[]; projectPath?: string; outputPath?: string } | { error: string }> {
+): Promise<{
+  args: string[]
+  projectPath?: string
+  outputPath?: string
+  temporaryOutputPath?: string
+} | { error: string }> {
   const script = (name: string): string => join(skillDir, 'scripts', name)
   if (action === 'init_project') {
     const projectName = safeProjectName(args.project_name)
@@ -388,11 +414,28 @@ async function commandForAction(
   assertCanWritePath(output.absolutePath, context)
   if (extname(output.absolutePath).toLowerCase() !== '.pptx') return { error: 'output_path must end in .pptx' }
   await mkdir(dirname(output.absolutePath), { recursive: true })
+  // Export to a unique sibling first. Verifying the final path alone can
+  // mistake an older deck for a successful new export when the upstream
+  // command exits without writing anything.
+  const temporaryOutputPath = join(
+    dirname(output.absolutePath),
+    `.${basename(output.absolutePath, '.pptx')}.${randomUUID()}.tmp.pptx`
+  )
   return {
-    args: [script('svg_to_pptx.py'), project.absolutePath, '--output', output.absolutePath, '--quiet'],
+    args: [script('svg_to_pptx.py'), project.absolutePath, '--output', temporaryOutputPath, '--quiet'],
     projectPath: project.absolutePath,
-    outputPath: output.absolutePath
+    outputPath: output.absolutePath,
+    temporaryOutputPath
   }
+}
+
+async function publishPresentation(temporaryPath: string, outputPath: string): Promise<void> {
+  if (process.platform === 'win32') {
+    // Windows rename does not reliably replace an existing destination.
+    await copyFile(temporaryPath, outputPath)
+    return
+  }
+  await rename(temporaryPath, outputPath)
 }
 
 function isPptMasterActive(context: ToolHostContext): boolean {

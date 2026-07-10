@@ -142,7 +142,7 @@ describe('PPT Master local tool', () => {
       join(skillDir, 'scripts', 'svg_to_pptx.py'),
       projectPath,
       '--output',
-      join(workspace, 'presentations', 'brief.pptx'),
+      expect.stringMatching(/\/presentations\/\.brief\.[^.]+\.tmp\.pptx$/),
       '--quiet'
     ])
   })
@@ -229,6 +229,28 @@ describe('PPT Master local tool', () => {
 
     expect(result.isError).toBe(true)
     expect(result.output).toMatchObject({ error: expect.stringContaining('did not create') })
+  })
+
+  it('does not accept a stale PPTX from an earlier export', async () => {
+    const workspace = await workspaceWithMarkdown()
+    const approvalToken = await approvePresentation(workspace)
+    await mkdir(join(workspace, 'presentations'), { recursive: true })
+    await writeFile(join(workspace, 'presentations', 'brief.pptx'), 'old-deck', 'utf8')
+    const tool = createPptMasterRunTool('/managed/ppt-master', {
+      pythonPath: '/managed/ppt-master/.venv/bin/python',
+      isReady: () => true,
+      run: async () => ({ exitCode: 0, output: 'PPTX exported' })
+    })
+
+    const result = await tool.execute({
+      action: 'export',
+      project_path: '.kun-presentations/brief',
+      output_path: 'presentations/brief.pptx',
+      confirmation_token: approvalToken
+    }, context(workspace))
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toMatchObject({ error: expect.stringContaining('did not create a new') })
   })
 
   it('uses native structured input to issue a same-turn generation token', async () => {

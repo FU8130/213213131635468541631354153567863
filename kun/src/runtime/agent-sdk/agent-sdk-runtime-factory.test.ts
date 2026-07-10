@@ -264,6 +264,74 @@ describe('createAgentSdkRuntime turn context', () => {
     expect(context?.contextInstructions?.join('\n')).not.toContain('SINGLE SCREEN')
   })
 
+  test('bridges skill-gated PPT tools with the same active skill ids at execution time', async () => {
+    const executed: string[] = []
+    const pptTool = LocalToolHost.defineTool({
+      name: 'ppt_master_run',
+      description: 'Managed PPT Master step',
+      inputSchema: { type: 'object', properties: {} },
+      toolKind: 'file_change',
+      policy: 'auto',
+      shouldAdvertise: (context) => context.activeSkillIds?.includes('ppt-master') === true,
+      execute: async () => {
+        executed.push('ppt_master_run')
+        return { output: { ok: true } }
+      }
+    })
+    const registry = CapabilityRegistry.fromLocalTools([pptTool])
+    const host = new LocalToolHost({ registry })
+    const skillRuntime = {
+      resolveTurn: vi.fn(async () => ({
+        activeSkillIds: ['ppt-master'],
+        activations: [],
+        instructions: [],
+        injectedBytes: 0
+      }))
+    }
+    const sdkTurn = { id: 'tn', prompt: '$ppt-master' } as ThreadRecord['turns'][number]
+    const runtime = createAgentSdkRuntime({
+      registry,
+      toolHost: host,
+      turns: {} as never,
+      sessionStore: {
+        loadItems: async () => [{
+          id: 'item_user',
+          turnId: 'tn',
+          threadId: 'th',
+          kind: 'user_message',
+          role: 'user',
+          status: 'completed',
+          text: '$ppt-master',
+          createdAt: '2026-07-10T00:00:00.000Z'
+        }]
+      } as never,
+      threadStore: { get: async () => threadWith({ id: 'th', turns: [sdkTurn] }) } as never,
+      events: {} as never,
+      ids: { next: (prefix) => prefix },
+      prefix: { systemPrompt: '' },
+      providerConfigs: {},
+      agentSdkProviderIds: new Set(),
+      defaultApprovalPolicy: 'auto',
+      skillRuntime: skillRuntime as never
+    })
+    const deps = (runtime as unknown as {
+      deps: {
+        loadTurnContext(threadId: string, turnId: string): Promise<{ bridgeableTools: Array<{ name: string }> } | null>
+        executeKunTool(threadId: string, turnId: string, toolName: string, args: Record<string, unknown>): Promise<unknown>
+      }
+    }).deps
+
+    const turnContext = await deps.loadTurnContext('th', 'tn')
+    expect(turnContext?.bridgeableTools).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'ppt_master_run' })
+    ]))
+    await expect(deps.executeKunTool('th', 'tn', 'ppt_master_run', {})).resolves.toEqual({
+      output: { ok: true },
+      isError: false
+    })
+    expect(executed).toEqual(['ppt_master_run'])
+    expect(skillRuntime.resolveTurn).toHaveBeenCalledTimes(1)
+  })
 
   test('does not fall back to the process workspace when a thread or turn has disappeared', async () => {
     const runtime = createAgentSdkRuntime({

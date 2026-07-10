@@ -48,6 +48,8 @@ export type TurnServiceDeps = {
   nowIso: () => string
 }
 
+export class TurnConflictError extends Error {}
+
 /**
  * Turn service: owns the turn lifecycle (start, finish, abort, steer,
  * compact). The service is the only place that emits turn lifecycle
@@ -57,7 +59,7 @@ export type TurnServiceDeps = {
 export class TurnService {
   private deps: TurnServiceDeps
   private readonly inflightTurns = new Map<string, AbortController>()
-  private readonly threadMutationQueues = new Map<string, Promise<void>>()
+  private readonly threadMutationQueues = new Map<string, Promise<unknown>>()
 
   constructor(deps: TurnServiceDeps) {
     this.deps = deps
@@ -74,69 +76,70 @@ export class TurnService {
     threadId: string
     request: StartTurnRequest
   }): Promise<StartTurnResponse> {
-    const thread = await this.deps.threadStore.get(input.threadId)
-    if (!thread) throw new Error(`thread not found: ${input.threadId}`)
-    const turnId = this.deps.ids.next('turn')
-    const turn = createTurnRecord({
-      id: turnId,
-      threadId: input.threadId,
-      prompt: input.request.prompt,
-      model: input.request.model,
-      providerId: input.request.providerId,
-      reasoningEffort: input.request.reasoningEffort,
-      attachmentIds: input.request.attachmentIds ?? [],
-      guiPlan: input.request.guiPlan,
-      guiDesignCanvas: input.request.guiDesignCanvas,
-      mode: input.request.mode,
-      disableUserInput: input.request.disableUserInput,
-      imContext: input.request.imContext,
-      workspaceCheckpointId: input.request.workspaceCheckpointId
+    const started = await this.withThreadMutation(input.threadId, async () => {
+      const thread = await this.deps.threadStore.get(input.threadId)
+      if (!thread) throw new Error(`thread not found: ${input.threadId}`)
+      if (thread.turns.some((turn) => turn.status === 'queued' || turn.status === 'running')) {
+        throw new TurnConflictError(`thread already has an active turn: ${input.threadId}`)
+      }
+      const turnId = this.deps.ids.next('turn')
+      const turn = createTurnRecord({
+        id: turnId,
+        threadId: input.threadId,
+        prompt: input.request.prompt,
+        model: input.request.model,
+        providerId: input.request.providerId,
+        reasoningEffort: input.request.reasoningEffort,
+        attachmentIds: input.request.attachmentIds ?? [],
+        guiPlan: input.request.guiPlan,
+        guiDesignCanvas: input.request.guiDesignCanvas,
+        mode: input.request.mode,
+        disableUserInput: input.request.disableUserInput,
+        imContext: input.request.imContext,
+        workspaceCheckpointId: input.request.workspaceCheckpointId
+      })
+      const userItem = makeUserItem({
+        id: `item_${turnId}_user`,
+        turnId,
+        threadId: input.threadId,
+        text: input.request.prompt,
+        displayText: input.request.displayText,
+        messageSource: input.request.messageSource,
+        attachmentIds: input.request.attachmentIds ?? [],
+        fileReferences: input.request.fileReferences ?? [],
+        workspaceCheckpointId: input.request.workspaceCheckpointId
+      })
+      const controller = new AbortController()
+      const next = {
+        ...touchThread(thread, this.deps.nowIso()),
+        status: 'running' as const,
+        ...(input.request.approvalPolicy !== undefined
+          ? { approvalPolicy: input.request.approvalPolicy }
+          : {}),
+        ...(input.request.sandboxMode !== undefined
+          ? { sandboxMode: input.request.sandboxMode }
+          : {}),
+        turns: [...thread.turns, startTurnRecord(appendTurnItem(turn, userItem))]
+      }
+      await this.deps.threadStore.upsert({ ...next, updatedAt: this.deps.nowIso() })
+      await this.deps.sessionStore.appendItem(input.threadId, userItem)
+      this.inflightTurns.set(turnId, controller)
+      this.deps.inflight.begin({ id: turnId, kind: 'model', threadId: input.threadId, turnId })
+      return { turnId, userItem }
     })
-    const userItem = makeUserItem({
-      id: `item_${turnId}_user`,
-      turnId,
-      threadId: input.threadId,
-      text: input.request.prompt,
-      displayText: input.request.displayText,
-      messageSource: input.request.messageSource,
-      attachmentIds: input.request.attachmentIds ?? [],
-      fileReferences: input.request.fileReferences ?? [],
-      workspaceCheckpointId: input.request.workspaceCheckpointId
-    })
-    const controller = new AbortController()
-    await this.upsertThread(input.threadId, (current) => ({
-      ...touchThread(current, this.deps.nowIso()),
-      status: 'running',
-      ...(input.request.approvalPolicy !== undefined
-        ? { approvalPolicy: input.request.approvalPolicy }
-        : {}),
-      ...(input.request.sandboxMode !== undefined
-        ? { sandboxMode: input.request.sandboxMode }
-        : {}),
-      turns: [...current.turns, startTurnRecord(appendTurnItem(turn, userItem))]
-    }))
-    await this.deps.sessionStore.appendItem(input.threadId, userItem)
     await this.deps.events.record({
       kind: 'turn_started',
       threadId: input.threadId,
-      turnId
+      turnId: started.turnId
     })
     await this.deps.events.record({
       kind: 'item_created',
       threadId: input.threadId,
-      turnId,
-      itemId: userItem.id,
-      item: userItem
+      turnId: started.turnId,
+      itemId: started.userItem.id,
+      item: started.userItem
     })
-    this.inflightTurns.set(turnId, controller)
-    this.deps.inflight.begin({
-      id: turnId,
-      kind: 'model',
-      threadId: input.threadId,
-      turnId
-    })
-    this.deps.steering.setTurn(turnId)
-    return { threadId: input.threadId, turnId, userMessageItemId: userItem.id }
+    return { threadId: input.threadId, turnId: started.turnId, userMessageItemId: started.userItem.id }
   }
 
   async rewindThread(input: {
@@ -174,6 +177,11 @@ export class TurnService {
     displayText?: string
     messageSource?: UserMessageSource
   }): Promise<void> {
+    const turn = await this.getTurn(input.threadId, input.turnId)
+    if (!turn) throw new Error(`turn not found: ${input.turnId}`)
+    if (turn.status !== 'running' || !this.inflightTurns.has(input.turnId)) {
+      throw new TurnConflictError(`turn is not active: ${input.turnId}`)
+    }
     this.deps.steering.enqueue(input.turnId, {
       text: input.text,
       ...(input.displayText ? { displayText: input.displayText } : {}),
@@ -198,7 +206,7 @@ export class TurnService {
     } else {
       console.warn(`[kun] interrupt had no inflight controller thread=${input.threadId} turn=${input.turnId}`)
     }
-    this.deps.steering.clear()
+    this.deps.steering.clear(input.turnId)
     this.inflightTurns.delete(input.turnId)
     this.deps.inflight.end(input.turnId)
     await this.deps.events.record({
@@ -384,7 +392,7 @@ export class TurnService {
   }): Promise<void> {
     this.inflightTurns.delete(input.turnId)
     this.deps.inflight.end(input.turnId)
-    this.deps.steering.clear()
+    this.deps.steering.clear(input.turnId)
     await this.finalizePersistedOpenItems(input.threadId, input.turnId, input.status)
     await this.upsertThread(input.threadId, (current) => {
       const next = current.turns.map((t) => {
@@ -570,17 +578,21 @@ export class TurnService {
     threadId: string,
     mutator: (current: ThreadRecord) => ThreadRecord
   ): Promise<void> {
-    const previous = this.threadMutationQueues.get(threadId) ?? Promise.resolve()
-    const run = previous.catch(() => undefined).then(async () => {
+    await this.withThreadMutation(threadId, async () => {
       const current = await this.deps.threadStore.get(threadId)
       if (!current) return
       const next = mutator(current)
       await this.deps.threadStore.upsert({ ...next, updatedAt: this.deps.nowIso() })
     })
+  }
+
+  private async withThreadMutation<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.threadMutationQueues.get(threadId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(operation)
     const guard = run.then(() => undefined, () => undefined)
     this.threadMutationQueues.set(threadId, guard)
     try {
-      await run
+      return await run
     } finally {
       if (this.threadMutationQueues.get(threadId) === guard) {
         this.threadMutationQueues.delete(threadId)

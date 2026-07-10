@@ -888,7 +888,7 @@ export class AgentLoop {
   }
 
   private async drainSteering(threadId: string, turnId: string, signal: AbortSignal): Promise<void> {
-    const pending = this.opts.steering.drain()
+    const pending = this.opts.steering.drain(turnId)
     if (pending.length === 0) return
     for (const entry of pending) {
       const item = makeUserItem({

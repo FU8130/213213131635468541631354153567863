@@ -16,7 +16,7 @@ import type { ModelClient, ModelRequest, ModelStreamChunk } from '../ports/model
 import { emptyUsageSnapshot } from '../contracts/usage.js'
 import type { TurnItem } from '../contracts/items.js'
 import { RuntimeEventRecorder } from './runtime-event-recorder.js'
-import { TurnService } from './turn-service.js'
+import { TurnConflictError, TurnService } from './turn-service.js'
 import { UsageService } from './usage-service.js'
 
 class SummaryModel implements ModelClient {
@@ -50,6 +50,46 @@ class SummaryModel implements ModelClient {
 }
 
 describe('TurnService startTurn', () => {
+  it('atomically admits only one active turn for a thread', async () => {
+    const sessionStore = new InMemorySessionStore()
+    const threadStore = new InMemoryThreadStore()
+    const eventBus = new InMemoryEventBus()
+    const nowIso = () => '2026-06-18T00:00:00.000Z'
+    const service = new TurnService({
+      threadStore,
+      sessionStore,
+      events: new RuntimeEventRecorder({
+        eventBus,
+        sessionStore,
+        allocateSeq: (threadId) => eventBus.allocateSeq(threadId),
+        nowIso
+      }),
+      inflight: new InflightTracker(),
+      steering: new SteeringQueue(),
+      compactor: new ContextCompactor(),
+      ids: new SequentialIdGenerator(),
+      nowIso
+    })
+    const threadId = 'thr_single_active_turn'
+    await threadStore.upsert(createThreadRecord({
+      id: threadId,
+      title: 'Single active turn',
+      workspace: '/tmp/workspace',
+      model: 'deepseek-v4-pro'
+    }))
+
+    const [first, second] = await Promise.allSettled([
+      service.startTurn({ threadId, request: { prompt: 'first', model: 'm' } }),
+      service.startTurn({ threadId, request: { prompt: 'second', model: 'm' } })
+    ])
+
+    expect(first.status).toBe('fulfilled')
+    expect(second).toMatchObject({ status: 'rejected', reason: expect.any(TurnConflictError) })
+    const thread = await threadStore.get(threadId)
+    expect(thread?.turns).toHaveLength(1)
+    expect(thread?.turns[0]?.status).toBe('running')
+  })
+
   it('persists per-turn provider ids for model routing', async () => {
     const sessionStore = new InMemorySessionStore()
     const threadStore = new InMemoryThreadStore()

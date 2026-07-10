@@ -100,6 +100,31 @@ describe('FileSessionStore', () => {
     expect(await sessionStore.highestSeq('thr_high_water')).toBe(7)
   })
 
+  it('streams replay records in order and rejects an oversized unterminated record', async () => {
+    const sessionStore = new FileSessionStore({ dataDir })
+    for (const seq of [1, 2, 3]) {
+      await sessionStore.appendEvent('thr_streamed_replay', {
+        kind: 'heartbeat', seq, timestamp: `2026-01-01T00:00:0${seq}.000Z`, threadId: 'thr_streamed_replay'
+      })
+    }
+    const replayed: number[] = []
+    for await (const event of sessionStore.iterateEventsSince('thr_streamed_replay', 1)) {
+      replayed.push(event.seq)
+    }
+    expect(replayed).toEqual([2, 3])
+
+    await appendFile(
+      join(dataDir, 'threads', 'thr_streamed_replay', 'events.jsonl'),
+      JSON.stringify({ kind: 'heartbeat', seq: 4, timestamp: '2026-01-01T00:00:04.000Z', threadId: 'thr_streamed_replay', payload: 'x'.repeat(512) })
+    )
+    const oversized = async () => {
+      for await (const _event of sessionStore.iterateEventsSince('thr_streamed_replay', 3, { maxRecordBytes: 128 })) {
+        // Consume until the record-size guard rejects.
+      }
+    }
+    await expect(oversized()).rejects.toThrow('event replay record exceeds 128 bytes')
+  })
+
   it('loadItems reads from disk and dedups by id, keeping the latest write', async () => {
     const item = (id: string, text: string): TurnItem => ({
       id,

@@ -91,6 +91,13 @@ export class InMemorySessionStore implements SessionStore {
       .sort((a, b) => a.seq - b.seq)
   }
 
+  async *iterateEventsSince(threadId: string, sinceSeq: number): AsyncIterable<RuntimeEvent> {
+    const list = this.events.get(threadId) ?? []
+    for (const event of list) {
+      if (event.seq > sinceSeq) yield event
+    }
+  }
+
   async loadItems(threadId: string): Promise<TurnItem[]> {
     return [...(this.items.get(threadId) ?? [])]
   }

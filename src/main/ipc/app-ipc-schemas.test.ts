@@ -9,6 +9,7 @@ import {
   shellOpenExternalUrlSchema,
   skillGithubImportPayloadSchema,
   skillListPayloadSchema,
+  sseAckPayloadSchema,
   sseStartPayloadSchema,
   workspaceDirectoryCreatePayloadSchema,
   workspaceDirectoryTargetPayloadSchema,
@@ -702,6 +703,16 @@ describe('app-ipc-schemas', () => {
         sinceSeq: -1
       })
     ).toThrow()
+    expect(sseStartPayloadSchema.parse({
+      threadId: 'thread-1',
+      sinceSeq: 0,
+      acknowledgedBatches: true
+    }).acknowledgedBatches).toBe(true)
+    expect(sseAckPayloadSchema.parse({ streamId: 'stream-1', batchId: 'batch-1' })).toEqual({
+      streamId: 'stream-1',
+      batchId: 'batch-1'
+    })
+    expect(() => sseAckPayloadSchema.parse({ streamId: 'stream-1', batchId: '' })).toThrow()
   })
 
   it('accepts long Feishu install device codes', () => {

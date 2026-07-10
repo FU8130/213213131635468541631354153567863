@@ -301,7 +301,7 @@ export type LegacySessionImportResult =
   | ({ ok: true } & LegacySessionImportSummary)
   | { ok: false; message: string }
 /** One IPC message carries every SSE event parsed from a network chunk. */
-export type SseEventPayload = { streamId: string; events: unknown[] }
+export type SseEventPayload = { streamId: string; events: unknown[]; batchId?: string }
 export type SseEndPayload = { streamId: string }
 export type SseErrorPayload = { streamId: string; status?: number; message?: string }
 export type TrayActionPayload =
@@ -544,8 +544,14 @@ export type KunGuiApi = {
   copyWriteDocumentAsRichText: (
     payload: WriteRichClipboardPayload
   ) => Promise<WriteRichClipboardResult>
-  startSse: (threadId: string, sinceSeq: number, streamId?: string) => Promise<{ streamId: string }>
+  startSse: (
+    threadId: string,
+    sinceSeq: number,
+    streamId?: string,
+    options?: { acknowledgedBatches?: boolean }
+  ) => Promise<{ streamId: string }>
   stopSse: (streamId: string) => Promise<boolean>
+  ackSse: (streamId: string, batchId: string) => Promise<boolean>
   onSseEvent: (handler: (payload: SseEventPayload) => void) => () => void
   onSseEnd: (handler: (payload: SseEndPayload) => void) => () => void
   onSseError: (handler: (payload: SseErrorPayload) => void) => () => void

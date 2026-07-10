@@ -78,6 +78,8 @@ import {
 } from './kun-mapper'
 import { rendererRuntimeClient } from './runtime-client'
 
+const MAX_PENDING_SSE_DISPATCH_BATCHES = 32
+
 function createSseStreamId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `sse-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
@@ -909,7 +911,8 @@ export class KunRuntimeProvider implements AgentProvider {
     const streamId = createSseStreamId()
     await new Promise<void>(async (resolve) => {
       let settled = false
-      const pendingDispatches = new Set<Promise<void>>()
+      let dispatchTail: Promise<void> = Promise.resolve()
+      let queuedDispatchBatches = 0
       const finish = (): void => {
         if (settled) return
         settled = true
@@ -917,7 +920,7 @@ export class KunRuntimeProvider implements AgentProvider {
         offEnd()
         offErr()
         signal.removeEventListener('abort', onAbort)
-        void Promise.allSettled([...pendingDispatches]).then(() => resolve())
+        void dispatchTail.finally(() => resolve())
       }
       const offData = rendererRuntimeClient.onSseEvent((payload) => {
         if (payload.streamId !== streamId) return
@@ -935,21 +938,44 @@ export class KunRuntimeProvider implements AgentProvider {
           entry && typeof entry === 'object' ? (entry as CoreRuntimeEventJson) : {}
         )
         if (batch.length === 0) return
+        if (queuedDispatchBatches >= MAX_PENDING_SSE_DISPATCH_BATCHES) {
+          sink.onError(new Error('SSE renderer dispatch backlog exceeded its safety limit'))
+          void rendererRuntimeClient.stopSse(streamId)
+          finish()
+          return
+        }
         let maxSeq: number | null = null
         for (const event of batch) {
           if (typeof event.seq === 'number') {
             maxSeq = maxSeq === null ? event.seq : Math.max(maxSeq, event.seq)
           }
         }
-        if (maxSeq !== null) {
-          sink.onSeq(maxSeq)
-        }
-        const task = dispatchKunRuntimeEvents(batch, sink, (runtimeEvent, eventSink) =>
-          this.handleApprovalRequest(runtimeEvent, eventSink)
-        ).finally(() => {
-          pendingDispatches.delete(task)
+        // Keep batches strictly ordered. The main process reads no further SSE
+        // data until this batch is acknowledged, so dispatch must not fan out
+        // into an unbounded renderer-side promise set.
+        queuedDispatchBatches += 1
+        const task = dispatchTail.then(async () => {
+          if (signal.aborted || settled) return
+          await dispatchKunRuntimeEvents(batch, sink, (runtimeEvent, eventSink) =>
+            this.handleApprovalRequest(runtimeEvent, eventSink)
+          )
+          if (signal.aborted || settled) return
+          if (payload.batchId) {
+            await rendererRuntimeClient.ackSse(streamId, payload.batchId)
+          }
+          if (signal.aborted || settled) return
+          if (maxSeq !== null) sink.onSeq(maxSeq)
+        }).catch((error) => {
+          if (!settled) {
+            sink.onError(error instanceof Error ? error : new Error(String(error)))
+            void rendererRuntimeClient.stopSse(streamId)
+            finish()
+          }
         })
-        pendingDispatches.add(task)
+        dispatchTail = task
+        void task.finally(() => {
+          queuedDispatchBatches = Math.max(0, queuedDispatchBatches - 1)
+        })
       })
       const offErr = rendererRuntimeClient.onSseError(({ streamId: sid, message, status }) => {
         if (sid !== streamId) return
@@ -970,7 +996,7 @@ export class KunRuntimeProvider implements AgentProvider {
       }
       signal.addEventListener('abort', onAbort, { once: true })
       try {
-        await rendererRuntimeClient.startSse(threadId, sinceSeq, streamId)
+        await rendererRuntimeClient.startSse(threadId, sinceSeq, streamId, { acknowledgedBatches: true })
       } catch (error) {
         sink.onError(error instanceof Error ? error : new Error(String(error)))
         finish()

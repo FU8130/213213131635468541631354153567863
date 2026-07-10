@@ -55,6 +55,7 @@ function installDsGui(overrides: Partial<Window['kunGui']>): void {
         streamId: streamId ?? 'stream-1'
       })),
       stopSse: vi.fn(async () => true),
+      ackSse: vi.fn(async () => true),
       onSseEvent: vi.fn(() => () => undefined),
       onSseEnd: vi.fn(() => () => undefined),
       onSseError: vi.fn(() => () => undefined),
@@ -907,8 +908,8 @@ describe('KunRuntimeProvider', () => {
     let onData: ((payload: { streamId: string; events: unknown[] }) => void) | null = null
     const ac = new AbortController()
     const sink: ThreadEventSink = {
-      onSeq: vi.fn(),
-      onDeltas: vi.fn(() => ac.abort()),
+      onSeq: vi.fn(() => ac.abort()),
+      onDeltas: vi.fn(),
       onUserMessage: vi.fn(),
       onTool: vi.fn(),
       onCompaction: vi.fn(),
@@ -954,6 +955,120 @@ describe('KunRuntimeProvider', () => {
     await provider.subscribeThreadEvents('thr_1', 2, sink, ac.signal)
     expect(sink.onSeq).toHaveBeenCalledWith(3)
     expect(sink.onDeltas).toHaveBeenCalledWith([{ text: 'he', kind: 'agent_message', seq: 3 }])
+  })
+
+  it('acknowledges an SSE batch only after dispatching it and then advances the cursor', async () => {
+    let onData: ((payload: { streamId: string; events: unknown[]; batchId?: string }) => void) | null = null
+    let releaseAck: (() => void) | undefined
+    const ackGate = new Promise<void>((resolve) => {
+      releaseAck = resolve
+    })
+    const ackSse = vi.fn(async () => {
+      await ackGate
+      return true
+    })
+    const startSse = vi.fn(async (_threadId: string, _sinceSeq: number, streamId?: string) => {
+      queueMicrotask(() => {
+        onData?.({
+          streamId: streamId ?? 'stream-1',
+          batchId: 'batch_1',
+          events: [{ kind: 'assistant_text_delta', seq: 4, item: {
+            id: 'item_text', turnId: 'turn_1', threadId: 'thr_1', role: 'assistant',
+            status: 'running', createdAt: 't1', kind: 'assistant_text', text: 'ack me'
+          } }]
+        })
+      })
+      return { streamId: streamId ?? 'stream-1' }
+    })
+    const ac = new AbortController()
+    const sink: ThreadEventSink = {
+      onSeq: vi.fn(),
+      onDeltas: vi.fn(),
+      onUserMessage: vi.fn(),
+      onTool: vi.fn(),
+      onCompaction: vi.fn(),
+      onApproval: vi.fn(),
+      onUserInput: vi.fn(),
+      onUserInputStatus: vi.fn(),
+      onGoal: vi.fn(),
+      onTodos: vi.fn(),
+      onTurnComplete: vi.fn(),
+      onError: vi.fn()
+    }
+    installDsGui({
+      ackSse,
+      onSseEvent: vi.fn((handler) => {
+        onData = handler
+        return () => undefined
+      }),
+      startSse
+    })
+    const provider = new KunRuntimeProvider()
+    const subscription = provider.subscribeThreadEvents('thr_1', 0, sink, ac.signal)
+
+    await vi.waitFor(() => expect(sink.onDeltas).toHaveBeenCalledTimes(1))
+    expect(ackSse).toHaveBeenCalledWith(expect.any(String), 'batch_1')
+    expect(startSse).toHaveBeenCalledWith(
+      'thr_1',
+      0,
+      expect.any(String),
+      { acknowledgedBatches: true }
+    )
+    expect(sink.onSeq).not.toHaveBeenCalled()
+
+    releaseAck?.()
+    await vi.waitFor(() => expect(sink.onSeq).toHaveBeenCalledWith(4))
+    ac.abort()
+    await subscription
+  })
+
+  it('does not acknowledge or advance an SSE batch aborted during dispatch', async () => {
+    let onData: ((payload: { streamId: string; events: unknown[]; batchId?: string }) => void) | null = null
+    const ackSse = vi.fn(async () => true)
+    const stopSse = vi.fn(async () => true)
+    const ac = new AbortController()
+    const sink: ThreadEventSink = {
+      onSeq: vi.fn(),
+      onDeltas: vi.fn(() => ac.abort()),
+      onUserMessage: vi.fn(),
+      onTool: vi.fn(),
+      onCompaction: vi.fn(),
+      onApproval: vi.fn(),
+      onUserInput: vi.fn(),
+      onUserInputStatus: vi.fn(),
+      onGoal: vi.fn(),
+      onTodos: vi.fn(),
+      onTurnComplete: vi.fn(),
+      onError: vi.fn()
+    }
+    installDsGui({
+      ackSse,
+      stopSse,
+      onSseEvent: vi.fn((handler) => {
+        onData = handler
+        return () => undefined
+      }),
+      startSse: vi.fn(async (_threadId, _sinceSeq, streamId) => {
+        queueMicrotask(() => {
+          onData?.({
+            streamId: streamId ?? 'stream-1',
+            batchId: 'batch_abort',
+            events: [{ kind: 'assistant_text_delta', seq: 5, item: {
+              id: 'item_text', turnId: 'turn_1', threadId: 'thr_1', role: 'assistant',
+              status: 'running', createdAt: 't1', kind: 'assistant_text', text: 'abort me'
+            } }]
+          })
+        })
+        return { streamId: streamId ?? 'stream-1' }
+      })
+    })
+    const provider = new KunRuntimeProvider()
+
+    await provider.subscribeThreadEvents('thr_1', 0, sink, ac.signal)
+
+    expect(ackSse).not.toHaveBeenCalled()
+    expect(sink.onSeq).not.toHaveBeenCalled()
+    expect(stopSse).toHaveBeenCalled()
   })
 
   it('auto-approves approval requests when policy is auto', async () => {

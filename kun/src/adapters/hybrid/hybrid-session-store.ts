@@ -51,6 +51,14 @@ export class HybridSessionStore implements SessionStore {
     return this.delegate.loadEventsSince(threadId, sinceSeq)
   }
 
+  iterateEventsSince(
+    threadId: string,
+    sinceSeq: number,
+    options?: { maxRecordBytes?: number }
+  ): AsyncIterable<RuntimeEvent> {
+    return this.delegate.iterateEventsSince(threadId, sinceSeq, options)
+  }
+
   async loadItems(threadId: string): Promise<TurnItem[]> {
     return this.delegate.loadItems(threadId)
   }

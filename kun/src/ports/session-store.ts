@@ -36,6 +36,15 @@ export interface SessionStore {
   rewriteItems(threadId: string, items: TurnItem[]): Promise<void>
   updateItem(threadId: string, itemId: string, patch: Partial<TurnItem>): Promise<TurnItem | null>
   loadEventsSince(threadId: string, sinceSeq: number): Promise<RuntimeEvent[]>
+  /**
+   * Optional bounded, forward-only event replay. Serve uses this when present
+   * so a long JSONL backlog is never materialized as one giant array.
+   */
+  iterateEventsSince?(
+    threadId: string,
+    sinceSeq: number,
+    options?: { maxRecordBytes?: number }
+  ): AsyncIterable<RuntimeEvent>
   loadItems(threadId: string): Promise<TurnItem[]>
   loadSession(threadId: string): Promise<AgentSession | null>
   upsertSession(session: AgentSession): Promise<void>

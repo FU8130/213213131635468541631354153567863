@@ -236,9 +236,10 @@ const api = {
     ipcRenderer.invoke('write:inline-completion-debug:list'),
   clearWriteInlineCompletionDebugEntries: () =>
     ipcRenderer.invoke('write:inline-completion-debug:clear'),
-  startSse: (threadId, sinceSeq, streamId) =>
-    ipcRenderer.invoke('runtime:sse:start', { threadId, sinceSeq, streamId }),
+  startSse: (threadId, sinceSeq, streamId, options) =>
+    ipcRenderer.invoke('runtime:sse:start', { threadId, sinceSeq, streamId, ...options }),
   stopSse: (streamId) => ipcRenderer.invoke('runtime:sse:stop', streamId),
+  ackSse: (streamId, batchId) => ipcRenderer.invoke('runtime:sse:ack', { streamId, batchId }),
   onSseEvent: (handler) => {
     const wrapped = (
       _: Electron.IpcRendererEvent,

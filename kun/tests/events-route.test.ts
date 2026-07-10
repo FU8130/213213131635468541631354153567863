@@ -159,4 +159,53 @@ describe('event stream replay', () => {
     expect(new TextDecoder().decode(first.value)).toContain('event: heartbeat')
     await expect(reader.read()).resolves.toMatchObject({ done: true })
   })
+
+  it('pages durable replay through the forward-only store iterator without snapshot reset', async () => {
+    const events: RuntimeEvent[] = [1, 2, 3].map((seq) => ({
+      kind: 'heartbeat' as const,
+      seq,
+      timestamp: `2026-07-10T00:00:0${seq}.000Z`,
+      threadId: 'thr_events'
+    }))
+    const loadEventsSince = vi.fn(async () => events)
+    const highestSeq = vi.fn(async () => 3)
+    const sessionStore = {
+      loadEventsSince,
+      highestSeq,
+      async *iterateEventsSince(_threadId: string, sinceSeq: number): AsyncIterable<RuntimeEvent> {
+        for (const event of events) {
+          if (event.seq > sinceSeq) yield event
+        }
+      }
+    } as unknown as SessionStore
+    const eventBus: EventBus = {
+      publish: () => undefined,
+      subscribe: () => () => undefined,
+      snapshotSince: () => [], highestSeq: () => 0, reset: () => undefined
+    }
+
+    const first = buildEventStreamResponse({
+      request: new Request('http://localhost/v1/threads/thr_events/events?since_seq=0'),
+      threadId: 'thr_events', eventBus, sessionStore,
+      replayLimits: { maxEvents: 2, maxBytes: 10_000 }
+    })
+    const firstReader = first.body!.getReader()
+    const firstFrames = [await firstReader.read(), await firstReader.read()]
+    expect(firstFrames.map((frame) => new TextDecoder().decode(frame.value)).join('')).toContain('id: 1')
+    expect(firstFrames.map((frame) => new TextDecoder().decode(frame.value)).join('')).toContain('id: 2')
+    await expect(firstReader.read()).resolves.toMatchObject({ done: true })
+
+    const second = buildEventStreamResponse({
+      request: new Request('http://localhost/v1/threads/thr_events/events?since_seq=2'),
+      threadId: 'thr_events', eventBus, sessionStore,
+      replayLimits: { maxEvents: 2, maxBytes: 10_000 }
+    })
+    const secondReader = second.body!.getReader()
+    const third = await secondReader.read()
+    expect(new TextDecoder().decode(third.value)).toContain('id: 3')
+    await secondReader.cancel()
+
+    expect(loadEventsSince).not.toHaveBeenCalled()
+    expect(highestSeq).not.toHaveBeenCalled()
+  })
 })

@@ -128,15 +128,23 @@ export const clawImTelegramTokenPayloadSchema = z
   })
   .strict()
 
+export const streamIdSchema = trimmedString(MAX_ID_LENGTH)
+
 export const sseStartPayloadSchema = z
   .object({
     threadId: trimmedString(MAX_ID_LENGTH),
     sinceSeq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    streamId: optionalTrimmedString(MAX_ID_LENGTH)
+    streamId: optionalTrimmedString(MAX_ID_LENGTH),
+    acknowledgedBatches: z.boolean().optional()
   })
   .strict()
 
-export const streamIdSchema = trimmedString(MAX_ID_LENGTH)
+export const sseAckPayloadSchema = z
+  .object({
+    streamId: streamIdSchema,
+    batchId: trimmedString(MAX_ID_LENGTH)
+  })
+  .strict()
 
 export const uiPluginIdPayloadSchema = z
   .object({

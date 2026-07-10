@@ -1,4 +1,5 @@
 import { appendFile, mkdir, readFile, stat } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { join, resolve } from 'node:path'
 import type { SessionStore } from '../../ports/session-store.js'
@@ -22,6 +23,7 @@ const SLOW_LOAD_ITEMS_LOG_MS = 1_000
  */
 const ITEMS_CACHE_MAX_THREADS = 4
 const HIGHEST_SEQ_CACHE_MAX_THREADS = 256
+export const DEFAULT_EVENT_REPLAY_MAX_RECORD_BYTES = 1 * 1024 * 1024
 
 /**
  * File-backed session store. Appends events and items to per-thread
@@ -121,6 +123,46 @@ export class FileSessionStore implements SessionStore {
     return all
       .filter((event) => event.seq > sinceSeq)
       .sort((a, b) => a.seq - b.seq)
+  }
+
+  async *iterateEventsSince(
+    threadId: string,
+    sinceSeq: number,
+    options: { maxRecordBytes?: number } = {}
+  ): AsyncIterable<RuntimeEvent> {
+    if (!isSafeThreadId(threadId)) return
+    const maxRecordBytes = Math.max(
+      1,
+      Math.floor(options.maxRecordBytes ?? DEFAULT_EVENT_REPLAY_MAX_RECORD_BYTES)
+    )
+    let remainder = ''
+    try {
+      const stream = createReadStream(this.eventsPath(threadId), {
+        encoding: 'utf-8',
+        // Keep the raw chunk well below one record budget. A malformed line
+        // without a newline therefore cannot force a whole-log allocation.
+        highWaterMark: Math.min(maxRecordBytes, 64 * 1024)
+      })
+      for await (const chunk of stream) {
+        remainder += typeof chunk === 'string' ? chunk : chunk.toString('utf-8')
+        let newline = remainder.indexOf('\n')
+        while (newline >= 0) {
+          const line = remainder.slice(0, newline)
+          remainder = remainder.slice(newline + 1)
+          const event = parseReplayEventRecord(line, maxRecordBytes)
+          if (event && event.seq > sinceSeq) yield event
+          newline = remainder.indexOf('\n')
+        }
+        if (Buffer.byteLength(remainder, 'utf-8') > maxRecordBytes) {
+          throw new Error(`event replay record exceeds ${maxRecordBytes} bytes`)
+        }
+      }
+      const trailing = parseReplayEventRecord(remainder, maxRecordBytes)
+      if (trailing && trailing.seq > sinceSeq) yield trailing
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ENOENT') return
+      throw error
+    }
   }
 
   async loadItems(threadId: string): Promise<TurnItem[]> {
@@ -390,6 +432,23 @@ function usageCoalescingBucket(event: RuntimeEvent): string {
     ? new Date(event.timestamp).toISOString().slice(0, 10)
     : event.timestamp
   return `${day}:${event.model ?? ''}`
+}
+
+function parseReplayEventRecord(line: string, maxRecordBytes: number): RuntimeEvent | null {
+  if (!line.trim()) return null
+  if (Buffer.byteLength(line, 'utf-8') > maxRecordBytes) {
+    throw new Error(`event replay record exceeds ${maxRecordBytes} bytes`)
+  }
+  try {
+    const value = JSON.parse(line) as unknown
+    if (!value || typeof value !== 'object') return null
+    const event = value as RuntimeEvent
+    return typeof event.seq === 'number' && Number.isFinite(event.seq) ? event : null
+  } catch {
+    // Keep the existing JSONL tolerance: one corrupt historical record must
+    // not poison replay of the rest of the thread.
+    return null
+  }
 }
 
 function warnUsageCompaction(threadId: string, error: unknown): void {

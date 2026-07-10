@@ -250,6 +250,38 @@ describe('AgentSdkRuntime.runTurn', () => {
     expect(finished[0].status).toBe('aborted')
   })
 
+  test('fails an SDK turn that exceeds the runtime wall-time limit', async () => {
+    let interrupted = false
+    const { deps, events, finished } = makeDeps({
+      getTurnLimits: () => ({ maxWallTimeMs: 1 }),
+      loadSdk: async () => ({
+        query: ({ options }) => {
+          const abortController = (options as { abortController: AbortController }).abortController
+          const stream: SdkQueryResult = {
+            async *[Symbol.asyncIterator](): AsyncGenerator<SdkMessage> {
+              await new Promise<void>((resolve) => {
+                abortController.signal.addEventListener('abort', resolve, { once: true })
+              })
+            },
+            interrupt: async () => { interrupted = true }
+          }
+          return stream
+        },
+        createSdkMcpServer: (config) => ({ type: 'sdk', name: config.name, instance: {} }),
+        tool: () => ({})
+      })
+    })
+
+    const status = await new AgentSdkRuntime(deps).runTurn('th', 'tn', new AbortController().signal)
+
+    expect(status).toBe('failed')
+    expect(interrupted).toBe(true)
+    expect(finished).toContainEqual(expect.objectContaining({
+      status: 'failed', error: expect.stringContaining('wall time')
+    }))
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'error', code: 'turn_wall_time_limit' }))
+  })
+
   test('a query failure records an error event and fails the turn', async () => {
     const { deps, events, finished } = makeDeps({
       loadSdk: async () => ({

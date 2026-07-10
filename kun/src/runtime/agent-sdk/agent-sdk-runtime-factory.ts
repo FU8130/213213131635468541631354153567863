@@ -78,6 +78,8 @@ export interface AgentSdkRuntimeFactoryDeps {
   nowIso?: () => string
   /** Cap for the replayed history transcript (bytes); defaults to the assembler's. */
   historyTranscriptMaxBytes?: number
+  /** Native runtime safety limits, also applied to delegated Agent SDK turns. */
+  turnLimits?: { maxWallTimeMs?: number }
   pathToClaudeCodeExecutable?: string
 }
 
@@ -426,6 +428,7 @@ export function createAgentSdkRuntime(deps: AgentSdkRuntimeFactoryDeps): AgentSd
     baseEnv: () => process.env,
     kunSystemPrompt: () => deps.prefix.systemPrompt,
     nextId: (prefix) => deps.ids.next(prefix),
+    getTurnLimits: () => deps.turnLimits,
     ...(deps.pathToClaudeCodeExecutable
       ? { pathToClaudeCodeExecutable: deps.pathToClaudeCodeExecutable }
       : {})

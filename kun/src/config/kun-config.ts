@@ -161,7 +161,7 @@ export const RuntimeTuningConfigSchema = z
       })
       .strict()
       .optional(),
-    /** Hard runtime bounds for a native AgentLoop turn. */
+    /** Hard runtime bounds for native and delegated Agent SDK turns. */
     turnLimits: z
       .object({
         maxSteps: PositiveInt.max(1_000).optional(),

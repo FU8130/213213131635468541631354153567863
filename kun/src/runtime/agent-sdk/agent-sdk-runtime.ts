@@ -127,6 +127,8 @@ export interface SdkRuntimeDeps {
   kunSystemPrompt(): string
   /** Monotonic id allocator for assistant items. */
   nextId(prefix: string): string
+  /** Runtime turn limits, resolved at the start of each delegated SDK turn. */
+  getTurnLimits?(): { maxWallTimeMs?: number } | undefined
   /** Optional explicit path to the bundled Claude Code binary (packaging). */
   pathToClaudeCodeExecutable?: string
 }
@@ -157,6 +159,12 @@ export class AgentSdkRuntime {
     const mapper = new SdkEventMapper({ threadId, turnId, nextId: (p) => this.deps.nextId(p) })
     const abort = new AbortController()
     const onAbort = (): void => abort.abort()
+    const maxWallTimeMs = Math.max(1, Math.floor(this.deps.getTurnLimits?.()?.maxWallTimeMs ?? 15 * 60_000))
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      abort.abort()
+    }, maxWallTimeMs)
     if (signal.aborted) abort.abort()
     else signal.addEventListener('abort', onAbort, { once: true })
 
@@ -212,7 +220,7 @@ export class AgentSdkRuntime {
           : composedText
       const stream = sdk.query({ prompt, options })
       for await (const message of stream) {
-        if (signal.aborted) {
+        if (signal.aborted || abort.signal.aborted) {
           await stream.interrupt?.()
           break
         }
@@ -231,12 +239,22 @@ export class AgentSdkRuntime {
         }
       }
 
+      if (timedOut) await stream.interrupt?.()
+
       const sessionId = mapper.getSessionId()
       if (sessionId) await this.deps.saveSessionId(threadId, sessionId)
 
       if (signal.aborted) {
         await this.deps.finishTurn(threadId, turnId, 'aborted')
         return 'aborted'
+      }
+      if (timedOut) {
+        const message = `turn exceeded ${maxWallTimeMs}ms wall time`
+        await this.deps.recordEvent({
+          kind: 'error', threadId, turnId, message, code: 'turn_wall_time_limit', severity: 'warning'
+        })
+        await this.deps.finishTurn(threadId, turnId, 'failed', message)
+        return 'failed'
       }
 
       const final = mapper.getFinal()
@@ -249,6 +267,7 @@ export class AgentSdkRuntime {
       await this.deps.finishTurn(threadId, turnId, 'failed', message)
       return 'failed'
     } finally {
+      clearTimeout(timeout)
       signal.removeEventListener('abort', onAbort)
     }
   }

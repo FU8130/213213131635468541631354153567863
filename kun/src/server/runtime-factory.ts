@@ -558,6 +558,7 @@ export async function createKunServeRuntime(
 	      defaultModel: activeOptions.model,
 	      defaultIsAgentSdk,
 	      defaultToken: activeOptions.apiKey,
+	      turnLimits: activeOptions.runtime?.turnLimits,
 	      skillRuntime,
 	      instructionRuntime,
 	      userInputGate,
@@ -844,6 +845,7 @@ export async function createKunServeRuntime(
 	      sdkRuntimeDeps.defaultSandboxMode = activeOptions.sandboxMode
 	      sdkRuntimeDeps.defaultModel = activeOptions.model
 	      sdkRuntimeDeps.defaultToken = activeOptions.apiKey
+	      sdkRuntimeDeps.turnLimits = activeOptions.runtime?.turnLimits
 	      sdkRuntimeDeps.skillRuntime = skillRuntime
 	      sdkRuntimeDeps.instructionRuntime = instructionRuntime
 	      if (attachmentStore) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CompatModelClient } from './compat-model-client.js'
+import { CompatModelClient, type ModelStreamLimits } from './compat-model-client.js'
 import type { ModelCapabilityMetadata } from '../../contracts/capabilities.js'
 import type { ModelRequest, ModelStreamChunk } from '../../ports/model-client.js'
 
@@ -11,12 +11,18 @@ import type { ModelRequest, ModelStreamChunk } from '../../ports/model-client.js
 
 type CapturedCall = { url: string; body: Record<string, unknown> }
 
-function sseResponse(frames: string[]): Response {
+function sseResponse(
+  frames: string[],
+  options: { close?: boolean; onCancel?: (reason: unknown) => void } = {}
+): Response {
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       for (const frame of frames) controller.enqueue(encoder.encode(frame))
-      controller.close()
+      if (options.close !== false) controller.close()
+    },
+    cancel(reason) {
+      options.onCancel?.(reason)
     }
   })
   return new Response(stream, {
@@ -29,10 +35,14 @@ function frame(payload: unknown): string {
   return `data: ${JSON.stringify(payload)}\n\n`
 }
 
-function streamingFetch(frames: string[], calls: CapturedCall[] = []): typeof fetch {
+function streamingFetch(
+  frames: string[],
+  calls: CapturedCall[] = [],
+  responseOptions: { close?: boolean; onCancel?: (reason: unknown) => void } = {}
+): typeof fetch {
   return (async (url: string, init: { body: string }) => {
     calls.push({ url: String(url), body: JSON.parse(init.body) as Record<string, unknown> })
-    return sseResponse(frames)
+    return sseResponse(frames, responseOptions)
   }) as unknown as typeof fetch
 }
 
@@ -104,14 +114,19 @@ function chatToolCallDeltas(): string[] {
   ]
 }
 
-function makeClient(fetchImpl: typeof fetch, modelCapabilities?: (model: string) => ModelCapabilityMetadata) {
+function makeClient(
+  fetchImpl: typeof fetch,
+  modelCapabilities?: (model: string) => ModelCapabilityMetadata,
+  streamLimits?: Partial<ModelStreamLimits>
+) {
   return new CompatModelClient({
     baseUrl: 'https://provider.example/v1/chat/completions',
     apiKey: 'sk-test',
     model: 'test-model',
     endpointFormat: 'chat_completions',
     fetchImpl,
-    ...(modelCapabilities ? { modelCapabilities } : {})
+    ...(modelCapabilities ? { modelCapabilities } : {}),
+    ...(streamLimits ? { streamLimits } : {})
   })
 }
 
@@ -213,6 +228,174 @@ describe('CompatModelClient streaming tool-call finalization', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0].toolName).toBe('edit')
     expect(calls[0].arguments).toEqual({ path: 'a.txt' })
+  })
+})
+
+describe('CompatModelClient streaming resource limits', () => {
+  it('cancels an unterminated SSE frame once its buffered bytes exceed the limit', async () => {
+    const cancellations: unknown[] = []
+    const chunks = await drain(makeClient(
+      streamingFetch([`data: ${'x'.repeat(128)}`], [], {
+        close: false,
+        onCancel: (reason) => cancellations.push(reason)
+      }),
+      undefined,
+      { maxBufferBytes: 64, maxFrameBytes: 512, maxTotalBytes: 512 }
+    ).stream(request()))
+
+    expect(chunks).toEqual([{
+      kind: 'error',
+      message: 'model stream exceeded 64 buffered SSE bytes',
+      code: 'stream_resource_limit'
+    }])
+    expect(cancellations).not.toHaveLength(0)
+  })
+
+  it('rejects oversized delimited frames and frame storms before parsing their payloads', async () => {
+    const oversized = await drain(makeClient(
+      streamingFetch([frame({ choices: [{ index: 0, delta: { content: 'x'.repeat(256) } }] })]),
+      undefined,
+      { maxBufferBytes: 4_096, maxFrameBytes: 128, maxTotalBytes: 4_096 }
+    ).stream(request()))
+    expect(oversized).toEqual([{
+      kind: 'error',
+      message: 'model stream exceeded 128 SSE frame bytes',
+      code: 'stream_resource_limit'
+    }])
+
+    const frameStorm = await drain(makeClient(
+      streamingFetch([': keepalive\n\n', ': keepalive\n\n']),
+      undefined,
+      { maxFrames: 1, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
+    ).stream(request()))
+    expect(frameStorm).toEqual([{
+      kind: 'error',
+      message: 'model stream exceeded 1 SSE frames',
+      code: 'stream_resource_limit'
+    }])
+  })
+
+  it('bounds cumulative emitted text without completing a partial response', async () => {
+    const chunks = await drain(makeClient(
+      streamingFetch([
+        frame({ choices: [{ index: 0, delta: { content: 'abc' } }] }),
+        frame({ choices: [{ index: 0, delta: { content: 'defg' } }] })
+      ]),
+      undefined,
+      { maxOutputBytes: 6, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
+    ).stream(request()))
+
+    expect(chunks).toEqual([
+      { kind: 'assistant_text_delta', text: 'abc' },
+      {
+        kind: 'error',
+        message: 'model stream exceeded 6 response text and reasoning bytes',
+        code: 'stream_resource_limit'
+      }
+    ])
+  })
+
+  it('applies raw argument limits before Chat, Responses, or Messages tool calls complete', async () => {
+    const limits = {
+      maxPendingToolArgumentBytes: 8,
+      maxBufferBytes: 4_096,
+      maxFrameBytes: 4_096,
+      maxTotalBytes: 4_096
+    }
+    const chat = await drain(makeClient(
+      streamingFetch([chatToolDelta({ index: 0, id: 'chat_1', name: 'edit', args: 'x'.repeat(9) })]),
+      undefined,
+      limits
+    ).stream(request()))
+    expect(chat).toEqual([{
+      kind: 'error',
+      message: 'model stream exceeded 8 bytes for one tool argument',
+      code: 'stream_resource_limit'
+    }])
+
+    const responsesClient = new CompatModelClient({
+      baseUrl: 'https://provider.example/v1/responses',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      endpointFormat: 'responses',
+      fetchImpl: streamingFetch([frame({
+        type: 'response.function_call_arguments.done',
+        call_id: 'response_1',
+        output_index: 0,
+        arguments: 'x'.repeat(9)
+      })]),
+      streamLimits: limits
+    })
+    const responses = await drain(responsesClient.stream(request({})))
+    expect(responses).toEqual(chat)
+
+    const messagesClient = new CompatModelClient({
+      baseUrl: 'https://provider.example/anthropic',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      endpointFormat: 'messages',
+      fetchImpl: streamingFetch([
+        frame({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'msg_1', name: 'edit' } }),
+        frame({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'x'.repeat(9) } })
+      ]),
+      streamLimits: limits
+    })
+    const messages = await drain(messagesClient.stream(request()))
+    expect(messages).toEqual(chat)
+  })
+
+  it('caps pending call cardinality and fragmented arguments before they can grow parser state', async () => {
+    const calls = await drain(makeClient(
+      streamingFetch([
+        chatToolDelta({ index: 0, id: 'call_1', name: 'edit' }),
+        chatToolDelta({ index: 1, id: 'call_2', name: 'edit' })
+      ]),
+      undefined,
+      { maxPendingToolCalls: 1, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
+    ).stream(request()))
+    expect(calls).toEqual([{
+      kind: 'error',
+      message: 'model stream exceeded 1 pending tool calls',
+      code: 'stream_resource_limit'
+    }])
+
+    const fragments = await drain(makeClient(
+      streamingFetch([
+        chatToolDelta({ index: 0, id: 'call_1', name: 'edit', args: 'a' }),
+        chatToolDelta({ index: 0, args: 'b' }),
+        chatToolDelta({ index: 0, args: 'c' })
+      ]),
+      undefined,
+      { maxToolArgumentFragments: 2, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
+    ).stream(request()))
+    expect(fragments).toEqual(expect.arrayContaining([{
+      kind: 'error',
+      message: 'model stream exceeded 2 fragments for one tool argument',
+      code: 'stream_resource_limit'
+    }]))
+    expect(fragments.at(-1)).toEqual({
+      kind: 'error',
+      message: 'model stream exceeded 2 fragments for one tool argument',
+      code: 'stream_resource_limit'
+    })
+    expect(fragments.some((chunk) => chunk.kind === 'tool_call_complete' || chunk.kind === 'completed')).toBe(false)
+  })
+
+  it('uses the same body ceiling for application/json fallback responses', async () => {
+    const fetchImpl = (async () => new Response(
+      JSON.stringify({ choices: [{ index: 0, message: { content: 'x'.repeat(256) } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    )) as unknown as typeof fetch
+    const chunks = await drain(makeClient(
+      fetchImpl,
+      undefined,
+      { maxTotalBytes: 64, maxBufferBytes: 4_096, maxFrameBytes: 4_096 }
+    ).stream(request()))
+    expect(chunks).toEqual([{
+      kind: 'error',
+      message: 'model response exceeded 64 bytes',
+      code: 'stream_resource_limit'
+    }])
   })
 })
 

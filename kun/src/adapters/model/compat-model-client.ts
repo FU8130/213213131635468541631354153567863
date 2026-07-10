@@ -49,6 +49,8 @@ export type CompatModelClientConfig = {
   nonStreaming?: boolean
   /** Maximum idle time between streaming chunks before the turn fails. */
   streamIdleTimeoutMs?: number
+  /** Resource ceilings for one provider SSE response. */
+  streamLimits?: Partial<ModelStreamLimits>
   /** 流式响应开始前,遇到临时失败或限流响应时使用的 HTTP 重试策略。 */
   retry?: ModelRequestRetryConfig
   /** Optional model capability resolver used for provider-specific reasoning translation. */
@@ -144,15 +146,253 @@ type ModelStopReason = Extract<ModelStreamChunk, { kind: 'completed' }>['stopRea
 type PendingToolCall = {
   index?: number
   name?: string
-  arguments: string
+  /**
+   * Keep streamed argument fragments separate until completion. Repeated
+   * `arguments += delta` turns a provider sending token-sized deltas into an
+   * O(n²) copy loop; the raw argument is joined once, after its size is known
+   * to be safe to parse.
+   */
+  argumentParts: string[]
+  argumentBytes: number
+  argumentFragments: number
 }
 type StreamReadResult =
   | { kind: 'chunk'; value?: Uint8Array; done: boolean }
   | { kind: 'timeout' }
   | { kind: 'aborted' }
   | { kind: 'error'; message: string }
+type StreamPayloadResult = {
+  chunks: ModelStreamChunk[]
+  sawTextDelta: boolean
+  finishReason: string | null
+  usage: UsageSnapshot | null
+}
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 45_000
+export type ModelStreamLimits = {
+  maxBufferBytes: number
+  maxFrameBytes: number
+  maxTotalBytes: number
+  maxFrames: number
+  maxOutputBytes: number
+  maxPendingToolCalls: number
+  maxPendingToolArgumentBytes: number
+  maxTotalPendingToolArgumentBytes: number
+  maxToolArgumentFragments: number
+  maxTotalToolArgumentFragments: number
+  maxCompletedToolCalls: number
+  maxCompletedToolArgumentBytes: number
+}
+
+/** Hard upper bounds for untrusted provider stream state. */
+export const DEFAULT_MODEL_STREAM_LIMITS: ModelStreamLimits = {
+  // Responses native image generation sends its base64 result as one SSE
+  // frame. The image path permits multi-megabyte payloads, so this must be
+  // comfortably above that value while still keeping one malformed frame
+  // bounded.
+  maxBufferBytes: 20 * 1024 * 1024,
+  maxFrameBytes: 16 * 1024 * 1024,
+  maxTotalBytes: 32 * 1024 * 1024,
+  maxFrames: 8_192,
+  maxOutputBytes: 8 * 1024 * 1024,
+  maxPendingToolCalls: 32,
+  maxPendingToolArgumentBytes: 1 * 1024 * 1024,
+  maxTotalPendingToolArgumentBytes: 4 * 1024 * 1024,
+  maxToolArgumentFragments: 1_024,
+  maxTotalToolArgumentFragments: 4_096,
+  maxCompletedToolCalls: 32,
+  maxCompletedToolArgumentBytes: 4 * 1024 * 1024
+}
+
+class ModelStreamResourceLimitError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ModelStreamResourceLimitError'
+  }
+}
+
+/**
+ * Per-response accounting for data retained while parsing an untrusted model
+ * stream. Keeping this state next to the parser makes every protocol share
+ * the same hard limits instead of relying on the agent loop to clean up after
+ * an oversized response has already been parsed.
+ */
+class ModelStreamResourceBudget {
+  private totalBytes = 0
+  private frames = 0
+  private outputBytes = 0
+  private pendingArgumentBytes = 0
+  private pendingArgumentFragments = 0
+  private completedToolCalls = 0
+  private completedToolArgumentBytes = 0
+
+  constructor(readonly limits: ModelStreamLimits) {}
+
+  addInboundBytes(bytes: number): void {
+    this.totalBytes += bytes
+    if (this.totalBytes > this.limits.maxTotalBytes) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxTotalBytes} total response bytes`
+      )
+    }
+  }
+
+  addFrame(bytes: number): void {
+    this.frames += 1
+    if (this.frames > this.limits.maxFrames) {
+      throw new ModelStreamResourceLimitError(`model stream exceeded ${this.limits.maxFrames} SSE frames`)
+    }
+    if (bytes > this.limits.maxFrameBytes) {
+      throw new ModelStreamResourceLimitError(`model stream exceeded ${this.limits.maxFrameBytes} SSE frame bytes`)
+    }
+  }
+
+  pendingCall(
+    pending: Map<string, PendingToolCall>,
+    callId: string,
+    index: number | undefined
+  ): PendingToolCall {
+    const existing = pending.get(callId)
+    if (existing) {
+      if (index !== undefined) existing.index = index
+      return existing
+    }
+    if (pending.size >= this.limits.maxPendingToolCalls) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxPendingToolCalls} pending tool calls`
+      )
+    }
+    const created: PendingToolCall = {
+      ...(index !== undefined ? { index } : {}),
+      argumentParts: [],
+      argumentBytes: 0,
+      argumentFragments: 0
+    }
+    pending.set(callId, created)
+    return created
+  }
+
+  bindPendingIndex(pendingByIndex: Map<number, string>, index: number, callId: string): void {
+    if (!pendingByIndex.has(index) && pendingByIndex.size >= this.limits.maxPendingToolCalls) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxPendingToolCalls} pending tool-call indexes`
+      )
+    }
+    pendingByIndex.set(index, callId)
+  }
+
+  appendArguments(pending: PendingToolCall, value: string): void {
+    if (!value) return
+    const bytes = Buffer.byteLength(value, 'utf8')
+    this.assertPendingArgumentCapacity(pending, bytes, 1)
+    pending.argumentParts.push(value)
+    pending.argumentBytes += bytes
+    pending.argumentFragments += 1
+    this.pendingArgumentBytes += bytes
+    this.pendingArgumentFragments += 1
+  }
+
+  replaceArguments(pending: PendingToolCall, value: string): void {
+    const bytes = value ? Buffer.byteLength(value, 'utf8') : 0
+    const fragments = value ? 1 : 0
+    this.assertPendingArgumentCapacity(
+      pending,
+      bytes - pending.argumentBytes,
+      fragments - pending.argumentFragments,
+      bytes,
+      fragments
+    )
+    this.pendingArgumentBytes += bytes - pending.argumentBytes
+    this.pendingArgumentFragments += fragments - pending.argumentFragments
+    pending.argumentParts = value ? [value] : []
+    pending.argumentBytes = bytes
+    pending.argumentFragments = fragments
+  }
+
+  pendingArguments(pending: PendingToolCall): string {
+    return pending.argumentParts.join('')
+  }
+
+  completeToolCall(argumentsRaw: string): void {
+    const bytes = Buffer.byteLength(argumentsRaw, 'utf8')
+    if (bytes > this.limits.maxPendingToolArgumentBytes) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxPendingToolArgumentBytes} bytes for one tool argument`
+      )
+    }
+    if (this.completedToolCalls + 1 > this.limits.maxCompletedToolCalls) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxCompletedToolCalls} completed tool calls`
+      )
+    }
+    if (this.completedToolArgumentBytes + bytes > this.limits.maxCompletedToolArgumentBytes) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxCompletedToolArgumentBytes} completed tool-argument bytes`
+      )
+    }
+    this.completedToolCalls += 1
+    this.completedToolArgumentBytes += bytes
+  }
+
+  removePendingCall(pending: Map<string, PendingToolCall>, callId: string): PendingToolCall | undefined {
+    const value = pending.get(callId)
+    if (!value) return undefined
+    pending.delete(callId)
+    this.pendingArgumentBytes -= value.argumentBytes
+    this.pendingArgumentFragments -= value.argumentFragments
+    return value
+  }
+
+  clearPendingCalls(pending: Map<string, PendingToolCall>): void {
+    for (const callId of pending.keys()) this.removePendingCall(pending, callId)
+  }
+
+  addOutput(chunks: readonly ModelStreamChunk[]): void {
+    let bytes = 0
+    for (const chunk of chunks) {
+      if (chunk.kind === 'assistant_text_delta' || chunk.kind === 'assistant_reasoning_delta') {
+        bytes += Buffer.byteLength(chunk.text, 'utf8')
+      }
+    }
+    if (this.outputBytes + bytes > this.limits.maxOutputBytes) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxOutputBytes} response text and reasoning bytes`
+      )
+    }
+    this.outputBytes += bytes
+  }
+
+  private assertPendingArgumentCapacity(
+    pending: PendingToolCall,
+    byteDelta: number,
+    fragmentDelta: number,
+    replacementBytes?: number,
+    replacementFragments?: number
+  ): void {
+    const nextBytes = replacementBytes ?? pending.argumentBytes + byteDelta
+    const nextFragments = replacementFragments ?? pending.argumentFragments + fragmentDelta
+    if (nextBytes > this.limits.maxPendingToolArgumentBytes) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxPendingToolArgumentBytes} bytes for one tool argument`
+      )
+    }
+    if (this.pendingArgumentBytes + byteDelta > this.limits.maxTotalPendingToolArgumentBytes) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxTotalPendingToolArgumentBytes} total pending tool-argument bytes`
+      )
+    }
+    if (nextFragments > this.limits.maxToolArgumentFragments) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxToolArgumentFragments} fragments for one tool argument`
+      )
+    }
+    if (this.pendingArgumentFragments + fragmentDelta > this.limits.maxTotalToolArgumentFragments) {
+      throw new ModelStreamResourceLimitError(
+        `model stream exceeded ${this.limits.maxTotalToolArgumentFragments} total tool-argument fragments`
+      )
+    }
+  }
+}
 // Anthropic Messages requires an explicit `max_tokens`. The old 4096 default
 // was far too small for reasoning models: their thinking tokens are drawn from
 // the SAME output budget, so a long think left almost nothing for the tool
@@ -278,6 +518,8 @@ export class CompatModelClient implements ModelClient {
       this.isCodexResponsesLiteModel(requestModel)
     )
     const retry = normalizeModelRequestRetryConfig(this.config.retry)
+    const modelStreamLimits = normalizeModelStreamLimits(this.config.streamLimits)
+    const maxErrorBodyBytes = Math.min(modelStreamLimits.maxTotalBytes, 1 * 1024 * 1024)
     const retryStatuses = new Set(retry.httpStatusCodes)
     let result = await this.postChatCompletion(url, headers, body, request.abortSignal)
     for (let attempt = 0; attempt < retry.maxAttempts; attempt += 1) {
@@ -306,7 +548,16 @@ export class CompatModelClient implements ModelClient {
     }
     let response = result.response
     if (!response.ok) {
-      const text = await response.text()
+      const errorBody = await readLimitedResponseText(response, maxErrorBodyBytes)
+      if (errorBody.exceeded) {
+        yield {
+          kind: 'error',
+          message: `model error response exceeded ${maxErrorBodyBytes} bytes`,
+          code: 'response_body_too_large'
+        }
+        return
+      }
+      const text = errorBody.text
       if (usesChatCompletionsShape(endpointFormat) && shouldRetryWithoutStreamUsage(response.status, text, body)) {
         const retryBody = this.buildRequestBody(request, stream, { endpointFormat, includeStreamUsage: false })
         if (round) round.requestBody = retryBody
@@ -318,8 +569,25 @@ export class CompatModelClient implements ModelClient {
         response = retry.response
         if (response.ok) {
           if (this.config.nonStreaming || response.headers.get('content-type')?.includes('application/json')) {
-            const json = (await response.json()) as ChatCompletionResponse
-            yield* this.materializeNonStreaming(json, endpointFormat, requestModel)
+            const json = await readLimitedResponseJson(response, modelStreamLimits.maxTotalBytes)
+            if (json.kind === 'limit') {
+              yield {
+                kind: 'error',
+                message: `model response exceeded ${json.maxBytes} bytes`,
+                code: 'stream_resource_limit'
+              }
+              return
+            }
+            if (json.kind === 'invalid_json') {
+              yield { kind: 'error', message: `model response contained invalid JSON: ${json.message}` }
+              return
+            }
+            yield* this.materializeNonStreaming(
+              json.value as ChatCompletionResponse,
+              endpointFormat,
+              requestModel,
+              modelStreamLimits
+            )
             return
           }
           if (!response.body) {
@@ -329,7 +597,16 @@ export class CompatModelClient implements ModelClient {
           yield* this.streamSse(response.body, request.abortSignal, endpointFormat, requestModel)
           return
         }
-        const retryText = await response.text()
+        const retryErrorBody = await readLimitedResponseText(response, maxErrorBodyBytes)
+        if (retryErrorBody.exceeded) {
+          yield {
+            kind: 'error',
+            message: `model error response exceeded ${maxErrorBodyBytes} bytes`,
+            code: 'response_body_too_large'
+          }
+          return
+        }
+        const retryText = retryErrorBody.text
         this.logHttpFailure({
           url,
           status: response.status,
@@ -363,8 +640,25 @@ export class CompatModelClient implements ModelClient {
       return
     }
     if (this.config.nonStreaming || response.headers.get('content-type')?.includes('application/json')) {
-      const json = (await response.json()) as ChatCompletionResponse
-      yield* this.materializeNonStreaming(json, endpointFormat, requestModel)
+      const json = await readLimitedResponseJson(response, modelStreamLimits.maxTotalBytes)
+      if (json.kind === 'limit') {
+        yield {
+          kind: 'error',
+          message: `model response exceeded ${json.maxBytes} bytes`,
+          code: 'stream_resource_limit'
+        }
+        return
+      }
+      if (json.kind === 'invalid_json') {
+        yield { kind: 'error', message: `model response contained invalid JSON: ${json.message}` }
+        return
+      }
+      yield* this.materializeNonStreaming(
+        json.value as ChatCompletionResponse,
+        endpointFormat,
+        requestModel,
+        modelStreamLimits
+      )
       return
     }
     if (!response.body) {
@@ -996,12 +1290,25 @@ export class CompatModelClient implements ModelClient {
     const pendingByIndex = new Map<number, string>()
     const completedToolCalls = new Set<string>()
     let usage: UsageSnapshot | null = null
-    let textAccumulator = ''
-    let reasoningAccumulator = ''
+    // The Responses protocol may repeat final output in response.completed;
+    // a boolean is sufficient to suppress that duplicate. Retaining the full
+    // streamed text/reasoning here used quadratic concatenation and a second
+    // unbounded copy of an already-emitted response.
+    let sawTextDelta = false
     let stopReason: ModelStopReason = 'stop'
     let finishReason: string | null = null
     let sawDone = false
+    let readerFinished = false
+    let bufferBytes = 0
     const idleTimeoutMs = normalizeStreamIdleTimeoutMs(this.config.streamIdleTimeoutMs)
+    const limits = normalizeModelStreamLimits(this.config.streamLimits)
+    const budget = new ModelStreamResourceBudget(limits)
+    const cancelReader = (reason: string): void => {
+      // Never await cancellation here: a broken/custom ReadableStream can
+      // make its cancel promise hang, defeating the very timeout/limit that
+      // is trying to stop it.
+      void reader.cancel(reason).catch(() => {})
+    }
     try {
       while (!signal.aborted) {
         const read = await readStreamChunk(reader, signal, idleTimeoutMs)
@@ -1019,12 +1326,29 @@ export class CompatModelClient implements ModelClient {
           return
         }
         const { value, done } = read
-        if (done) break
+        if (done) {
+          readerFinished = true
+          break
+        }
+        if (!value) {
+          readerFinished = true
+          break
+        }
+        budget.addInboundBytes(value.byteLength)
+        bufferBytes += value.byteLength
+        if (bufferBytes > limits.maxBufferBytes) {
+          throw new ModelStreamResourceLimitError(
+            `model stream exceeded ${limits.maxBufferBytes} buffered SSE bytes`
+          )
+        }
         buffer += decoder.decode(value, { stream: true })
         let boundary: RegExpExecArray | null
         while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
           const frame = buffer.slice(0, boundary.index)
           buffer = buffer.slice(boundary.index + boundary[0].length)
+          const consumedBytes = Buffer.byteLength(frame, 'utf8') + Buffer.byteLength(boundary[0], 'utf8')
+          bufferBytes = Math.max(0, bufferBytes - consumedBytes)
+          budget.addFrame(Buffer.byteLength(frame, 'utf8'))
           const dataLines = frame
             .split(/\r?\n/)
             .filter((line) => line.startsWith('data:'))
@@ -1048,20 +1372,32 @@ export class CompatModelClient implements ModelClient {
             pendingArguments,
             pendingByIndex,
             completedToolCalls,
-            textAccumulator,
-            reasoningAccumulator,
+            sawTextDelta,
             endpointFormat,
-            model
+            model,
+            budget
           )
-          textAccumulator = result.text
-          reasoningAccumulator = result.reasoning
+          budget.addOutput(result.chunks)
+          sawTextDelta = result.sawTextDelta
           if (result.usage) usage = mergeUsageSnapshots(usage, result.usage)
           if (result.finishReason) finishReason = result.finishReason
           for (const chunk of result.chunks) yield chunk
         }
         if (sawDone) break
       }
+    } catch (error) {
+      if (error instanceof ModelStreamResourceLimitError) {
+        buffer = ''
+        budget.clearPendingCalls(pendingArguments)
+        pendingByIndex.clear()
+        completedToolCalls.clear()
+        cancelReader('model stream resource limit exceeded')
+        yield { kind: 'error', message: error.message, code: 'stream_resource_limit' }
+        return
+      }
+      throw error
     } finally {
+      if (!readerFinished) cancelReader('model stream closed before body completion')
       try {
         reader.releaseLock()
       } catch {
@@ -1088,19 +1424,29 @@ export class CompatModelClient implements ModelClient {
     // otherwise DROP the call silently. Truncated arguments surface here as
     // `{ __raw }` (a tool error the model can react to) instead of vanishing.
     let flushedPendingToolCall = false
-    for (const [callId, pending] of pendingArguments) {
-      if (!pending.name) continue
-      if (completedToolCalls.has(callId)) continue
-      flushedPendingToolCall = true
-      completedToolCalls.add(callId)
-      yield {
-        kind: 'tool_call_complete',
-        callId,
-        toolName: pending.name,
-        arguments: this.parseToolArguments(pending.arguments || '{}')
+    try {
+      for (const [callId, pending] of pendingArguments) {
+        if (!pending.name) continue
+        if (completedToolCalls.has(callId)) continue
+        const argumentsRaw = budget.pendingArguments(pending)
+        budget.completeToolCall(argumentsRaw)
+        flushedPendingToolCall = true
+        completedToolCalls.add(callId)
+        yield {
+          kind: 'tool_call_complete',
+          callId,
+          toolName: pending.name,
+          arguments: this.parseToolArguments(argumentsRaw || '{}')
+        }
       }
+    } catch (error) {
+      if (error instanceof ModelStreamResourceLimitError) {
+        yield { kind: 'error', message: error.message, code: 'stream_resource_limit' }
+        return
+      }
+      throw error
     }
-    pendingArguments.clear()
+    budget.clearPendingCalls(pendingArguments)
     if (usage) yield { kind: 'usage', usage }
     stopReason = ((): ModelStopReason => {
       switch (finishReason) {
@@ -1124,17 +1470,11 @@ export class CompatModelClient implements ModelClient {
     pendingArguments: Map<string, PendingToolCall>,
     pendingByIndex: Map<number, string>,
     completedToolCalls: Set<string>,
-    textAccumulator: string,
-    reasoningAccumulator: string,
+    sawTextDelta: boolean,
     endpointFormat: ModelEndpointFormat,
-    model: string
-  ): {
-    chunks: ModelStreamChunk[]
-    text: string
-    reasoning: string
-    finishReason: string | null
-    usage: UsageSnapshot | null
-  } {
+    model: string,
+    budget: ModelStreamResourceBudget
+  ): StreamPayloadResult {
     const payloadError = modelPayloadError(payload)
     if (payloadError) {
       return {
@@ -1143,8 +1483,7 @@ export class CompatModelClient implements ModelClient {
           message: payloadError.message,
           ...(payloadError.code ? { code: payloadError.code } : {})
         }],
-        text: textAccumulator,
-        reasoning: reasoningAccumulator,
+        sawTextDelta,
         finishReason: 'error',
         usage: null
       }
@@ -1155,9 +1494,9 @@ export class CompatModelClient implements ModelClient {
         pendingArguments,
         pendingByIndex,
         completedToolCalls,
-        textAccumulator,
-        reasoningAccumulator,
-        model
+        sawTextDelta,
+        model,
+        budget
       )
     }
     if (endpointFormat === 'messages') {
@@ -1166,14 +1505,13 @@ export class CompatModelClient implements ModelClient {
         pendingArguments,
         pendingByIndex,
         completedToolCalls,
-        textAccumulator,
-        reasoningAccumulator,
-        model
+        sawTextDelta,
+        model,
+        budget
       )
     }
     const chunks: ModelStreamChunk[] = []
-    let text = textAccumulator
-    let reasoning = reasoningAccumulator
+    let sawText = sawTextDelta
     let finishReason: string | null = null
     let usage: UsageSnapshot | null = null
     const choice = (payload.choices as Record<string, unknown>[] | undefined)?.[0]
@@ -1182,12 +1520,11 @@ export class CompatModelClient implements ModelClient {
       if (delta && typeof delta === 'object') {
         const content = delta.content
         if (typeof content === 'string' && content.length > 0) {
-          text += content
+          sawText = true
           chunks.push({ kind: 'assistant_text_delta', text: content })
         }
         const reasoningContent = delta.reasoning_content ?? delta.reasoning
         if (typeof reasoningContent === 'string' && reasoningContent.length > 0) {
-          reasoning += reasoningContent
           chunks.push({ kind: 'assistant_reasoning_delta', text: reasoningContent })
         }
         const toolCalls = delta.tool_calls as
@@ -1200,12 +1537,11 @@ export class CompatModelClient implements ModelClient {
         if (Array.isArray(toolCalls)) {
           for (const call of toolCalls) {
             const id = resolveToolCallDeltaId(call, pendingArguments)
-            const existing = pendingArguments.get(id) ?? { index: numericIndex(call.index), name: undefined, arguments: '' }
             const resolvedIndex = numericIndex(call.index)
-            if (resolvedIndex !== undefined) existing.index = resolvedIndex
+            const existing = budget.pendingCall(pendingArguments, id, resolvedIndex)
             if (call.function?.name) existing.name = call.function.name
             if (typeof call.function?.arguments === 'string') {
-              existing.arguments += call.function.arguments
+              budget.appendArguments(existing, call.function.arguments)
               chunks.push({
                 kind: 'tool_call_delta',
                 callId: id,
@@ -1213,7 +1549,6 @@ export class CompatModelClient implements ModelClient {
                 argumentsDelta: call.function.arguments
               })
             }
-            pendingArguments.set(id, existing)
           }
         }
       }
@@ -1228,7 +1563,9 @@ export class CompatModelClient implements ModelClient {
     if (finishReason === 'tool_calls' && pendingArguments.size > 0) {
       for (const [callId, value] of pendingArguments) {
         if (!value.name) continue
-        const args = this.parseToolArguments(value.arguments)
+        const argumentsRaw = budget.pendingArguments(value)
+        budget.completeToolCall(argumentsRaw)
+        const args = this.parseToolArguments(argumentsRaw || '{}')
         chunks.push({
           kind: 'tool_call_complete',
           callId,
@@ -1236,9 +1573,10 @@ export class CompatModelClient implements ModelClient {
           arguments: args
         })
       }
-      pendingArguments.clear()
+      budget.clearPendingCalls(pendingArguments)
+      pendingByIndex.clear()
     }
-    return { chunks, text, reasoning, finishReason, usage }
+    return { chunks, sawTextDelta: sawText, finishReason, usage }
   }
 
   private consumeResponsesStreamPayload(
@@ -1246,19 +1584,12 @@ export class CompatModelClient implements ModelClient {
     pendingArguments: Map<string, PendingToolCall>,
     pendingByIndex: Map<number, string>,
     completedToolCalls: Set<string>,
-    textAccumulator: string,
-    reasoningAccumulator: string,
-    model: string
-  ): {
-    chunks: ModelStreamChunk[]
-    text: string
-    reasoning: string
-    finishReason: string | null
-    usage: UsageSnapshot | null
-  } {
+    sawTextDelta: boolean,
+    model: string,
+    budget: ModelStreamResourceBudget
+  ): StreamPayloadResult {
     const chunks: ModelStreamChunk[] = []
-    let text = textAccumulator
-    let reasoning = reasoningAccumulator
+    let sawText = sawTextDelta
     let finishReason: string | null = null
     let usage: UsageSnapshot | null = null
     const type = recordString(payload, 'type')
@@ -1276,25 +1607,26 @@ export class CompatModelClient implements ModelClient {
         }
       } else if (itemType === 'function_call' || itemType === 'custom_tool_call') {
         const callId = recordString(item, 'call_id') || recordString(item, 'id') || indexFallbackCallId(outputIndex, pendingArguments)
-        const existing = pendingArguments.get(callId) ?? { index: outputIndex, name: undefined, arguments: '' }
+        const existing = budget.pendingCall(pendingArguments, callId, outputIndex)
         if (outputIndex !== undefined) {
-          existing.index = outputIndex
-          pendingByIndex.set(outputIndex, callId)
+          budget.bindPendingIndex(pendingByIndex, outputIndex, callId)
         }
         const name = recordString(item, 'name')
         if (name) existing.name = name
         const initialArguments = recordString(item, 'arguments') || recordString(item, 'input')
-        if (initialArguments && !existing.arguments) existing.arguments = initialArguments
-        pendingArguments.set(callId, existing)
+        if (initialArguments && existing.argumentBytes === 0) budget.replaceArguments(existing, initialArguments)
         if (type === 'response.output_item.done' && existing.name) {
+          const argumentsRaw = budget.pendingArguments(existing)
+          budget.completeToolCall(argumentsRaw)
           chunks.push({
             kind: 'tool_call_complete',
             callId,
             toolName: existing.name,
-            arguments: this.parseToolArguments(existing.arguments || '{}')
+            arguments: this.parseToolArguments(argumentsRaw || '{}')
           })
           completedToolCalls.add(callId)
-          pendingArguments.delete(callId)
+          budget.removePendingCall(pendingArguments, callId)
+          if (existing.index !== undefined) pendingByIndex.delete(existing.index)
         }
       }
     }
@@ -1302,7 +1634,7 @@ export class CompatModelClient implements ModelClient {
     if (type === 'response.output_text.delta') {
       const delta = recordString(payload, 'delta')
       if (delta) {
-        text += delta
+        sawText = true
         chunks.push({ kind: 'assistant_text_delta', text: delta })
       }
     } else if (
@@ -1312,19 +1644,17 @@ export class CompatModelClient implements ModelClient {
     ) {
       const delta = recordString(payload, 'delta')
       if (delta) {
-        reasoning += delta
         chunks.push({ kind: 'assistant_reasoning_delta', text: delta })
       }
     } else if (type === 'response.function_call_arguments.delta') {
       const callId = responseStreamCallId(payload, pendingArguments, pendingByIndex)
-      const existing = pendingArguments.get(callId) ?? { index: outputIndex, name: undefined, arguments: '' }
+      const existing = budget.pendingCall(pendingArguments, callId, outputIndex)
       const delta = recordString(payload, 'delta')
       if (outputIndex !== undefined) {
-        existing.index = outputIndex
-        pendingByIndex.set(outputIndex, callId)
+        budget.bindPendingIndex(pendingByIndex, outputIndex, callId)
       }
       if (delta) {
-        existing.arguments += delta
+        budget.appendArguments(existing, delta)
         chunks.push({
           kind: 'tool_call_delta',
           callId,
@@ -1332,27 +1662,23 @@ export class CompatModelClient implements ModelClient {
           argumentsDelta: delta
         })
       }
-      pendingArguments.set(callId, existing)
     } else if (type === 'response.function_call_arguments.done') {
       const callId = responseStreamCallId(payload, pendingArguments, pendingByIndex)
-      const existing = pendingArguments.get(callId) ?? { index: outputIndex, name: undefined, arguments: '' }
+      const existing = budget.pendingCall(pendingArguments, callId, outputIndex)
       const args = recordString(payload, 'arguments')
-      if (args) existing.arguments = args
-      if (existing.name) {
-        pendingArguments.set(callId, existing)
-      } else {
-        pendingArguments.set(callId, existing)
-      }
+      if (args) budget.replaceArguments(existing, args)
     } else if (type === 'response.image_generation_call.partial_image') {
       // Partial image data — accumulation is optional; we emit on output_item.done
     } else if (type === 'response.completed') {
       const response = recordValue(payload, 'response') as ResponsesApiResponse | null
       const materialized = this.materializeResponsesOutput(response ?? (payload as ResponsesApiResponse), {
-        skipText: Boolean(text),
+        skipText: sawText,
         pendingArguments,
-        completedToolCalls
+        completedToolCalls,
+        budget
       }, model)
       chunks.push(...materialized.chunks)
+      if (materialized.chunks.some((chunk) => chunk.kind === 'assistant_text_delta')) sawText = true
       if (materialized.usage) usage = materialized.usage
       finishReason = materialized.finishReason
     } else if (type === 'response.failed' || type === 'error') {
@@ -1360,7 +1686,7 @@ export class CompatModelClient implements ModelClient {
       chunks.push({ kind: 'error', message, code: 'response_stream_error' })
       finishReason = 'error'
     }
-    return { chunks, text, reasoning, finishReason, usage }
+    return { chunks, sawTextDelta: sawText, finishReason, usage }
   }
 
   private consumeAnthropicMessagesStreamPayload(
@@ -1368,19 +1694,12 @@ export class CompatModelClient implements ModelClient {
     pendingArguments: Map<string, PendingToolCall>,
     pendingByIndex: Map<number, string>,
     completedToolCalls: Set<string>,
-    textAccumulator: string,
-    reasoningAccumulator: string,
-    model: string
-  ): {
-    chunks: ModelStreamChunk[]
-    text: string
-    reasoning: string
-    finishReason: string | null
-    usage: UsageSnapshot | null
-  } {
+    sawTextDelta: boolean,
+    model: string,
+    budget: ModelStreamResourceBudget
+  ): StreamPayloadResult {
     const chunks: ModelStreamChunk[] = []
-    let text = textAccumulator
-    let reasoning = reasoningAccumulator
+    let sawText = sawTextDelta
     let finishReason: string | null = null
     let usage: UsageSnapshot | null = null
     const type = recordString(payload, 'type')
@@ -1394,16 +1713,14 @@ export class CompatModelClient implements ModelClient {
       const block = recordValue(payload, 'content_block')
       if (block && recordString(block, 'type') === 'tool_use') {
         const callId = recordString(block, 'id') || indexFallbackCallId(index, pendingArguments)
-        const existing = pendingArguments.get(callId) ?? { index, name: undefined, arguments: '' }
+        const existing = budget.pendingCall(pendingArguments, callId, index)
         if (index !== undefined) {
-          existing.index = index
-          pendingByIndex.set(index, callId)
+          budget.bindPendingIndex(pendingByIndex, index, callId)
         }
         const name = recordString(block, 'name')
         if (name) existing.name = name
         const input = recordValue(block, 'input')
-        if (input && Object.keys(input).length > 0) existing.arguments = JSON.stringify(input)
-        pendingArguments.set(callId, existing)
+        if (input && Object.keys(input).length > 0) budget.replaceArguments(existing, JSON.stringify(input))
       }
     } else if (type === 'content_block_delta') {
       const delta = recordValue(payload, 'delta')
@@ -1411,25 +1728,23 @@ export class CompatModelClient implements ModelClient {
       if (deltaType === 'text_delta') {
         const value = recordString(delta, 'text')
         if (value) {
-          text += value
+          sawText = true
           chunks.push({ kind: 'assistant_text_delta', text: value })
         }
       } else if (deltaType === 'thinking_delta') {
         const value = recordString(delta, 'thinking')
         if (value) {
-          reasoning += value
           chunks.push({ kind: 'assistant_reasoning_delta', text: value })
         }
       } else if (deltaType === 'input_json_delta') {
         const callId = anthropicStreamCallId(index, pendingArguments, pendingByIndex)
-        const existing = pendingArguments.get(callId) ?? { index, name: undefined, arguments: '' }
+        const existing = budget.pendingCall(pendingArguments, callId, index)
         const value = recordString(delta, 'partial_json')
         if (index !== undefined) {
-          existing.index = index
-          pendingByIndex.set(index, callId)
+          budget.bindPendingIndex(pendingByIndex, index, callId)
         }
         if (value) {
-          existing.arguments += value
+          budget.appendArguments(existing, value)
           chunks.push({
             kind: 'tool_call_delta',
             callId,
@@ -1437,20 +1752,21 @@ export class CompatModelClient implements ModelClient {
             argumentsDelta: value
           })
         }
-        pendingArguments.set(callId, existing)
       }
     } else if (type === 'content_block_stop') {
       const callId = index === undefined ? undefined : pendingByIndex.get(index)
       const pending = callId ? pendingArguments.get(callId) : undefined
       if (callId && pending?.name) {
+        const argumentsRaw = budget.pendingArguments(pending)
+        budget.completeToolCall(argumentsRaw)
         chunks.push({
           kind: 'tool_call_complete',
           callId,
           toolName: pending.name,
-          arguments: this.parseToolArguments(pending.arguments || '{}')
+          arguments: this.parseToolArguments(argumentsRaw || '{}')
         })
         completedToolCalls.add(callId)
-        pendingArguments.delete(callId)
+        budget.removePendingCall(pendingArguments, callId)
         if (index !== undefined) pendingByIndex.delete(index)
       }
     } else if (type === 'message_delta') {
@@ -1466,13 +1782,14 @@ export class CompatModelClient implements ModelClient {
       chunks.push({ kind: 'error', message: responseErrorMessage(payload), code: 'messages_stream_error' })
       finishReason = 'error'
     }
-    return { chunks, text, reasoning, finishReason, usage }
+    return { chunks, sawTextDelta: sawText, finishReason, usage }
   }
 
   private *materializeNonStreaming(
     payload: ChatCompletionResponse,
     endpointFormat: ModelEndpointFormat,
-    model: string
+    model: string,
+    limits: ModelStreamLimits
   ): Generator<ModelStreamChunk> {
     const payloadError = modelPayloadError(payload as unknown as Record<string, unknown>)
     if (payloadError) {
@@ -1484,11 +1801,17 @@ export class CompatModelClient implements ModelClient {
       return
     }
     if (endpointFormat === 'responses') {
-      yield* this.materializeResponsesNonStreaming(payload as unknown as ResponsesApiResponse, model)
+      yield* enforceNonStreamingLimits(
+        this.materializeResponsesNonStreaming(payload as unknown as ResponsesApiResponse, model),
+        limits
+      )
       return
     }
     if (endpointFormat === 'messages') {
-      yield* this.materializeAnthropicMessagesNonStreaming(payload as unknown as AnthropicMessageResponse, model)
+      yield* enforceNonStreamingLimits(
+        this.materializeAnthropicMessagesNonStreaming(payload as unknown as AnthropicMessageResponse, model),
+        limits
+      )
       return
     }
     const choice = payload.choices?.[0]
@@ -1498,31 +1821,33 @@ export class CompatModelClient implements ModelClient {
     }
     const text = typeof choice.message?.content === 'string' ? choice.message.content : ''
     const reasoning = reasoningFromMessage(choice.message)
+    const chunks: ModelStreamChunk[] = []
     if (reasoning) {
-      yield { kind: 'assistant_reasoning_delta', text: reasoning }
+      chunks.push({ kind: 'assistant_reasoning_delta', text: reasoning })
     }
     if (text) {
-      yield { kind: 'assistant_text_delta', text }
+      chunks.push({ kind: 'assistant_text_delta', text })
     }
     if (Array.isArray(choice.message?.tool_calls)) {
       for (const call of choice.message.tool_calls) {
         const args = this.parseToolArguments(call.function?.arguments ?? '{}')
-        yield {
+        chunks.push({
           kind: 'tool_call_complete',
           callId: call.id,
           toolName: call.function.name,
           arguments: args
-        }
+        })
       }
     }
     if (payload.usage) {
-      yield { kind: 'usage', usage: this.mapUsage(payload.usage, model) }
+      chunks.push({ kind: 'usage', usage: this.mapUsage(payload.usage, model) })
     }
     let stopReason: 'stop' | 'tool_calls' | 'length' | 'error' = 'stop'
     if (choice.finish_reason === 'tool_calls') stopReason = 'tool_calls'
     else if (choice.finish_reason === 'length') stopReason = 'length'
     else if (choice.finish_reason === 'error') stopReason = 'error'
-    yield { kind: 'completed', stopReason }
+    chunks.push({ kind: 'completed', stopReason })
+    yield* enforceNonStreamingLimits(chunks, limits)
   }
 
   private *materializeResponsesNonStreaming(
@@ -1547,6 +1872,7 @@ export class CompatModelClient implements ModelClient {
       skipText?: boolean
       pendingArguments?: Map<string, PendingToolCall>
       completedToolCalls?: Set<string>
+      budget?: ModelStreamResourceBudget
     } = {},
     model = this.config.model
   ): {
@@ -1573,9 +1899,12 @@ export class CompatModelClient implements ModelClient {
       if (options.completedToolCalls?.has(callId)) continue
       sawToolCall = true
       const argsRaw = recordString(item, 'arguments') || recordString(item, 'input') || '{}'
+      options.budget?.completeToolCall(argsRaw)
       if (options.pendingArguments?.has(callId)) {
-        options.pendingArguments.delete(callId)
+        if (options.budget) options.budget.removePendingCall(options.pendingArguments, callId)
+        else options.pendingArguments.delete(callId)
       }
+      options.completedToolCalls?.add(callId)
       chunks.push({
         kind: 'tool_call_complete',
         callId,
@@ -2666,6 +2995,117 @@ function normalizeStreamIdleTimeoutMs(value: number | undefined): number {
   return Math.max(0, Math.floor(value))
 }
 
+function normalizeModelStreamLimits(input: Partial<ModelStreamLimits> | undefined): ModelStreamLimits {
+  const normalize = (value: number | undefined, fallback: number): number => {
+    if (value === undefined || !Number.isFinite(value)) return fallback
+    return Math.max(1, Math.floor(value))
+  }
+  return {
+    maxBufferBytes: normalize(input?.maxBufferBytes, DEFAULT_MODEL_STREAM_LIMITS.maxBufferBytes),
+    maxFrameBytes: normalize(input?.maxFrameBytes, DEFAULT_MODEL_STREAM_LIMITS.maxFrameBytes),
+    maxTotalBytes: normalize(input?.maxTotalBytes, DEFAULT_MODEL_STREAM_LIMITS.maxTotalBytes),
+    maxFrames: normalize(input?.maxFrames, DEFAULT_MODEL_STREAM_LIMITS.maxFrames),
+    maxOutputBytes: normalize(input?.maxOutputBytes, DEFAULT_MODEL_STREAM_LIMITS.maxOutputBytes),
+    maxPendingToolCalls: normalize(input?.maxPendingToolCalls, DEFAULT_MODEL_STREAM_LIMITS.maxPendingToolCalls),
+    maxPendingToolArgumentBytes: normalize(
+      input?.maxPendingToolArgumentBytes,
+      DEFAULT_MODEL_STREAM_LIMITS.maxPendingToolArgumentBytes
+    ),
+    maxTotalPendingToolArgumentBytes: normalize(
+      input?.maxTotalPendingToolArgumentBytes,
+      DEFAULT_MODEL_STREAM_LIMITS.maxTotalPendingToolArgumentBytes
+    ),
+    maxToolArgumentFragments: normalize(
+      input?.maxToolArgumentFragments,
+      DEFAULT_MODEL_STREAM_LIMITS.maxToolArgumentFragments
+    ),
+    maxTotalToolArgumentFragments: normalize(
+      input?.maxTotalToolArgumentFragments,
+      DEFAULT_MODEL_STREAM_LIMITS.maxTotalToolArgumentFragments
+    ),
+    maxCompletedToolCalls: normalize(input?.maxCompletedToolCalls, DEFAULT_MODEL_STREAM_LIMITS.maxCompletedToolCalls),
+    maxCompletedToolArgumentBytes: normalize(
+      input?.maxCompletedToolArgumentBytes,
+      DEFAULT_MODEL_STREAM_LIMITS.maxCompletedToolArgumentBytes
+    )
+  }
+}
+
+type LimitedResponseJson =
+  | { kind: 'ok'; value: unknown }
+  | { kind: 'limit'; maxBytes: number }
+  | { kind: 'invalid_json'; message: string }
+
+/** Read an HTTP body without delegating an unbounded response to Response.text/json. */
+async function readLimitedResponseText(response: Response, maxBytes: number): Promise<{ text: string; exceeded: boolean }> {
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    void response.body?.cancel('model response body limit exceeded').catch(() => {})
+    return { text: '', exceeded: true }
+  }
+  if (!response.body) return { text: '', exceeded: false }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  const parts: string[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (!value) continue
+      totalBytes += value.byteLength
+      if (totalBytes > maxBytes) {
+        void reader.cancel('model response body limit exceeded').catch(() => {})
+        return { text: parts.join(''), exceeded: true }
+      }
+      const text = decoder.decode(value, { stream: true })
+      if (text) parts.push(text)
+    }
+    const tail = decoder.decode()
+    if (tail) parts.push(tail)
+    return { text: parts.join(''), exceeded: false }
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // Best effort; cancellation or a completed reader may already release it.
+    }
+  }
+}
+
+async function readLimitedResponseJson(response: Response, maxBytes: number): Promise<LimitedResponseJson> {
+  const body = await readLimitedResponseText(response, maxBytes)
+  if (body.exceeded) return { kind: 'limit', maxBytes }
+  try {
+    return { kind: 'ok', value: JSON.parse(body.text) }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { kind: 'invalid_json', message }
+  }
+}
+
+function* enforceNonStreamingLimits(
+  chunks: Iterable<ModelStreamChunk>,
+  limits: ModelStreamLimits
+): Generator<ModelStreamChunk> {
+  const budget = new ModelStreamResourceBudget(limits)
+  try {
+    for (const chunk of chunks) {
+      if (chunk.kind === 'tool_call_complete') {
+        budget.completeToolCall(JSON.stringify(chunk.arguments) ?? '{}')
+      }
+      budget.addOutput([chunk])
+      yield chunk
+    }
+  } catch (error) {
+    if (error instanceof ModelStreamResourceLimitError) {
+      yield { kind: 'error', message: error.message, code: 'stream_resource_limit' }
+      return
+    }
+    throw error
+  }
+}
+
 async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal: AbortSignal,
@@ -2700,11 +3140,9 @@ async function readStreamChunk(
   if (timeout) clearTimeout(timeout)
   cleanupAbort?.()
   if (result.kind === 'timeout') {
-    try {
-      await reader.cancel('model stream idle timeout')
-    } catch {
-      // Best-effort cancellation; the caller will surface the timeout.
-    }
+    // A custom stream may never resolve `cancel()`. Fire-and-forget it so an
+    // idle timeout remains a real deadline rather than another await point.
+    void reader.cancel('model stream idle timeout').catch(() => {})
   }
   return result
 }

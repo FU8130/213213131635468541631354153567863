@@ -1,10 +1,33 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ThreadStore } from '../src/ports/thread-store.js'
 import type { RuntimeEventRecorder } from '../src/services/runtime-event-recorder.js'
-import { BackgroundShellRuntime } from '../src/services/background-shell-runtime.js'
+import { BackgroundShellRuntime, MAX_BACKGROUND_SHELL_SESSIONS } from '../src/services/background-shell-runtime.js'
 import type { TurnService } from '../src/services/turn-service.js'
 
 describe('BackgroundShellRuntime', () => {
+  it('bounds settled sessions while retaining active shells', () => {
+    const runtime = new BackgroundShellRuntime({
+      events: { record: vi.fn(async () => undefined) } as unknown as RuntimeEventRecorder,
+      threadStore: {} as ThreadStore,
+      turns: {} as TurnService,
+      nowIso: () => '2026-01-01T00:00:00.000Z'
+    })
+    for (let index = 0; index <= MAX_BACKGROUND_SHELL_SESSIONS; index += 1) {
+      runtime.upsertSession({
+        id: `settled_${index}`, threadId: 'thr_1', turnId: 'turn_1', command: 'true', cwd: '/tmp', shell: 'bash',
+        status: 'completed', startedAt: '2026-01-01T00:00:00.000Z', exitCode: 0, output: '', detached: false
+      })
+    }
+    runtime.upsertSession({
+      id: 'running', threadId: 'thr_1', turnId: 'turn_1', command: 'sleep 1', cwd: '/tmp', shell: 'bash',
+      status: 'running', startedAt: '2026-01-01T00:00:00.000Z', exitCode: null, output: '', detached: false
+    })
+
+    expect(runtime.listSessions()).toHaveLength(MAX_BACKGROUND_SHELL_SESSIONS + 1)
+    expect(runtime.getSession('settled_0')).toBeNull()
+    expect(runtime.getSession('running')).toMatchObject({ status: 'running' })
+  })
+
   it('steers a running turn when a detached shell completes successfully', async () => {
     const steerTurn = vi.fn(async () => undefined)
     const startTurn = vi.fn(async () => ({ threadId: 'thr_1', turnId: 'turn_new', userMessageItemId: 'item_1' }))

@@ -17,6 +17,8 @@ export type BackgroundShellRuntimeDeps = {
 
 type RunTurnFn = (threadId: string, turnId: string) => Promise<unknown>
 
+export const MAX_BACKGROUND_SHELL_SESSIONS = 512
+
 export class BackgroundShellRuntime {
   private readonly sessions = new Map<string, BackgroundShellRecord>()
   private readonly detachedIds = new Set<string>()
@@ -67,7 +69,7 @@ export class BackgroundShellRuntime {
   }
 
   upsertSession(record: BackgroundShellRecord): void {
-    this.sessions.set(record.id, record)
+    this.rememberSession(record)
   }
 
   removeSession(sessionId: string): void {
@@ -88,7 +90,7 @@ export class BackgroundShellRuntime {
   }
 
   private async handleSessionStarted(record: BackgroundShellRecord): Promise<void> {
-    this.sessions.set(record.id, record)
+    this.rememberSession(record)
     if (record.detached) this.detachedIds.add(record.id)
     await this.deps.events.record({
       kind: 'bash_session_started',
@@ -106,7 +108,7 @@ export class BackgroundShellRuntime {
   }
 
   private async handleSessionUpdated(record: BackgroundShellRecord): Promise<void> {
-    this.sessions.set(record.id, record)
+    this.rememberSession(record)
     await this.deps.events.record({
       kind: 'bash_session_updated',
       threadId: record.threadId,
@@ -126,7 +128,7 @@ export class BackgroundShellRuntime {
   }
 
   private async handleSessionSettled(record: BackgroundShellRecord): Promise<void> {
-    this.sessions.set(record.id, record)
+    this.rememberSession(record)
     await this.deps.events.record({
       kind: 'bash_session_completed',
       threadId: record.threadId,
@@ -181,6 +183,19 @@ export class BackgroundShellRuntime {
       }
     })
     void this.runTurn(record.threadId, started.turnId)
+  }
+
+  private rememberSession(record: BackgroundShellRecord): void {
+    this.sessions.delete(record.id)
+    this.sessions.set(record.id, record)
+    let settled = [...this.sessions.values()].filter((session) => session.status !== 'running').length
+    if (settled <= MAX_BACKGROUND_SHELL_SESSIONS) return
+    for (const [id, session] of this.sessions) {
+      if (session.status === 'running') continue
+      this.sessions.delete(id)
+      settled -= 1
+      if (settled <= MAX_BACKGROUND_SHELL_SESSIONS) return
+    }
   }
 }
 

@@ -203,7 +203,12 @@ export class ReviewService {
       model: input.model,
       ...(input.providerId?.trim() ? { providerId: input.providerId.trim() } : {}),
       mode: 'agent',
-      approvalPolicy: 'auto'
+      approvalPolicy: 'auto',
+      // The reviewer receives untrusted diff and workspace content in its
+      // prompt. Its deliberately read-only tool set must be paired with the
+      // read-only sandbox, otherwise its child thread defaults to full access
+      // and can read files outside the reviewed workspace.
+      sandboxMode: 'read-only'
     })
     const started = await turns.startTurn({
       threadId: childThread.id,

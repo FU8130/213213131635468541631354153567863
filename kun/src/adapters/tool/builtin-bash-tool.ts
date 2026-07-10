@@ -302,12 +302,14 @@ function createOutputAccumulator(
   outputLimits: { maxLines: number; maxBytes: number } = {
     maxLines: DEFAULT_MAX_LINES,
     maxBytes: DEFAULT_MAX_BYTES
-  }
+  },
+  options: { persistFullOutput?: boolean } = {}
 ): OutputAccumulator {
   return new OutputAccumulator({
     maxLines: outputLimits.maxLines,
     maxBytes: outputLimits.maxBytes,
-    tempFilePrefix: 'kun-bash'
+    tempFilePrefix: 'kun-bash',
+    ...options
   })
 }
 
@@ -690,7 +692,10 @@ async function startBackgroundBashSession(
     cwd: input.cwd,
     shell: shellRuntime.name,
     child,
-    output: createOutputAccumulator(input.outputLimits),
+    // BackgroundShellOutputWriter is the sole durable output path here and
+    // caps storage at 10 MiB. Do not also let OutputAccumulator create an
+    // unbounded /tmp full-output file after the preview truncates.
+    output: createOutputAccumulator(input.outputLimits, { persistFullOutput: false }),
     outputMaxBytes: input.outputLimits.maxBytes,
     outputWriter,
     startedAt: new Date().toISOString(),

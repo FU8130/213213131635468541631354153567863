@@ -17,6 +17,12 @@ export type OutputAccumulatorOptions = {
   maxLines: number
   maxBytes: number
   tempFilePrefix: string
+  /**
+   * Keep an uncapped full-output temp file after the preview overflows. This
+   * is useful for foreground commands, but background sessions have their own
+   * bounded persistent writer and must disable it.
+   */
+  persistFullOutput?: boolean
 }
 
 type OutputTextEncoding = 'utf-8' | 'utf-16le'
@@ -128,6 +134,7 @@ export class OutputAccumulator {
   private readonly maxBytes: number
   private readonly maxRollingBytes: number
   private readonly tempFilePrefix: string
+  private readonly persistFullOutput: boolean
   private decoder: TextDecoder | undefined
   private decodeBuffer = Buffer.alloc(0)
 
@@ -151,16 +158,17 @@ export class OutputAccumulator {
     this.maxBytes = options.maxBytes
     this.maxRollingBytes = Math.max(this.maxBytes * 2, 1)
     this.tempFilePrefix = options.tempFilePrefix
+    this.persistFullOutput = options.persistFullOutput ?? true
   }
 
   append(data: Buffer): void {
     if (this.finished) throw new Error('Cannot append to a finished output accumulator')
     this.totalRawBytes += data.length
     this.appendDecodedBytes(data, false)
-    if (this.tempFileStream || this.shouldUseTempFile()) {
+    if (this.persistFullOutput && (this.tempFileStream || this.shouldUseTempFile())) {
       this.ensureTempFile()
       this.tempFileStream?.write(data)
-    } else if (data.length > 0) {
+    } else if (this.persistFullOutput && data.length > 0) {
       this.rawChunks.push(data)
     }
   }
@@ -172,7 +180,7 @@ export class OutputAccumulator {
     if (this.decoder) {
       this.appendDecodedText(this.decoder.decode())
     }
-    if (this.shouldUseTempFile()) this.ensureTempFile()
+    if (this.persistFullOutput && this.shouldUseTempFile()) this.ensureTempFile()
   }
 
   snapshot(options: { persistIfTruncated?: boolean } = {}): OutputAccumulatorSnapshot {
@@ -194,7 +202,7 @@ export class OutputAccumulator {
       maxLines: this.maxLines,
       maxBytes: this.maxBytes
     }
-    if (options.persistIfTruncated && truncation.truncated) this.ensureTempFile()
+    if (this.persistFullOutput && options.persistIfTruncated && truncation.truncated) this.ensureTempFile()
     return {
       content: truncation.content,
       truncation,

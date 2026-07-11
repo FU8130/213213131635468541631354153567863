@@ -80,6 +80,7 @@ export type RunPromptOptions = {
   clawChannel?: ClawImChannelV1 | null
   waitForResult: boolean
   responseTimeoutMs: number
+  signal?: AbortSignal
 }
 
 export const SCHEDULER_INTERVAL_MS = 30_000

@@ -3,7 +3,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type ChangeEvent,
   type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
@@ -11,29 +10,22 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement
 } from 'react'
-import { createPortal } from 'react-dom'
 import {
-  Archive,
   BarChart3,
   FileEdit,
   FileText,
   Folder,
   GitBranch,
-  GitFork,
   ImagePlus,
   ListTodo,
   Loader2,
-  MessageCircleMore,
   Mic,
-  Minimize2,
   Monitor,
   Paperclip,
   PauseCircle,
   Pencil,
   Plus,
   PlayCircle,
-  RotateCcw,
-  Search,
   SearchCode,
   Send,
   Sparkles,
@@ -45,43 +37,25 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { ModelProviderModelGroup } from '@shared/kun-gui-api'
-import type { AttachmentReference, ChatBlock, ReviewTarget } from '../../agent/types'
+import type { AttachmentReference, ReviewTarget } from '../../agent/types'
 import { useChatStore } from '../../store/chat-store'
 import type { AppRoute } from '../../store/chat-store-types'
 import { normalizeWorkspaceRoot } from '../../lib/workspace-path'
 import {
-  composerFileReferenceKey,
   composerFileReferenceFromPath,
-  filterWorkspaceFileMentionSuggestions,
-  formatComposerFileMentionToken,
-  getFileMentionAtCursor,
-  hasComposerFileMentionToken,
   isComposerDirectoryReference,
-  removeComposerFileMentionToken,
-  replaceFileMentionInInput,
-  type ComposerFileMention,
   type ComposerFileReference
 } from '../../lib/composer-file-references'
 import {
-  loadWorkspaceFileIndex,
-  loadWorkspaceMentionPathSuggestions,
-  mergeMentionCandidates
-} from '../../lib/workspace-file-index'
-import {
-  COMPACT_COMMAND_ALIASES,
   buildResearchPrompt,
   getGoalPanelDraftObjective,
   getSlashQuery,
-  NEW_COMMAND_ALIASES,
   parseBtwCommand,
   parseCompactCommand,
   parseGoalCommand,
   parseNewCommand,
   parseResearchCommand,
   parseReviewCommand,
-  RESEARCH_COMMAND_ALIASES,
-  REVIEW_COMMAND_ALIASES,
-  type SlashCommand,
   type SlashCommandId
 } from './floating-composer-commands'
 export { buildResearchPrompt, parseBtwCommand, parseCompactCommand, parseGoalCommand, parseNewCommand, parseResearchCommand, parseReviewCommand } from './floating-composer-commands'
@@ -92,8 +66,8 @@ import {
   cumulativeCacheHitRate,
   useThreadUsageState
 } from '../../hooks/use-thread-usage'
-import { buildContextCapacity, estimateBlockTokens } from '../../lib/context-capacity'
-import { ContextCapacityPopover } from './ContextCapacityPopover'
+import { FloatingComposerContextCapacity } from './FloatingComposerContextCapacity'
+export { calculateContextCapacityPopoverPlacement } from './FloatingComposerContextCapacity'
 import { GitBranchPicker } from './GitBranchPicker'
 import { WorkspaceProjectPicker } from './WorkspaceProjectPicker'
 import {
@@ -136,6 +110,12 @@ import { usePromptOptimizationSettings, useSpeechToTextSettings, useVoiceDictati
 import { VoiceRecordingStrip } from './VoiceRecordingStrip'
 import type { ComposerChangedFile } from '../../lib/composer-change-summary'
 import type { DesignComposerContext } from '../../design/design-composer-context'
+export { calculateComposerMenuScrollTop } from './composer-menu-scroll'
+import { useComposerFileMentions } from './use-composer-file-mentions'
+export { shouldCaptureFileMentionCommitKey } from './use-composer-file-mentions'
+import { FloatingComposerFileMentionMenu } from './FloatingComposerFileMentionMenu'
+import { useComposerSlashCommandMenu } from './use-composer-slash-command-menu'
+import { FloatingComposerSlashCommandMenu } from './FloatingComposerSlashCommandMenu'
 
 export type { ComposerFileReference } from '../../lib/composer-file-references'
 export type { ComposerExecutionSettings } from './FloatingComposerExecutionPicker'
@@ -144,137 +124,6 @@ export function shouldSurfaceComposerUserInput(route: AppRoute, compact: boolean
   return !compact && (route === 'chat' || route === 'design')
 }
 export type { DesignComposerContext } from '../../design/design-composer-context'
-
-const CONTEXT_CAPACITY_RING_SIZE = 24
-const CONTEXT_CAPACITY_RING_STROKE = 2.5
-const CONTEXT_CAPACITY_RING_RADIUS = (CONTEXT_CAPACITY_RING_SIZE - CONTEXT_CAPACITY_RING_STROKE) / 2
-const CONTEXT_CAPACITY_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_CAPACITY_RING_RADIUS
-const CONTEXT_CAPACITY_POPOVER_WIDTH = 300
-const CONTEXT_CAPACITY_POPOVER_MIN_HEIGHT = 180
-const CONTEXT_CAPACITY_POPOVER_MAX_HEIGHT = 360
-const CONTEXT_CAPACITY_POPOVER_ESTIMATED_HEIGHT = 252
-const CONTEXT_CAPACITY_POPOVER_MARGIN = 12
-const CONTEXT_CAPACITY_POPOVER_GAP = 8
-
-type ContextCapacityPopoverAnchorRect = Pick<DOMRect, 'bottom' | 'right' | 'top'>
-
-type ContextCapacityPopoverPlacement = {
-  left: number
-  top: number
-  width: number
-  maxHeight: number
-}
-
-function contextCapacityColor(usedRatio: number): string {
-  if (usedRatio >= 0.9) return '#d9544e'
-  if (usedRatio >= 0.75) return '#d9920f'
-  return 'var(--ds-accent)'
-}
-
-export function calculateContextCapacityPopoverPlacement({
-  anchorRect,
-  popoverHeight,
-  viewportHeight,
-  viewportWidth,
-  coordinateScale = 1
-}: {
-  anchorRect: ContextCapacityPopoverAnchorRect
-  popoverHeight: number
-  viewportHeight: number
-  viewportWidth: number
-  coordinateScale?: number
-}): ContextCapacityPopoverPlacement {
-  const scale = Number.isFinite(coordinateScale) && coordinateScale > 0 ? coordinateScale : 1
-  const normalizedAnchorRect = {
-    bottom: anchorRect.bottom / scale,
-    right: anchorRect.right / scale,
-    top: anchorRect.top / scale
-  }
-  const normalizedViewportHeight = viewportHeight / scale
-  const normalizedViewportWidth = viewportWidth / scale
-  const viewportMaxWidth = Math.max(1, normalizedViewportWidth - CONTEXT_CAPACITY_POPOVER_MARGIN * 2)
-  const width = Math.min(CONTEXT_CAPACITY_POPOVER_WIDTH, viewportMaxWidth)
-  const left = clampComposerNumber(
-    normalizedAnchorRect.right - width,
-    CONTEXT_CAPACITY_POPOVER_MARGIN,
-    Math.max(CONTEXT_CAPACITY_POPOVER_MARGIN, normalizedViewportWidth - CONTEXT_CAPACITY_POPOVER_MARGIN - width)
-  )
-  const contentHeight = Math.max(popoverHeight, CONTEXT_CAPACITY_POPOVER_MIN_HEIGHT)
-  const spaceAbove = Math.max(
-    1,
-    normalizedAnchorRect.top - CONTEXT_CAPACITY_POPOVER_MARGIN - CONTEXT_CAPACITY_POPOVER_GAP
-  )
-  const spaceBelow = Math.max(
-    1,
-    normalizedViewportHeight - normalizedAnchorRect.bottom - CONTEXT_CAPACITY_POPOVER_MARGIN - CONTEXT_CAPACITY_POPOVER_GAP
-  )
-  const targetHeight = Math.min(contentHeight, CONTEXT_CAPACITY_POPOVER_MAX_HEIGHT)
-  const openAbove = spaceAbove >= targetHeight || spaceAbove >= spaceBelow
-  const availableHeight = openAbove ? spaceAbove : spaceBelow
-  const maxHeight = Math.min(CONTEXT_CAPACITY_POPOVER_MAX_HEIGHT, availableHeight)
-  const visibleHeight = Math.min(contentHeight, maxHeight)
-  const preferredTop = openAbove
-    ? normalizedAnchorRect.top - CONTEXT_CAPACITY_POPOVER_GAP - visibleHeight
-    : normalizedAnchorRect.bottom + CONTEXT_CAPACITY_POPOVER_GAP
-  const top = clampComposerNumber(
-    preferredTop,
-    CONTEXT_CAPACITY_POPOVER_MARGIN,
-    Math.max(CONTEXT_CAPACITY_POPOVER_MARGIN, normalizedViewportHeight - CONTEXT_CAPACITY_POPOVER_MARGIN - visibleHeight)
-  )
-
-  return { left, top, width, maxHeight }
-}
-
-function currentComposerBodyZoom(): number {
-  if (typeof window === 'undefined') return 1
-  const zoom = window.getComputedStyle(document.body).zoom
-  const parsed = Number.parseFloat(zoom)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1
-}
-
-function clampComposerNumber(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max)
-}
-
-export function calculateComposerMenuScrollTop({
-  containerScrollTop,
-  containerClientHeight,
-  itemOffsetTop,
-  itemOffsetHeight
-}: {
-  containerScrollTop: number
-  containerClientHeight: number
-  itemOffsetTop: number
-  itemOffsetHeight: number
-}): number {
-  const currentTop = Math.max(0, containerScrollTop)
-  const visibleHeight = Math.max(0, containerClientHeight)
-  if (visibleHeight <= 0) return currentTop
-
-  const itemTop = Math.max(0, itemOffsetTop)
-  const itemBottom = itemTop + Math.max(0, itemOffsetHeight)
-  const currentBottom = currentTop + visibleHeight
-
-  if (itemTop < currentTop) return itemTop
-  if (itemBottom > currentBottom) return Math.max(0, itemBottom - visibleHeight)
-  return currentTop
-}
-
-function syncComposerMenuScroll(
-  container: HTMLElement | null,
-  item: HTMLElement | null
-): void {
-  if (!container || !item) return
-  const nextScrollTop = calculateComposerMenuScrollTop({
-    containerScrollTop: container.scrollTop,
-    containerClientHeight: container.clientHeight,
-    itemOffsetTop: item.offsetTop,
-    itemOffsetHeight: item.offsetHeight
-  })
-  if (nextScrollTop !== container.scrollTop) {
-    container.scrollTop = nextScrollTop
-  }
-}
 
 type Props = {
   variant?: 'default' | 'compact'
@@ -367,44 +216,12 @@ type Props = {
   runtimeSkillCount?: number
 }
 
-type SkillCommand = NonNullable<Props['skillCommands']>[number]
-
-export function shouldCaptureFileMentionCommitKey(
-  event: Pick<ReactKeyboardEvent<HTMLTextAreaElement>, 'key' | 'shiftKey' | 'metaKey' | 'ctrlKey'>
-): boolean {
-  if (event.key === 'Tab') return true
-  return event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey
-}
-
-const EMPTY_CONTEXT_BLOCKS: ChatBlock[] = []
 const EMPTY_MODEL_GROUPS: ModelProviderModelGroup[] = []
 const EMPTY_ATTACHMENTS: AttachmentReference[] = []
 const EMPTY_CONTEXT_CHIPS: DesignComposerContext[] = []
 const EMPTY_FILE_REFERENCES: ComposerFileReference[] = []
 const EMPTY_CHANGED_FILES: ComposerChangedFile[] = []
-const EMPTY_SKILL_COMMANDS: SkillCommand[] = []
-
-function comparablePath(path: string | undefined): string {
-  return (path ?? '').replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase()
-}
-
-function isProjectSkillRoot(skillRoot: string | undefined, workspaceRoot: string): boolean {
-  const root = comparablePath(skillRoot)
-  const workspace = comparablePath(workspaceRoot)
-  return Boolean(root && workspace && (root === workspace || root.startsWith(`${workspace}/`)))
-}
-
-function isProjectSkill(skill: { root?: string; scope?: 'project' | 'global' }, workspaceRoot: string): boolean {
-  return skill.scope === 'project' || (skill.scope !== 'global' && isProjectSkillRoot(skill.root, workspaceRoot))
-}
-
-function normalizeSkillCommandId(id: string): string {
-  return id.trim().replace(/^\/?skill:/i, '').trim()
-}
-
-function disabledSkillIdSet(ids: string[] | undefined): Set<string> {
-  return new Set((ids ?? []).map(normalizeSkillCommandId).filter(Boolean))
-}
+const EMPTY_SKILL_COMMANDS: NonNullable<Props['skillCommands']> = []
 
 export function formatGoalElapsedSeconds(seconds: number): string {
   const value = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0))
@@ -636,119 +453,56 @@ export function FloatingComposer({
     compact && modelPickerMode === 'combobox' && !showToolbarStartControls && !hideModelPicker
   const draft = useComposerDraft({ input, canCompose: canEditComposer })
   const slashQuery = getSlashQuery(input)
-  const [composerCursor, setComposerCursor] = useState(() => input.length)
-  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
-  const [fileMentionSuggestions, setFileMentionSuggestions] = useState<ComposerFileReference[]>([])
-  const [fileMentionLoading, setFileMentionLoading] = useState(false)
-  const [selectedFileMentionIndex, setSelectedFileMentionIndex] = useState(0)
-  const [dismissedFileMentionKey, setDismissedFileMentionKey] = useState<string | null>(null)
   const [composerMenuOpen, setComposerMenuOpen] = useState(false)
   const [worktreeBranches, setWorktreeBranches] = useState<string[]>([])
   const [goalPanelOpen, setGoalPanelOpen] = useState(false)
-  const [contextCapacityOpen, setContextCapacityOpen] = useState(false)
-  const [contextCapacityPlacement, setContextCapacityPlacement] =
-    useState<ContextCapacityPopoverPlacement | null>(null)
   const [goalRuntimeNowMs, setGoalRuntimeNowMs] = useState(() => Date.now())
   const [promptOptimizationBusy, setPromptOptimizationBusy] = useState(false)
   const [promptOptimizationError, setPromptOptimizationError] = useState<string | null>(null)
+  const fileMentions = useComposerFileMentions({
+    enabled: fileReferenceEnabled,
+    canCompose,
+    input,
+    setInput,
+    workspaceRoot: effectiveWorkspaceRoot,
+    slashQuery,
+    menuBlocked: composerMenuOpen || goalPanelOpen,
+    references: fileReferences,
+    extraCandidates: extraFileMentionCandidates,
+    textareaRef: draft.textareaRef,
+    focusComposer: draft.focusComposer,
+    onAdd: onAddFileReference,
+    onRemove: onRemoveFileReference
+  })
+  const slashCommandMenu = useComposerSlashCommandMenu({
+    slashQuery,
+    route,
+    runtimeReady,
+    busy,
+    activeThreadId,
+    activeThreadArchived,
+    canOpenGoalPanel,
+    canCreateNewThread,
+    workspaceRoot: effectiveWorkspaceRoot,
+    hasPlanCommand: Boolean(onPlanCommand),
+    hasBtwCommand: Boolean(onBtwCommand),
+    hideBtwCommand,
+    hasReviewCommand: Boolean(onReviewCommand),
+    skillCommands,
+    disabledSkillIds,
+    onDismiss: () => setInput('')
+  })
+  const slashCommands = slashCommandMenu.commands
+  const filteredSlashCommands = slashCommandMenu.filteredCommands
+  const highlightedSlashCommand = slashCommandMenu.highlightedCommand
   const composerRootRef = useRef<HTMLDivElement | null>(null)
   const composerMenuButtonRef = useRef<HTMLButtonElement | null>(null)
   const composerMenuPanelRef = useRef<HTMLDivElement | null>(null)
   const goalPanelRef = useRef<HTMLDivElement | null>(null)
-  const contextCapacityRef = useRef<HTMLDivElement | null>(null)
-  const contextCapacityButtonRef = useRef<HTMLButtonElement | null>(null)
-  const contextCapacityPopoverRef = useRef<HTMLDivElement | null>(null)
-  const contextCapacityHoverCloseTimerRef = useRef<number | null>(null)
-  const slashCommandMenuRef = useRef<HTMLDivElement | null>(null)
-  const slashCommandItemRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
-  const fileMentionMenuRef = useRef<HTMLDivElement | null>(null)
-  const fileMentionItemRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
-  const fileMentionPresenceRef = useRef<Map<string, boolean>>(new Map())
-  const messageTokenCacheRef = useRef<WeakMap<object, number>>(new WeakMap())
-  // Cache the last-known runtime capacity inputs. `runtimeInfo` (and thus these
-  // props) goes null whenever the runtime drops/reconnects; without caching, the
-  // chip would vanish ("context 没有了") and flap in/out as the connection flaps,
-  // which itself reads as flicker. Writing refs during render is idempotent here.
-  const lastKnownWindowRef = useRef(0)
-  if (typeof contextWindowTokens === 'number' && contextWindowTokens > 0) {
-    lastKnownWindowRef.current = contextWindowTokens
-  }
-  const lastKnownToolCountRef = useRef(0)
-  if (typeof runtimeToolCount === 'number') lastKnownToolCountRef.current = runtimeToolCount
-  const lastKnownSkillCountRef = useRef(0)
-  if (typeof runtimeSkillCount === 'number') lastKnownSkillCountRef.current = runtimeSkillCount
-  const effectiveContextWindow =
-    typeof contextWindowTokens === 'number' && contextWindowTokens > 0
-      ? contextWindowTokens
-      : lastKnownWindowRef.current
-  const effectiveToolCount =
-    typeof runtimeToolCount === 'number' ? runtimeToolCount : lastKnownToolCountRef.current
-  const effectiveSkillCount =
-    typeof runtimeSkillCount === 'number' ? runtimeSkillCount : lastKnownSkillCountRef.current
-  const canShowContextCapacity =
-    !compact && route === 'chat' && Boolean(activeThreadId) && effectiveContextWindow > 0
-  const liveMeasuredTotal =
+  const lastTurnInputTokens =
     lastTurnUsage && lastTurnUsage.threadId === activeThreadId
       ? lastTurnUsage.snapshot.inputTokens
       : null
-  const measuredContextTotal = liveMeasuredTotal
-  // The message estimate feeds the per-category split (popover), the
-  // no-measured-total fallback, AND the sanity check that rejects an inflated
-  // measured total (some providers over-report prompt_tokens — see
-  // buildContextCapacity). We therefore keep it live whenever the gauge can render, not
-  // just when the popover is open. Subscribe while streaming too so the context
-  // usage ring reflects the assistant reply as it becomes future context.
-  const needMessageEstimate = canShowContextCapacity
-  const subscribeContextBlocks = needMessageEstimate
-  const contextBlocks = useChatStore((s) => (subscribeContextBlocks ? s.blocks : EMPTY_CONTEXT_BLOCKS))
-  const conversationTokensRef = useRef(0)
-  const conversationTokens = useMemo(() => {
-    if (!subscribeContextBlocks) return conversationTokensRef.current
-    // Only the slice from the most recent compaction onward is actually re-sent
-    // to the model — the runtime folds everything before the latest compaction
-    // summary into it (effective history after the latest compaction). Counting the full
-    // visible history would over-state usage and hide the effect of compaction.
-    let startIndex = 0
-    for (let i = contextBlocks.length - 1; i >= 0; i -= 1) {
-      if (contextBlocks[i]?.kind === 'compaction') {
-        startIndex = i
-        break
-      }
-    }
-    // Cache per block: block identity is preserved for unchanged history across
-    // streaming updates, so only the block that changed is re-estimated.
-    const cache = messageTokenCacheRef.current
-    let sum = 0
-    for (let i = startIndex; i < contextBlocks.length; i += 1) {
-      const block = contextBlocks[i]!
-      let cached = cache.get(block)
-      if (cached === undefined) {
-        cached = estimateBlockTokens(block)
-        cache.set(block, cached)
-      }
-      sum += cached
-    }
-    conversationTokensRef.current = sum
-    return sum
-  }, [subscribeContextBlocks, contextBlocks])
-  const contextCapacity = useMemo(() => {
-    if (!canShowContextCapacity) return null
-    return buildContextCapacity({
-      windowTokens: effectiveContextWindow,
-      lastTurnInputTokens: measuredContextTotal,
-      messageTokens: conversationTokens,
-      toolCount: effectiveToolCount,
-      skillCount: effectiveSkillCount
-    })
-  }, [
-    canShowContextCapacity,
-    effectiveContextWindow,
-    measuredContextTotal,
-    conversationTokens,
-    effectiveToolCount,
-    effectiveSkillCount
-  ])
-  const showContextCapacity = canShowContextCapacity && Boolean(contextCapacity)
   const goalRuntimeStartedAtRef = useRef<number | null>(null)
   const placeholder = !runtimeReady
     ? t('runtimeActionNeedsConnection')
@@ -799,202 +553,6 @@ export function FloatingComposer({
       cancelled = true
     }
   }, [effectiveWorkspaceRoot, onWorktreeBranchChange, useWorktreePool, worktreeBranch])
-  const slashCommands = useMemo<SlashCommand[]>(() => {
-    const threadActionDisabled = !runtimeReady || busy || !activeThreadId
-    const goalActionDisabled = !canOpenGoalPanel
-    const disabledSkills = disabledSkillIdSet(disabledSkillIds)
-    const commands: SlashCommand[] = []
-    if (route !== 'claw') {
-      commands.push({
-        id: 'new',
-        title: t('slashCommandNewTitle'),
-        description: t('slashCommandNewDescription'),
-        keywords: ['create', 'new', 'thread', 'chat', '会话', '新建', ...NEW_COMMAND_ALIASES],
-        icon: <Plus className="h-4 w-4" strokeWidth={1.9} />,
-        disabled: !canCreateNewThread
-      })
-      commands.push({
-        id: 'research',
-        title: t('slashCommandResearchTitle'),
-        description: t('slashCommandResearchDescription'),
-        keywords: ['research', 'deep', 'web', 'sources', 'papers', 'evidence', ...RESEARCH_COMMAND_ALIASES],
-        icon: <Search className="h-4 w-4" strokeWidth={1.9} />,
-        disabled: !runtimeReady
-      })
-    }
-    if (onPlanCommand) {
-      commands.push({
-        id: 'plan',
-        title: t('slashCommandPlanTitle'),
-        description: t('slashCommandPlanDescription'),
-        keywords: ['plan', 'planner', 'planning', '规划', '计划'],
-        icon: <ListTodo className="h-4 w-4" strokeWidth={1.9} />
-      })
-    }
-
-    if (route !== 'claw') {
-      const dynamicSkillCommands = skillCommands
-        .filter((skill) => skill.id.trim() && skill.name.trim())
-        .filter((skill) => !disabledSkills.has(normalizeSkillCommandId(skill.id)))
-        .sort((left, right) => {
-          const leftProject = isProjectSkill(left, effectiveWorkspaceRoot)
-          const rightProject = isProjectSkill(right, effectiveWorkspaceRoot)
-          if (leftProject !== rightProject) return leftProject ? -1 : 1
-          return left.name.localeCompare(right.name)
-        })
-        .slice(0, 40)
-        .map<SlashCommand>((skill) => {
-          const prompt = `/skill:${skill.id} `
-          const scopeLabel = isProjectSkill(skill, effectiveWorkspaceRoot)
-            ? t('slashSkillScopeProject')
-            : t('slashSkillScopeGlobal')
-          const triggers = [
-            ...(skill.triggers?.commands ?? []),
-            ...(skill.triggers?.fileTypes ?? []),
-            ...(skill.triggers?.promptPatterns ?? [])
-          ]
-          return {
-            id: `skill:${skill.id}`,
-            kind: 'skill',
-            title: skill.name,
-            description: skill.description?.trim() || t('slashSkillDescriptionFallback'),
-            keywords: [skill.id, skill.name, skill.root ?? '', scopeLabel, 'skill', '技能', ...triggers],
-            icon: <Sparkles className="h-4 w-4" strokeWidth={1.9} />,
-            badge: prompt.trim(),
-            scopeLabel,
-            skillPrompt: prompt,
-            disabled: !runtimeReady
-          }
-        })
-      commands.push(...dynamicSkillCommands)
-
-      commands.push({
-        id: 'goal',
-        title: t('slashCommandGoalTitle'),
-        description: t('slashCommandGoalDescription'),
-        keywords: ['goal', 'objective', 'target', '目标', '任务'],
-        icon: <Target className="h-4 w-4" strokeWidth={1.9} />,
-        disabled: goalActionDisabled
-      })
-
-      if (onBtwCommand && !hideBtwCommand) {
-        // `/btw` is available even while the main thread is busy — the
-        // point of the command is to run a parallel aside next to a
-        // running task.
-        commands.push({
-          id: 'btw',
-          title: t('slashCommandBtwTitle'),
-          description: t('slashCommandBtwDescription'),
-          keywords: ['btw', 'by-the-way', 'aside', 'side', '顺便', '旁支'],
-          icon: <MessageCircleMore className="h-4 w-4" strokeWidth={1.9} />,
-          disabled: !runtimeReady || !activeThreadId
-        })
-      }
-
-      if (onReviewCommand) {
-        commands.push({
-          id: 'review',
-          title: t('slashCommandReviewTitle'),
-          description: t('slashCommandReviewDescription'),
-          keywords: REVIEW_COMMAND_ALIASES,
-          icon: <SearchCode className="h-4 w-4" strokeWidth={1.9} />,
-          disabled: threadActionDisabled
-        })
-      }
-
-      commands.push(
-        {
-          id: 'compact',
-          title: t('slashCommandCompactTitle'),
-          description: t('slashCommandCompactDescription'),
-          keywords: COMPACT_COMMAND_ALIASES,
-          icon: <Minimize2 className="h-4 w-4" strokeWidth={1.9} />,
-          disabled: threadActionDisabled
-        },
-        {
-          id: 'fork',
-          title: t('slashCommandForkTitle'),
-          description: t('slashCommandForkDescription'),
-          keywords: ['fork', 'branch', 'copy', '分叉', '复制'],
-          icon: <GitFork className="h-4 w-4" strokeWidth={1.9} />,
-          disabled: threadActionDisabled
-        }
-      )
-
-      if (activeThreadArchived) {
-        commands.push({
-          id: 'restore',
-          title: t('slashCommandRestoreTitle'),
-          description: t('slashCommandRestoreDescription'),
-          keywords: ['restore', 'unarchive', '恢复'],
-          icon: <RotateCcw className="h-4 w-4" strokeWidth={1.9} />,
-          disabled: threadActionDisabled
-        })
-      } else {
-        commands.push({
-          id: 'archive',
-          title: t('slashCommandArchiveTitle'),
-          description: t('slashCommandArchiveDescription'),
-          keywords: ['archive', 'hide', '归档'],
-          icon: <Archive className="h-4 w-4" strokeWidth={1.9} />,
-          disabled: threadActionDisabled
-        })
-      }
-    }
-
-    return commands
-  }, [
-    activeThreadArchived,
-    activeThreadId,
-    busy,
-    canOpenGoalPanel,
-    effectiveWorkspaceRoot,
-    hideBtwCommand,
-    onBtwCommand,
-    canCreateNewThread,
-    onPlanCommand,
-    onReviewCommand,
-    route,
-    runtimeReady,
-    skillCommands,
-    disabledSkillIds,
-    t
-  ])
-
-  const filteredSlashCommands = useMemo(() => {
-    if (slashQuery == null) return []
-    if (!slashQuery) return slashCommands
-    return slashCommands.filter((command) => {
-      const haystack = [command.id, command.title, command.description, ...command.keywords]
-      return haystack.some((part) => part.toLowerCase().includes(slashQuery))
-    })
-  }, [slashCommands, slashQuery])
-
-  const highlightedSlashCommand =
-    filteredSlashCommands.length > 0
-      ? filteredSlashCommands[Math.min(selectedCommandIndex, filteredSlashCommands.length - 1)]
-      : null
-  const highlightedSlashCommandId = highlightedSlashCommand?.id ?? null
-  const activeFileMention = useMemo<ComposerFileMention | null>(() => {
-    if (!fileReferenceEnabled || slashQuery != null || !effectiveWorkspaceRoot) return null
-    return getFileMentionAtCursor(input, composerCursor)
-  }, [composerCursor, effectiveWorkspaceRoot, fileReferenceEnabled, input, slashQuery])
-  const activeFileMentionKey = activeFileMention
-    ? `${activeFileMention.start}:${activeFileMention.query}:${activeFileMention.quoted ? 'q' : 'p'}`
-    : null
-  const showFileMentionMenu =
-    canCompose &&
-    Boolean(activeFileMention) &&
-    activeFileMentionKey !== dismissedFileMentionKey &&
-    !composerMenuOpen &&
-    !goalPanelOpen
-  const highlightedFileMention =
-    fileMentionSuggestions.length > 0
-      ? fileMentionSuggestions[Math.min(selectedFileMentionIndex, fileMentionSuggestions.length - 1)]
-      : null
-  const highlightedFileMentionKey = highlightedFileMention
-    ? composerFileReferenceKey(highlightedFileMention)
-    : null
   const parsedGoalCommand = parseGoalCommand(input)
   const goalPanelDraftObjective = getGoalPanelDraftObjective(input, goalPanelOpen)
   const canSetGoalPanelDraft =
@@ -1045,104 +603,8 @@ export function FloatingComposer({
   })
 
   useEffect(() => {
-    if (slashQuery == null || !highlightedSlashCommandId) return
-    syncComposerMenuScroll(
-      slashCommandMenuRef.current,
-      slashCommandItemRefs.current.get(highlightedSlashCommandId) ?? null
-    )
-  }, [filteredSlashCommands.length, highlightedSlashCommandId, selectedCommandIndex, slashQuery])
-
-  useEffect(() => {
-    if (!showFileMentionMenu || !highlightedFileMentionKey) return
-    syncComposerMenuScroll(
-      fileMentionMenuRef.current,
-      fileMentionItemRefs.current.get(highlightedFileMentionKey) ?? null
-    )
-  }, [fileMentionSuggestions.length, highlightedFileMentionKey, selectedFileMentionIndex, showFileMentionMenu])
-
-  useEffect(() => {
-    setSelectedCommandIndex(0)
-  }, [slashQuery])
-
-  useEffect(() => {
-    setSelectedFileMentionIndex(0)
-  }, [activeFileMentionKey])
-
-  useEffect(() => {
     if (slashQuery != null || goalPanelOpen) setComposerMenuOpen(false)
   }, [goalPanelOpen, slashQuery])
-
-  useEffect(() => {
-    if (!showFileMentionMenu || !activeFileMention || !effectiveWorkspaceRoot) {
-      setFileMentionSuggestions((current) => (current.length === 0 ? current : []))
-      setFileMentionLoading(false)
-      return
-    }
-
-    let cancelled = false
-    const query = activeFileMention.query
-    const timer = window.setTimeout(() => {
-      setFileMentionLoading(true)
-      // Resolve the index and any deep path-mention target in parallel so a
-      // deeply nested file the bounded index never reached still resolves
-      // (issue #340).
-      void Promise.all([
-        loadWorkspaceFileIndex(effectiveWorkspaceRoot),
-        loadWorkspaceMentionPathSuggestions(effectiveWorkspaceRoot, query).catch(() => [])
-      ])
-        .then(([index, pathSuggestions]) => {
-          if (cancelled) return
-          const indexedCandidates = mergeMentionCandidates(
-            extraFileMentionCandidates,
-            [...index.directories, ...index.files]
-          )
-          const candidates = mergeMentionCandidates(indexedCandidates, pathSuggestions)
-          setFileMentionSuggestions(
-            filterWorkspaceFileMentionSuggestions(candidates, query, fileReferences)
-          )
-        })
-        .catch(() => {
-          if (!cancelled) setFileMentionSuggestions([])
-        })
-        .finally(() => {
-          if (!cancelled) setFileMentionLoading(false)
-        })
-    }, 80)
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [
-    activeFileMention,
-    effectiveWorkspaceRoot,
-    extraFileMentionCandidates,
-    fileReferences,
-    showFileMentionMenu
-  ])
-
-  useEffect(() => {
-    const previous = fileMentionPresenceRef.current
-    const next = new Map<string, boolean>()
-    const removedRelativePaths: string[] = []
-
-    for (const reference of fileReferences) {
-      const isDirectory = isComposerDirectoryReference(reference)
-      const key = composerFileReferenceKey(reference)
-      const present = hasComposerFileMentionToken(input, reference.relativePath, isDirectory)
-      if (previous.get(key) === true && !present) {
-        removedRelativePaths.push(reference.relativePath)
-      }
-      next.set(key, present)
-    }
-
-    fileMentionPresenceRef.current = next
-
-    if (!onRemoveFileReference || removedRelativePaths.length === 0) return
-    for (const relativePath of removedRelativePaths) {
-      onRemoveFileReference(relativePath)
-    }
-  }, [fileReferences, input, onRemoveFileReference])
 
   useEffect(() => {
     if (!composerMenuOpen && !goalPanelOpen) return
@@ -1170,70 +632,6 @@ export function FloatingComposer({
       window.removeEventListener('keydown', onKeyDown)
     }
   }, [composerMenuOpen, goalPanelOpen])
-
-  useEffect(() => {
-    if (!showContextCapacity && contextCapacityOpen) setContextCapacityOpen(false)
-  }, [contextCapacityOpen, showContextCapacity])
-
-  useEffect(() => {
-    if (!contextCapacityOpen || !showContextCapacity) {
-      setContextCapacityPlacement(null)
-      return
-    }
-
-    const updatePlacement = (): void => {
-      const button = contextCapacityButtonRef.current
-      if (!button) return
-      setContextCapacityPlacement(
-        calculateContextCapacityPopoverPlacement({
-          anchorRect: button.getBoundingClientRect(),
-          popoverHeight: contextCapacityPopoverRef.current?.offsetHeight ?? CONTEXT_CAPACITY_POPOVER_ESTIMATED_HEIGHT,
-          viewportHeight: window.innerHeight,
-          viewportWidth: window.innerWidth,
-          coordinateScale: currentComposerBodyZoom()
-        })
-      )
-    }
-
-    updatePlacement()
-    const frame = window.requestAnimationFrame(updatePlacement)
-    window.addEventListener('resize', updatePlacement)
-    window.addEventListener('scroll', updatePlacement, true)
-    return () => {
-      window.cancelAnimationFrame(frame)
-      window.removeEventListener('resize', updatePlacement)
-      window.removeEventListener('scroll', updatePlacement, true)
-    }
-  }, [contextCapacityOpen, showContextCapacity, contextCapacity])
-
-  useEffect(() => {
-    if (!contextCapacityOpen) return
-    const onPointerDown = (event: PointerEvent): void => {
-      const target = event.target
-      if (!(target instanceof Node)) return
-      if (contextCapacityRef.current?.contains(target)) return
-      if (contextCapacityPopoverRef.current?.contains(target)) return
-      setContextCapacityOpen(false)
-    }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setContextCapacityOpen(false)
-    }
-    window.addEventListener('pointerdown', onPointerDown)
-    window.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('keydown', onKeyDown)
-    }
-  }, [contextCapacityOpen])
-
-  useEffect(() => {
-    return () => {
-      if (contextCapacityHoverCloseTimerRef.current != null) {
-        window.clearTimeout(contextCapacityHoverCloseTimerRef.current)
-        contextCapacityHoverCloseTimerRef.current = null
-      }
-    }
-  }, [])
 
   useEffect(() => {
     const shouldTimeGoal = busy && activeThreadGoal?.status === 'active'
@@ -1450,48 +848,13 @@ export function FloatingComposer({
           textarea.focus()
           const cursor = result.text.length
           textarea.setSelectionRange(cursor, cursor)
-          setComposerCursor(cursor)
+          fileMentions.setCursor(cursor)
         })
       })
       .catch((error) => {
         setPromptOptimizationError(error instanceof Error ? error.message : String(error))
       })
       .finally(() => setPromptOptimizationBusy(false))
-  }
-
-  const syncComposerCursor = (element = draft.textareaRef.current): void => {
-    if (!element) return
-    setComposerCursor(element.selectionStart ?? input.length)
-  }
-
-  const applyFileMention = (reference: ComposerFileReference | null): void => {
-    if (!reference || !activeFileMention) return
-    const next = replaceFileMentionInInput(input, activeFileMention, reference)
-    setInput(next.input)
-    onAddFileReference?.(reference)
-    setDismissedFileMentionKey(null)
-    window.requestAnimationFrame(() => {
-      const textarea = draft.textareaRef.current
-      if (!textarea) return
-      textarea.focus()
-      textarea.setSelectionRange(next.cursor, next.cursor)
-      setComposerCursor(next.cursor)
-    })
-  }
-
-  const removeFileReference = (reference: ComposerFileReference): void => {
-    onRemoveFileReference?.(reference.relativePath)
-    fileMentionPresenceRef.current.set(composerFileReferenceKey(reference), false)
-    const nextInput = removeComposerFileMentionToken(
-      input,
-      reference.relativePath,
-      isComposerDirectoryReference(reference)
-    )
-    if (nextInput !== input) {
-      setInput(nextInput)
-      window.requestAnimationFrame(() => syncComposerCursor())
-    }
-    draft.focusComposer()
   }
 
   const handlePrimaryAction = (): void => {
@@ -1585,53 +948,9 @@ export function FloatingComposer({
       event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey
     const composing = draft.isComposingEvent(event)
 
-    if (!composing && showFileMentionMenu) {
-      if (event.key === 'ArrowDown' && fileMentionSuggestions.length > 0) {
-        event.preventDefault()
-        setSelectedFileMentionIndex((current) => (current + 1) % fileMentionSuggestions.length)
-        return
-      }
-      if (event.key === 'ArrowUp' && fileMentionSuggestions.length > 0) {
-        event.preventDefault()
-        setSelectedFileMentionIndex((current) =>
-          current === 0 ? fileMentionSuggestions.length - 1 : current - 1
-        )
-        return
-      }
-      if (shouldCaptureFileMentionCommitKey(event)) {
-        event.preventDefault()
-        if (highlightedFileMention) {
-          applyFileMention(highlightedFileMention)
-        }
-        return
-      }
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        setDismissedFileMentionKey(activeFileMentionKey)
-        setFileMentionSuggestions([])
-        return
-      }
-    }
+    if (fileMentions.handleKeyDown(event, composing)) return
 
-    if (!composing && slashQuery != null) {
-      if (event.key === 'ArrowDown' && filteredSlashCommands.length > 0) {
-        event.preventDefault()
-        setSelectedCommandIndex((current) => (current + 1) % filteredSlashCommands.length)
-        return
-      }
-      if (event.key === 'ArrowUp' && filteredSlashCommands.length > 0) {
-        event.preventDefault()
-        setSelectedCommandIndex((current) =>
-          current === 0 ? filteredSlashCommands.length - 1 : current - 1
-        )
-        return
-      }
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        setInput('')
-        return
-      }
-    }
+    if (slashCommandMenu.handleKeyDown(event, composing)) return
 
     // Esc cancels a pending ask-user request. (Option picking is click-only:
     // a bare-digit accelerator would hijack the first character of a
@@ -1741,71 +1060,6 @@ export function FloatingComposer({
     draft.focusComposer()
   }
 
-  const contextCapacityPopoverStyle: CSSProperties = contextCapacityPlacement
-    ? {
-        left: `${contextCapacityPlacement.left}px`,
-        top: `${contextCapacityPlacement.top}px`,
-        width: `${contextCapacityPlacement.width}px`,
-        maxHeight: `${contextCapacityPlacement.maxHeight}px`
-      }
-    : {
-        left: 0,
-        top: 0,
-        width: `${CONTEXT_CAPACITY_POPOVER_WIDTH}px`,
-        maxHeight: `${CONTEXT_CAPACITY_POPOVER_MAX_HEIGHT}px`,
-        visibility: 'hidden'
-      }
-  const contextCapacityPortal =
-    contextCapacityOpen && contextCapacity && typeof document !== 'undefined'
-      ? createPortal(
-          <div
-            ref={contextCapacityPopoverRef}
-            className="ds-no-drag fixed z-[1000]"
-            style={contextCapacityPopoverStyle}
-            data-context-capacity-popover
-            onMouseEnter={() => {
-              if (contextCapacityHoverCloseTimerRef.current != null) {
-                window.clearTimeout(contextCapacityHoverCloseTimerRef.current)
-                contextCapacityHoverCloseTimerRef.current = null
-              }
-            }}
-            onMouseLeave={() => {
-              if (contextCapacityHoverCloseTimerRef.current != null) {
-                window.clearTimeout(contextCapacityHoverCloseTimerRef.current)
-              }
-              contextCapacityHoverCloseTimerRef.current = window.setTimeout(() => {
-                contextCapacityHoverCloseTimerRef.current = null
-                setContextCapacityOpen(false)
-              }, 120)
-            }}
-          >
-            <ContextCapacityPopover
-              capacity={contextCapacity}
-              style={{ width: '100%', maxHeight: 'inherit', overflowY: 'auto' }}
-            />
-          </div>,
-          document.body
-        )
-      : null
-  const contextCapacityChipPercent = contextCapacity ? formatPercent(contextCapacity.usedRatio) : ''
-  const openContextCapacityPreview = (): void => {
-    if (!showContextCapacity) return
-    if (contextCapacityHoverCloseTimerRef.current != null) {
-      window.clearTimeout(contextCapacityHoverCloseTimerRef.current)
-      contextCapacityHoverCloseTimerRef.current = null
-    }
-    setContextCapacityOpen(true)
-  }
-  const closeContextCapacityPreviewSoon = (): void => {
-    if (contextCapacityHoverCloseTimerRef.current != null) {
-      window.clearTimeout(contextCapacityHoverCloseTimerRef.current)
-    }
-    contextCapacityHoverCloseTimerRef.current = window.setTimeout(() => {
-      contextCapacityHoverCloseTimerRef.current = null
-      setContextCapacityOpen(false)
-    }, 120)
-  }
-
   return (
     <div
       ref={composerRootRef}
@@ -1813,7 +1067,6 @@ export function FloatingComposer({
         ? 'ds-floating-composer ds-no-drag pointer-events-auto w-full pb-0 pt-0'
         : 'ds-floating-composer ds-no-drag ds-chat-column-inset ds-chat-content-max-width pointer-events-auto w-full pb-3 pt-0'}
     >
-      {contextCapacityPortal}
       <FloatingComposerQueuedMessages
         messages={queuedMessages}
         onRemove={onRemoveQueuedMessage}
@@ -2017,139 +1270,22 @@ export function FloatingComposer({
         ) : null}
 
         {slashQuery != null ? (
-          <div className="ds-card-strong absolute bottom-full left-1/2 z-30 mb-2 w-[calc(100%_-_1rem)] max-w-[760px] -translate-x-1/2 overflow-hidden rounded-[16px] p-1.5 shadow-[0_18px_46px_rgba(20,47,95,0.14)]">
-            <div className="flex h-7 items-center px-2.5 text-[11.5px] font-semibold text-ds-muted">
-              {t('slashCommandMenuTitle')}
-            </div>
-            {filteredSlashCommands.length > 0 ? (
-              <div
-                ref={slashCommandMenuRef}
-                className="flex max-h-[min(300px,calc(100vh-260px))] flex-col gap-0.5 overflow-y-auto pr-1"
-              >
-                {filteredSlashCommands.map((command) => {
-                  const active = highlightedSlashCommand?.id === command.id
-                  return (
-                    <button
-                      key={command.id}
-                      ref={(node) => {
-                        if (node) slashCommandItemRefs.current.set(command.id, node)
-                        else slashCommandItemRefs.current.delete(command.id)
-                      }}
-                      type="button"
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => applySlashCommand(command.id)}
-                      disabled={command.disabled}
-                      className={`flex min-h-[52px] w-full items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${
-                        active && !command.disabled
-                          ? 'bg-ds-hover text-ds-ink shadow-[inset_0_0_0_1px_rgba(20,47,95,0.06)]'
-                          : 'text-ds-muted hover:bg-ds-hover hover:text-ds-ink disabled:hover:bg-transparent disabled:hover:text-ds-muted'
-                      }`}
-                    >
-                      <span
-                        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] ${
-                          active && !command.disabled ? 'bg-white text-accent shadow-sm dark:bg-ds-card' : 'bg-ds-hover text-ds-muted'
-                        }`}
-                      >
-                        {command.icon}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13.5px] font-semibold leading-5 text-inherit">
-                          {command.title}
-                        </span>
-                        <span className="mt-0.5 block truncate text-[12px] leading-4 text-ds-faint">
-                          {command.description}
-                        </span>
-                      </span>
-                      <span className="hidden min-w-[106px] shrink-0 flex-col items-end gap-1 sm:flex">
-                        {command.scopeLabel ? (
-                          <span className="text-[10.5px] font-semibold leading-none text-ds-muted">
-                            {command.scopeLabel}
-                          </span>
-                        ) : null}
-                        <span className="max-w-[150px] truncate rounded-full border border-ds-border-muted px-2 py-0.5 text-[10.5px] font-semibold leading-4 text-ds-faint">
-                          {command.badge ?? `/${command.id}`}
-                        </span>
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className="rounded-[12px] border border-dashed border-ds-border-muted px-3 py-3 text-[12px] text-ds-faint">
-                {t('slashCommandEmpty')}
-              </div>
-            )}
-          </div>
+          <FloatingComposerSlashCommandMenu
+            commands={filteredSlashCommands}
+            highlighted={highlightedSlashCommand}
+            selectedIndex={slashCommandMenu.selectedIndex}
+            onSelect={applySlashCommand}
+          />
         ) : null}
 
-        {showFileMentionMenu ? (
-          <div className="ds-card-strong absolute bottom-full left-1/2 z-30 mb-2 w-[calc(100%_-_1rem)] max-w-[680px] -translate-x-1/2 overflow-hidden rounded-[16px] p-1.5 shadow-[0_18px_46px_rgba(20,47,95,0.14)]">
-            <div className="flex h-7 items-center gap-2 px-2.5 text-[11.5px] font-semibold text-ds-muted">
-              <FileText className="h-3.5 w-3.5 text-ds-faint" strokeWidth={1.9} />
-              <span>{t('composerFileMentionMenuTitle')}</span>
-              {fileMentionLoading ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-ds-faint" strokeWidth={1.9} />
-              ) : null}
-            </div>
-            {fileMentionSuggestions.length > 0 ? (
-              <div
-                ref={fileMentionMenuRef}
-                className="flex max-h-[min(280px,calc(100vh-260px))] flex-col gap-0.5 overflow-y-auto pr-1"
-              >
-                {fileMentionSuggestions.map((reference) => {
-                  const isDirectory = isComposerDirectoryReference(reference)
-                  const referenceKey = composerFileReferenceKey(reference)
-                  const active =
-                    highlightedFileMention?.relativePath === reference.relativePath &&
-                    highlightedFileMention?.type === reference.type
-                  return (
-                    <button
-                      key={`${reference.type ?? 'file'}:${reference.relativePath}`}
-                      ref={(node) => {
-                        if (node) fileMentionItemRefs.current.set(referenceKey, node)
-                        else fileMentionItemRefs.current.delete(referenceKey)
-                      }}
-                      type="button"
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => applyFileMention(reference)}
-                      className={`flex min-h-[46px] w-full items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-left transition ${
-                        active
-                          ? 'bg-ds-hover text-ds-ink shadow-[inset_0_0_0_1px_rgba(20,47,95,0.06)]'
-                          : 'text-ds-muted hover:bg-ds-hover hover:text-ds-ink'
-                      }`}
-                    >
-                      <span
-                        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] ${
-                          active ? 'bg-white text-accent shadow-sm dark:bg-ds-card' : 'bg-ds-hover text-ds-muted'
-                        }`}
-                      >
-                        {isDirectory ? (
-                          <Folder className="h-4 w-4" strokeWidth={1.8} />
-                        ) : (
-                          <FileText className="h-4 w-4" strokeWidth={1.8} />
-                        )}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13.5px] font-semibold leading-5 text-inherit">
-                          {isDirectory ? `${reference.name}/` : reference.name}
-                        </span>
-                        <span className="mt-0.5 block truncate text-[12px] leading-4 text-ds-faint">
-                          {isDirectory ? `${reference.relativePath}/` : reference.relativePath}
-                        </span>
-                      </span>
-                      <span className="hidden max-w-[170px] shrink-0 truncate rounded-full border border-ds-border-muted px-2 py-0.5 text-[10.5px] font-semibold leading-4 text-ds-faint sm:block">
-                        {formatComposerFileMentionToken(reference.relativePath, isDirectory)}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className="rounded-[12px] border border-dashed border-ds-border-muted px-3 py-3 text-[12px] text-ds-faint">
-                {fileMentionLoading ? t('composerFileMentionLoading') : t('composerFileMentionEmpty')}
-              </div>
-            )}
-          </div>
+        {fileMentions.showMenu ? (
+          <FloatingComposerFileMentionMenu
+            suggestions={fileMentions.suggestions}
+            loading={fileMentions.loading}
+            selectedIndex={fileMentions.selectedIndex}
+            highlighted={fileMentions.highlighted}
+            onSelect={fileMentions.applyReference}
+          />
         ) : null}
 
         {goalPanelOpen && slashQuery == null && !pendingUserInputBlock ? (
@@ -2355,11 +1491,12 @@ export function FloatingComposer({
             value={input}
             disabled={!canEditComposer}
             onChange={(e) => {
-              setInput(e.target.value)
-              setComposerCursor(e.target.selectionStart ?? e.target.value.length)
-              setDismissedFileMentionKey(null)
+              fileMentions.updateInput(
+                e.target.value,
+                e.target.selectionStart ?? e.target.value.length
+              )
             }}
-            onSelect={(e) => syncComposerCursor(e.currentTarget)}
+            onSelect={(e) => fileMentions.syncCursor(e.currentTarget)}
             onFocus={draft.onFocus}
             onBlur={draft.onBlur}
             onCompositionStart={draft.onCompositionStart}
@@ -2386,7 +1523,7 @@ export function FloatingComposer({
                     {onRemoveFileReference ? (
                       <button
                         type="button"
-                        onClick={() => removeFileReference(reference)}
+                        onClick={() => fileMentions.removeReference(reference)}
                         className="rounded-full p-0.5 text-ds-faint transition hover:bg-ds-hover hover:text-ds-ink"
                         aria-label={t('composerRemoveFileReference')}
                         title={t('composerRemoveFileReference')}
@@ -2512,54 +1649,15 @@ export function FloatingComposer({
                 </>
               ) : (
                 <>
-                  {showContextCapacity && contextCapacity ? (
-                    <div className="relative shrink-0" ref={contextCapacityRef}>
-                      <button
-                        ref={contextCapacityButtonRef}
-                        type="button"
-                        onClick={openContextCapacityPreview}
-                        onFocus={openContextCapacityPreview}
-                        onBlur={closeContextCapacityPreviewSoon}
-                        onMouseEnter={openContextCapacityPreview}
-                        onMouseLeave={closeContextCapacityPreviewSoon}
-                        className="ds-composer-context ds-no-drag inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-transparent text-ds-muted transition hover:bg-ds-hover hover:text-ds-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
-                        aria-label={t('contextCapacityChipAria', {
-                          percent: contextCapacityChipPercent
-                        })}
-                        aria-expanded={contextCapacityOpen}
-                        aria-haspopup="dialog"
-                      >
-                        <svg
-                          className="h-5 w-5 -rotate-90 shrink-0"
-                          viewBox={`0 0 ${CONTEXT_CAPACITY_RING_SIZE} ${CONTEXT_CAPACITY_RING_SIZE}`}
-                          aria-hidden="true"
-                        >
-                          <circle
-                            cx={CONTEXT_CAPACITY_RING_SIZE / 2}
-                            cy={CONTEXT_CAPACITY_RING_SIZE / 2}
-                            r={CONTEXT_CAPACITY_RING_RADIUS}
-                            fill="none"
-                            stroke="var(--ds-surface-subtle)"
-                            strokeWidth={CONTEXT_CAPACITY_RING_STROKE}
-                          />
-                          <circle
-                            cx={CONTEXT_CAPACITY_RING_SIZE / 2}
-                            cy={CONTEXT_CAPACITY_RING_SIZE / 2}
-                            r={CONTEXT_CAPACITY_RING_RADIUS}
-                            fill="none"
-                            stroke={contextCapacityColor(contextCapacity.usedRatio)}
-                            strokeWidth={CONTEXT_CAPACITY_RING_STROKE}
-                            strokeLinecap="round"
-                            strokeDasharray={CONTEXT_CAPACITY_RING_CIRCUMFERENCE}
-                            strokeDashoffset={
-                              CONTEXT_CAPACITY_RING_CIRCUMFERENCE *
-                              (1 - Math.min(1, Math.max(0, contextCapacity.usedRatio)))
-                            }
-                          />
-                        </svg>
-                      </button>
-                    </div>
-                  ) : null}
+                  <FloatingComposerContextCapacity
+                    compact={compact}
+                    route={route}
+                    activeThreadId={activeThreadId}
+                    lastTurnInputTokens={lastTurnInputTokens}
+                    contextWindowTokens={contextWindowTokens}
+                    runtimeToolCount={runtimeToolCount}
+                    runtimeSkillCount={runtimeSkillCount}
+                  />
                   {hideModelPicker ? null : (
                     <FloatingComposerModelPicker
                       compact={compact}

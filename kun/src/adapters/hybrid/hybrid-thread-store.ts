@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type { Database as BetterSqliteDatabase, Statement } from 'better-sqlite3'
 import type {
@@ -10,7 +10,6 @@ import type {
   ThreadTodoList,
   ThreadSummary
 } from '../../contracts/threads.js'
-import { ThreadSchema } from '../../contracts/threads.js'
 import type { RuntimeEvent } from '../../contracts/events.js'
 import type { TurnItem } from '../../contracts/items.js'
 import type { ApprovalPolicy, SandboxMode } from '../../contracts/policy.js'
@@ -24,12 +23,8 @@ import {
   UsageSnapshotSchema,
   type UsageSnapshot
 } from '../../contracts/usage.js'
-import {
-  hydrateThreadItems,
-  normalizeThreadMetadata,
-  stripThreadItemBodies,
-  type ThreadMetadataLine
-} from './hybrid-thread-projection.js'
+import { stripThreadItemBodies, type ThreadMetadataLine } from './hybrid-thread-projection.js'
+import { HybridThreadDocumentRepository } from './hybrid-thread-documents.js'
 
 type ThreadRow = {
   id: string
@@ -98,18 +93,14 @@ export class HybridThreadStore implements ThreadStore {
   // Prepared-statement cache for the per-event hot paths; better-sqlite3
   // re-compiles the SQL on every prepare() call otherwise.
   private readonly statementCache = new Map<string, Statement>()
-  // Reconstructed thread records keyed by the file signatures they were built
-  // from. Thread detail requests re-read multi-megabyte JSONL files otherwise.
-  private readonly threadRecordCache = new Map<
-    string,
-    { metadataSig: string; itemsSig: string; record: ThreadRecord }
-  >()
+  private readonly documents: HybridThreadDocumentRepository
   // Per-thread floor that keeps metadata compaction from re-running on every
   // append when a single snapshot is already larger than the threshold.
   private readonly metadataCompactFloor = new Map<string, number>()
 
   constructor(options: { dataDir: string; sqlitePath?: string; nowIso?: () => string }) {
     this.dataDir = resolve(options.dataDir, 'threads')
+    this.documents = new HybridThreadDocumentRepository(options.dataDir)
     this.sqlitePath = resolve(options.sqlitePath ?? join(options.dataDir, 'index.sqlite3'))
     this.nowIso = options.nowIso ?? (() => new Date().toISOString())
     this.readyPromise = this.initialize()
@@ -191,7 +182,7 @@ export class HybridThreadStore implements ThreadStore {
     }
     await rm(dir, { recursive: true, force: true })
     this.deleteIndexRow(threadId)
-    this.threadRecordCache.delete(threadId)
+    this.documents.invalidate(threadId)
     this.metadataCompactFloor.delete(threadId)
     return true
   }
@@ -704,77 +695,11 @@ export class HybridThreadStore implements ThreadStore {
   }
 
   private async readThreadFromDisk(threadId: string): Promise<ThreadRecord | null> {
-    const [metadataSig, itemsSig] = await Promise.all([
-      fileSignature(this.metadataPath(threadId)),
-      fileSignature(this.messagesPath(threadId))
-    ])
-    const cached = this.threadRecordCache.get(threadId)
-    if (cached && cached.metadataSig === metadataSig && cached.itemsSig === itemsSig) {
-      // Refresh LRU position.
-      this.threadRecordCache.delete(threadId)
-      this.threadRecordCache.set(threadId, cached)
-      return cached.record
-    }
-    const metadata = await this.readLatestMetadata(threadId)
-    const legacy = metadata ? null : await this.readLegacyThread(threadId)
-    const source = metadata ?? legacy
-    if (!source) return null
-    const items = await this.loadItems(threadId)
-    // Records are treated as immutable by all callers (updates flow through
-    // upsert with fresh objects), so caching the reference is safe.
-    const record = hydrateThreadItems(source, items, {
-      preserveExistingItemsWhenNoFileItems: Boolean(legacy)
-    })
-    this.threadRecordCache.set(threadId, { metadataSig, itemsSig, record })
-    while (this.threadRecordCache.size > THREAD_RECORD_CACHE_LIMIT) {
-      const oldest = this.threadRecordCache.keys().next().value
-      if (!oldest) break
-      this.threadRecordCache.delete(oldest)
-    }
-    return record
+    return this.documents.readThread(threadId)
   }
 
   private async readLatestMetadata(threadId: string): Promise<ThreadRecord | null> {
-    const entries = await readJsonl<ThreadMetadataLine>(this.metadataPath(threadId))
-    for (let index = entries.length - 1; index >= 0; index -= 1) {
-      const entry = entries[index]
-      if (entry?.kind !== 'thread_metadata' || entry.thread?.id !== threadId) continue
-      const parsed = ThreadSchema.safeParse(entry.thread)
-      if (parsed.success) {
-        return normalizeThreadMetadata(parsed.data, entries.slice(0, index + 1))
-      }
-    }
-    return null
-  }
-
-  private async readLegacyThread(threadId: string): Promise<ThreadRecord | null> {
-    try {
-      const raw = await readFile(this.legacyThreadPath(threadId), 'utf-8')
-      const parsed = ThreadSchema.safeParse(JSON.parse(raw))
-      return parsed.success ? parsed.data : null
-    } catch {
-      return null
-    }
-  }
-
-  private async loadItems(threadId: string): Promise<TurnItem[]> {
-    const raw = await readJsonl<TurnItem>(this.messagesPath(threadId))
-    const latestById = new Map<string, TurnItem>()
-    for (const item of raw) {
-      latestById.set(item.id, item)
-    }
-    const seen = new Set<string>()
-    // Keep the latest occurrence for each id while walking newest→oldest,
-    // then reverse once. Repeated unshift made a cold hybrid restore O(n²)
-    // and could block the serve event loop on long message histories.
-    const ordered: TurnItem[] = []
-    for (let index = raw.length - 1; index >= 0; index -= 1) {
-      const item = raw[index]
-      if (!item || seen.has(item.id)) continue
-      seen.add(item.id)
-      ordered.push(latestById.get(item.id)!)
-    }
-    return ordered.reverse()
+    return this.documents.readLatestMetadata(threadId)
   }
 
   private async noteEventHighWater(threadId: string, seq: number): Promise<void> {
@@ -827,27 +752,23 @@ export class HybridThreadStore implements ThreadStore {
 
   private threadDir(threadId: string): string {
     assertSafeThreadId(threadId)
-    const path = resolve(this.dataDir, threadId)
-    if (!path.startsWith(`${this.dataDir}/`)) {
-      throw new Error(`thread path escapes data directory: ${threadId}`)
-    }
-    return path
+    return this.documents.threadDir(threadId)
   }
 
   private metadataPath(threadId: string): string {
-    return join(this.threadDir(threadId), 'metadata.jsonl')
+    return this.documents.metadataPath(threadId)
   }
 
   private legacyThreadPath(threadId: string): string {
-    return join(this.threadDir(threadId), 'thread.json')
+    return this.documents.legacyThreadPath(threadId)
   }
 
   private messagesPath(threadId: string): string {
-    return join(this.threadDir(threadId), 'messages.jsonl')
+    return this.documents.messagesPath(threadId)
   }
 
   private eventsPath(threadId: string): string {
-    return join(this.threadDir(threadId), 'events.jsonl')
+    return this.documents.eventsPath(threadId)
   }
 }
 
@@ -1165,17 +1086,7 @@ function addColumnIfMissing(db: BetterSqliteDatabase, table: string, columnSql: 
   }
 }
 
-const THREAD_RECORD_CACHE_LIMIT = 8
 const METADATA_COMPACT_MIN_BYTES = 1_000_000
-
-async function fileSignature(path: string): Promise<string> {
-  try {
-    const stats = await stat(path)
-    return `${stats.size}:${stats.mtimeMs}`
-  } catch {
-    return 'missing'
-  }
-}
 
 async function appendJsonlLine(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true })

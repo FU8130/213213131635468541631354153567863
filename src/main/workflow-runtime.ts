@@ -4,7 +4,6 @@ import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { isAbsolute, join, resolve } from 'node:path'
-import { URL } from 'node:url'
 import { compileFunction, runInNewContext } from 'node:vm'
 import type {
   AppSettingsV1,
@@ -13,7 +12,6 @@ import type {
   WorkflowCustomModuleV1,
   WorkflowConnectionV1,
   WorkflowEnvVarV1,
-  WorkflowHttpRequestConfigV1,
   WorkflowInputFieldV1,
   WorkflowApprovalDecision,
   WorkflowNodeRunResultV1,
@@ -59,13 +57,13 @@ import {
   type WorkflowPayload
 } from './workflow-expression'
 import { executeCoreWorkflowNode } from './workflow-core-node-adapter'
+import { executeHttpWorkflowNode } from './workflow-http-node-adapter'
 
 const MAX_NODE_EXECUTIONS = 200
 const MAX_RUN_DURATION_MS = 30 * 60_000
 /** Sentinel branch that matches no output handle (e.g. switch with no rule + no fallback). */
 const NO_BRANCH = '__none__'
 const AI_NODE_RESPONSE_TIMEOUT_MS = 30 * 60_000
-const HTTP_MAX_RESPONSE_BYTES = 5_000_000
 const LIVE_STATUS_LINGER_MS = 8_000
 
 type ScheduleTriggerNode = Extract<WorkflowNodeV1, { type: 'schedule-trigger' }>
@@ -198,78 +196,6 @@ function buildAdjacency(connections: WorkflowConnectionV1[]): Map<string, Workfl
     map.set(edge.source, list)
   }
   return map
-}
-
-async function readBodyCapped(response: Response, limit: number): Promise<string> {
-  const body = response.body
-  if (!body) return response.text()
-  const reader = body.getReader()
-  const chunks: Buffer[] = []
-  let size = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    if (value) {
-      size += value.length
-      if (size > limit) {
-        await reader.cancel()
-        throw new Error('Response body exceeds the 5MB limit.')
-      }
-      chunks.push(Buffer.from(value))
-    }
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
-
-async function runHttpNode(
-  config: WorkflowHttpRequestConfigV1,
-  payload: WorkflowPayload,
-  scope?: InterpScope
-): Promise<NodeOutcome> {
-  const url = interpolate(config.url, payload, scope).trim()
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error(`Invalid URL: ${url || '(empty)'}`)
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('Only http(s) URLs are allowed.')
-  }
-  const headers: Record<string, string> = {}
-  for (const header of config.headers) {
-    const key = header.key.trim()
-    if (key) headers[key] = interpolate(header.value, payload, scope)
-  }
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
-  try {
-    const init: RequestInit = { method: config.method, headers, signal: controller.signal }
-    if (config.method !== 'GET' && config.method !== 'DELETE' && config.body.trim()) {
-      init.body = interpolate(config.body, payload, scope)
-    }
-    const response = await fetch(url, init)
-    const raw = await readBodyCapped(response, HTTP_MAX_RESPONSE_BYTES)
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${raw.slice(0, 500)}`)
-    }
-    let json: unknown = { status: response.status, body: raw }
-    if (config.parseJson) {
-      try {
-        json = JSON.parse(raw)
-      } catch {
-        json = { status: response.status, body: raw }
-      }
-    }
-    return { payload: { json, text: raw }, message: `${response.status} ${response.statusText}`.trim() }
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Request timed out after ${config.timeoutMs}ms.`)
-    }
-    throw error
-  } finally {
-    clearTimeout(timer)
-  }
 }
 
 const CODE_TIMEOUT_MS = 2_000
@@ -1915,7 +1841,7 @@ export class WorkflowRuntime {
         return { payload: { json: { count: items.length }, text: safeJson({ count: items.length }) }, message: `count ${items.length}` }
       }
       case 'http-request':
-        return runHttpNode(node.config, payload, scope)
+        return executeHttpWorkflowNode(node.config, payload, scope)
       case 'delay':
         await sleep(node.config.delayMs)
         return { payload, message: `Waited ${node.config.delayMs}ms` }

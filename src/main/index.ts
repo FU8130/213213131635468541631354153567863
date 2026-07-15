@@ -229,6 +229,17 @@ if (runningClawScheduleMcpServer && process.platform === 'darwin') {
 // whenReady 副作用污染。
 configureAppIdentity()
 
+// 🧳 便携模式：exe 同级有 portable.txt 则数据存到 exe 同级 data 目录
+const exeDir = dirname(app.getPath('exe'))
+const portableFlagFile = join(exeDir, 'portable.txt')
+if (process.env.KUN_PORTABLE || process.argv.includes('--portable') || require('node:fs').existsSync(portableFlagFile)) {
+  const dataDir = process.env.KUN_PORTABLE_DATA || join(exeDir, 'data')
+  app.setPath('userData', dataDir)
+  app.setPath('appData', dataDir)
+  app.setPath('sessionData', dataDir)
+  console.warn(`[kun-gui] portable mode: userData → ${dataDir}`)
+}
+
 // 紧跟在身份设置之后、requestSingleInstanceLock() 之前做旧数据迁移:
 // 单实例锁文件就放在 userData 里,必须先把目录定下来。rename 失败
 // (典型场景:老版本还在运行)时退回旧目录,功能不受影响,下次再迁。
